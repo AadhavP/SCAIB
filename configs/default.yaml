@@ -1,0 +1,27 @@
+app_name: "agent-evals"
+environment: "development"
+debug: true
+log_level: "INFO"
+log_json: false
+
+api:
+  host: "127.0.0.1"
+  port: 8000
+  cors_origins:
+    - "http://localhost:3000"
+    - "http://127.0.0.1:8000"
+
+storage:
+  data_dir: "./data"
+  reports_dir: "./reports_output"
+  cache_dir: "./.cache"
+
+sandbox:
+  timeout_seconds: 300
+  max_memory_gb: 16
+  allowed_imports:
+    - "scanpy"
+    - "anndata"
+    - "numpy"
+    - "pandas"
+    - "scipy"

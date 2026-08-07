@@ -1,0 +1,404 @@
+schema_version: 1.0.0
+metadata:
+  id: pbmc-cell-annotation
+  title: PBMC Cell-Type Annotation
+  description: >-
+    Evaluate whether an agent can construct a reproducible single-cell RNA-seq
+    annotation workflow and assign biologically defensible cell-type labels to
+    peripheral blood mononuclear cells.
+  version: 1.0.0
+  authors:
+    - name: Agent Evals Single-Cell Working Group
+      institution: Open Research Infrastructure Consortium
+      role: benchmark authors
+  license: CC-BY-4.0
+  tags: [single-cell, annotation, pbmc, transcriptomics]
+  domains: [computational-biology, cell-atlas]
+  references: [pbmc68k-paper, scanpy-paper, leiden-paper]
+references:
+  - id: pbmc68k-paper
+    title: "The circulating immune cell atlas: PBMC 68k"
+    authors: [Zheng et al.]
+    doi: 10.1038/nmeth.4292
+  - id: scanpy-paper
+    title: "Scanpy: large-scale single-cell gene expression data analysis"
+    authors: [Wolf et al.]
+    doi: 10.1101/2017.08.11.206904
+  - id: leiden-paper
+    title: "From Louvain to Leiden: guaranteeing well-connected communities"
+    authors: [Traag et al.]
+    doi: 10.1038/s41598-019-41695-z
+datasets:
+  - id: pbmc68k
+    name: 10x Genomics PBMC 68k
+    description: >-
+      Public peripheral blood mononuclear cell transcriptomes with a curated
+      cell-type label set suitable for unsupervised and supervised annotation.
+    source: 10x Genomics public datasets
+    source_url: https://www.10xgenomics.com/resources/datasets/8-k-pbm-cs-from-a-healthy-donor-1-standard-1-1-0
+    organism: Homo sapiens
+    modality: scRNA-seq
+    format: h5ad
+    citation: [pbmc68k-paper]
+    license: public research use
+    expected_observations:
+      cells: 68579
+      genes: 32738
+      labeled_cell_types: 11
+    recommended_tasks: [cell-annotation]
+observations:
+  - id: current-anndata
+    name: Current AnnData object
+    description: Expression matrix and cell metadata after the latest accepted action.
+    type: anndata
+    source: task workspace
+    required: true
+    schema: {layers: [X], obs: [cell_id], var: [gene_id]}
+  - id: qc-statistics
+    name: Quality-control statistics
+    description: Per-cell counts, detected genes, and mitochondrial fraction.
+    type: table
+    source: qc action output
+    required: true
+    schema: {columns: [total_counts, n_genes_by_counts, pct_counts_mt]}
+  - id: pipeline-history
+    name: Pipeline history
+    description: Ordered record of accepted actions, parameters, and artifact references.
+    type: event_log
+    source: environment
+    required: true
+  - id: available-tools
+    name: Available tools
+    description: Interfaces exposed by the execution environment for this task.
+    type: tool_catalog
+    source: environment
+    required: true
+actions:
+  - id: qc
+    name: Quality control
+    purpose: Calculate and apply declared cell and gene quality filters.
+    parameters:
+      - name: min_genes
+        description: Minimum number of detected genes per cell.
+        type: integer
+        required: false
+        default: 200
+        minimum: 0
+      - name: max_mito_fraction
+        description: Maximum mitochondrial transcript fraction.
+        type: number
+        required: false
+        default: 0.2
+        minimum: 0
+        maximum: 1
+    required_inputs: [current-anndata]
+    expected_outputs: [qc-table]
+    estimated_cost: {cpu_seconds: 30, memory_mb: 2048, complexity: linear_in_cells}
+  - id: normalize
+    name: Normalize and log transform
+    purpose: Produce a comparable expression representation for downstream analysis.
+    parameters:
+      - name: target_sum
+        description: Library-size target for per-cell normalization.
+        type: number
+        required: false
+        default: 10000
+        minimum: 1
+    required_inputs: [current-anndata, qc-statistics]
+    expected_outputs: [normalized-anndata]
+    estimated_cost: {cpu_seconds: 45, memory_mb: 4096, complexity: linear_in_nonzero_entries}
+  - id: marker-genes
+    name: Find marker genes
+    purpose: Identify genes that distinguish candidate cell populations.
+    parameters:
+      - name: group_key
+        description: Observation column defining candidate groups.
+        type: string
+        required: true
+    required_inputs: [current-anndata]
+    expected_outputs: [marker-table]
+    estimated_cost: {cpu_seconds: 180, memory_mb: 8192, complexity: quadratic_in_groups}
+  - id: annotate
+    name: Annotate cell types
+    purpose: Assign a cell-type label to every retained cell with supporting evidence.
+    parameters:
+      - name: label_vocabulary
+        description: Controlled vocabulary of permitted cell-type labels.
+        type: list[string]
+        required: true
+        constraints: {must_cover_all_cells: true}
+    required_inputs: [current-anndata, marker-table]
+    expected_outputs: [annotated-anndata]
+    estimated_cost: {cpu_seconds: 60, memory_mb: 4096, complexity: analyst_defined}
+metrics:
+  - id: annotation-accuracy
+    name: Cell-type annotation accuracy
+    description: Fraction of held-out cells assigned their reference cell type.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: identity
+    contributes_to_reward: true
+  - id: annotation-macro-f1
+    name: Macro F1
+    description: Class-balanced F1 over the reference cell-type vocabulary.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: identity
+    contributes_to_reward: true
+  - id: annotation_ari
+    name: Adjusted Rand index
+    description: Agreement between observed cell-type labels and the available cluster labels.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    normalization: identity
+  - id: annotation_nmi
+    name: Normalized mutual information
+    description: Information agreement between observed cell-type labels and cluster labels.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    normalization: identity
+  - id: annotation_silhouette
+    name: Annotation silhouette
+    description: Separation of available cluster labels in the PCA or UMAP representation.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    normalization: identity
+  - id: cell_annotation.macro_f1
+    name: Versioned annotation macro F1
+    description: Class-balanced F1 from the versioned scientific metric registry.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.mcc
+    name: Versioned annotation MCC
+    description: Multiclass Matthews correlation coefficient.
+    direction: higher_is_better
+    expected_range: {minimum: -1, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    native_min: -1
+    native_max: 1
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.balanced_accuracy
+    name: Versioned balanced accuracy
+    description: Class-balanced accuracy over reference labels.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.rare_recall
+    name: Versioned rare-class recall
+    description: Recall for the least frequent reference classes.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.accuracy
+    name: Versioned annotation accuracy
+    description: Exact cell-level agreement with reference labels.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.ece
+    name: Versioned expected calibration error
+    description: Calibration error when candidate confidence is available.
+    direction: lower_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: secondary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.per_class_precision
+    name: Per-class precision diagnostic
+    description: Per-class precision vector retained as diagnostic evidence.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: none
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: diagnostic
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.per_class_recall
+    name: Per-class recall diagnostic
+    description: Per-class recall vector retained as diagnostic evidence.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: none
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: diagnostic
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.confusion_matrix
+    name: Confusion matrix diagnostic
+    description: Label confusion matrix retained as diagnostic evidence.
+    direction: higher_is_better
+    aggregation: none
+    normalization: none
+    version: '1.0'
+    category: cell_annotation
+    role: diagnostic
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.coverage
+    name: Annotation coverage diagnostic
+    description: Fraction of candidate cells with a non-null label.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: diagnostic
+    computation_backend: native
+    required_artifacts: [prediction]
+  - id: runtime
+    name: Wall-clock runtime
+    description: Elapsed execution time for the complete task.
+    direction: lower_is_better
+    expected_range: {minimum: 0}
+    aggregation: sum
+    normalization: log_scale
+    unit: seconds
+    contributes_to_reward: true
+metric_groups:
+  - group_id: cell_annotation_quality
+    aggregation: weighted_mean
+    minimum_required: 5
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: cell_annotation.macro_f1, weight: 0.35, role: primary}
+      - {metric_id: cell_annotation.mcc, weight: 0.25, role: primary}
+      - {metric_id: cell_annotation.rare_recall, weight: 0.20, role: primary}
+      - {metric_id: cell_annotation.balanced_accuracy, weight: 0.10, role: primary}
+      - {metric_id: cell_annotation.accuracy, weight: 0.10, role: primary}
+  - group_id: cell_annotation_calibration
+    aggregation: weighted_mean
+    minimum_required: 1
+    contributes_to_primary: false
+    metrics:
+      - {metric_id: cell_annotation.ece, weight: 1.0, role: secondary}
+decision_evaluation:
+  qc_strategy:
+    allowed_methods: [qc_filter, mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+    expected_inputs: [current-anndata, qc-statistics]
+    alternatives: [mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+    metrics: [artifact_removal, biological_retention, rare_population_preservation]
+    parameter_ranges:
+      min_genes: {minimum: 0, maximum: 2000}
+      max_mito_fraction: {minimum: 0, maximum: 1}
+  normalization:
+    allowed_methods: [normalize, log_normalize, scran]
+    expected_inputs: [current-anndata, qc-statistics]
+    alternatives: [normalize, log_normalize, scran]
+    metrics: [library_size_stability, downstream_separation]
+    parameter_ranges:
+      target_sum: {minimum: 1, maximum: 1000000}
+  integration:
+    allowed_methods: [harmony, scanorama, scvi]
+    expected_inputs: [normalized-anndata, batch-labels]
+    alternatives: [harmony, scanorama, scvi]
+    metrics: [batch_removal, biology_preservation]
+  annotation:
+    allowed_methods: [marker_based, reference_mapping, supervised_classifier]
+    expected_inputs: [normalized-anndata, marker-table]
+    alternatives: [marker_based, reference_mapping, supervised_classifier]
+    metrics: [macro_f1, rare_recall, calibration]
+rewards:
+  - id: annotation-reward
+    name: Annotation utility reward
+    description: Favor accurate, class-balanced annotations while penalizing slow workflows.
+    components:
+      - {metric: annotation-accuracy, weight: 0.55}
+      - {metric: annotation-macro-f1, weight: 0.35}
+      - {metric: runtime, weight: -0.10, transform: normalized_penalty}
+    aggregation: weighted_sum
+artifacts:
+  - id: qc-table
+    name: Quality-control table
+    description: Per-cell and per-gene QC statistics with filtering decisions.
+    kind: table
+    format: parquet
+    produced_by: [qc]
+    validation:
+      - {name: required-columns, description: QC columns are present, rule: "columns include total_counts,n_genes_by_counts,pct_counts_mt"}
+  - id: normalized-anndata
+    name: Normalized AnnData
+    description: Filtered and normalized expression object used by annotation.
+    kind: anndata
+    format: h5ad
+    produced_by: [normalize]
+    validation:
+      - {name: finite-expression, description: Expression values are finite, rule: X contains no NaN or infinite values}
+  - id: marker-table
+    name: Marker-gene table
+    description: Ranked marker evidence for candidate cell populations.
+    kind: table
+    format: parquet
+    produced_by: [marker-genes]
+  - id: annotated-anndata
+    name: Annotated AnnData
+    description: Final object containing one cell-type label per retained cell.
+    kind: anndata
+    format: h5ad
+    produced_by: [annotate]
+    validation:
+      - {name: complete-labels, description: Every retained cell has one allowed label, rule: obs.cell_type is non-null and belongs to label_vocabulary}
+constraints:
+  cpu_only: true
+  internet_access: false
+  max_runtime_seconds: 1800
+  max_memory_mb: 16384
+  allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy]
+  deterministic: true
+  random_seed: 42
+tasks:
+  - id: cell-annotation
+    name: PBMC cell-type annotation
+    objective: Recover biologically meaningful cell types from PBMC expression profiles.
+    description: >-
+      Starting from the public PBMC expression matrix and declared observations,
+      produce a fully labeled AnnData object with marker-based evidence.
+    datasets: [pbmc68k]
+    observations: [current-anndata, qc-statistics, pipeline-history, available-tools]
+    allowed_actions: [qc, normalize, marker-genes, annotate]
+    metrics: [annotation-accuracy, annotation-macro-f1, runtime]
+    reward_strategy: annotation-reward
+    artifacts: [qc-table, normalized-anndata, marker-table, annotated-anndata]
+    termination:
+      - {name: successful-completion, description: All retained cells have valid labels and required artifacts exist., condition: required artifacts validate successfully}
+      - {name: resource-limit, description: Stop when the benchmark resource budget is exhausted., condition: runtime exceeds constraints.max_runtime_seconds}

@@ -1,0 +1,24 @@
+benchmark:
+  id: "sc_cell_annotation_01"
+  name: "Single-Cell Cell Type Annotation Benchmark"
+  description: "Evaluates agent capability to perform automated cell type clustering and marker gene annotation on PBMC 10k dataset."
+  version: "1.0.0"
+
+dataset:
+  id: "pbmc_10k_v3"
+  source: "10x_genomics"
+  format: "h5ad"
+  path: "./data/pbmc_10k.h5ad"
+
+agent:
+  id: "auto_bio_agent_v1"
+  type: "langchain_react"
+  max_steps: 25
+
+evaluator:
+  metrics:
+    - "adjusted_rand_index"
+    - "normalized_mutual_info"
+    - "execution_time_seconds"
+    - "code_quality_score"
+  timeout_seconds: 600

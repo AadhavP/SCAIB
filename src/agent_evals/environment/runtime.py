@@ -1,0 +1,266 @@
+"""Declarative scientific environment state machine."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.core.exceptions import EnvironmentStateError
+from agent_evals.environment.episode import Episode
+from agent_evals.environment.models import (
+    ActionExecutionResult,
+    ActionIntent,
+    ActionStatus,
+    ActionValidationResult,
+    EnvironmentStep,
+    EpisodeSnapshot,
+    EpisodeStatus,
+    RewardRecord,
+)
+from agent_evals.environment.ports import (
+    ActionExecutor,
+    ConstraintMonitor,
+    DeclarativeActionValidator,
+    ExecutionContext,
+    ObservationBuilder,
+    RewardEvaluator,
+)
+
+
+class ScientificEnvironment:
+    """Run typed action intents against a benchmark-defined episode.
+
+    The environment owns lifecycle, permissions, state transitions, visible
+    observations, and episode trace management.  Scientific computation is
+    delegated to ``ActionExecutor``; metric and reward computation is delegated
+    to ``RewardEvaluator``.  This class therefore provides the research-facing
+    world model without coupling the framework to Scanpy, Docker, or an agent
+    implementation.
+    """
+
+    def __init__(
+        self,
+        specification: BenchmarkSpecification,
+        *,
+        task_id: str,
+        executor: ActionExecutor,
+        observation_builder: ObservationBuilder | None = None,
+        reward_evaluator: RewardEvaluator | None = None,
+        validator: DeclarativeActionValidator | None = None,
+        constraint_monitor: ConstraintMonitor | None = None,
+    ) -> None:
+        self.specification = specification
+        self.task = self._resolve_task(task_id)
+        self.executor = executor
+        self.observation_builder = observation_builder
+        self.reward_evaluator = reward_evaluator
+        self.validator = validator or DeclarativeActionValidator()
+        self.constraint_monitor = constraint_monitor or ConstraintMonitor()
+        self._episode: Episode | None = None
+
+    async def reset(
+        self,
+        *,
+        seed: int,
+        dataset_id: str | None = None,
+        episode_id: str | None = None,
+    ) -> EpisodeSnapshot:
+        """Create and start a fresh episode, optionally selecting one dataset."""
+        if self._episode is not None and self._episode.status not in {
+            EpisodeStatus.COMPLETED,
+            EpisodeStatus.FAILED,
+            EpisodeStatus.CANCELLED,
+        }:
+            raise EnvironmentStateError("cannot reset while an episode is running")
+        self._episode = Episode.from_specification(
+            self.specification,
+            task_id=self.task.id,
+            seed=seed,
+            dataset_id=dataset_id,
+            episode_id=episode_id,
+        )
+        self._episode.start()
+        reset_reward = getattr(self.reward_evaluator, "reset", None)
+        if callable(reset_reward):
+            reset_reward(self._episode.snapshot())
+        await self._refresh_observations()
+        return self._episode.snapshot()
+
+    async def observe(self) -> EpisodeSnapshot:
+        """Return the current episode snapshot without changing state."""
+        if self._episode is None:
+            raise EnvironmentStateError("environment has not been reset")
+        return self._episode.snapshot()
+
+    async def step(self, intent: ActionIntent) -> EnvironmentStep:
+        """Validate and execute one typed action intent.
+
+        Invalid intents are recorded as rejected events without advancing the
+        episode step.  Valid intents always advance the step, including failed
+        executions, so failures remain part of the replayable scientific trace.
+        Failed executions do not commit outputs and do not terminate the
+        episode automatically; callers may retry or explicitly terminate.
+        """
+        episode = self._require_episode()
+        snapshot = episode.snapshot()
+        validation = self.validator.validate(
+            intent,
+            self.specification,
+            self.task,
+            snapshot,
+        )
+        if not validation.valid:
+            episode.record_rejection(intent, validation.errors)
+            return EnvironmentStep(
+                episode_id=episode.episode_id,
+                accepted=False,
+                validation=validation,
+                observation=episode.snapshot(),
+            )
+
+        episode.record_submission(intent)
+        constraints = self.task.constraints or self.specification.constraints
+        try:
+            result = await self.executor.execute(intent, ExecutionContext(snapshot, constraints))
+        except Exception as error:  # pragma: no cover - exercised by integration executors
+            result = ActionExecutionResult(
+                intent_id=intent.intent_id,
+                action_id=intent.action_id,
+                status=ActionStatus.FAILED,
+                error=f"executor error: {error}",
+            )
+
+        result = self._normalize_result(intent, result)
+        result = self._apply_resource_constraints(
+            result,
+            constraints,
+            episode.snapshot().state.resource_usage,
+        )
+        episode.record_action(intent, result)
+
+        reward: RewardRecord | None = None
+        if result.status == ActionStatus.SUCCEEDED:
+            episode.record_outputs(result.observations, result.artifacts)
+            if self.reward_evaluator is not None:
+                reward = await self.reward_evaluator.evaluate(
+                    self.specification,
+                    self.task,
+                    episode.snapshot(),
+                    result,
+                )
+                if reward is not None:
+                    reward = reward.model_copy(update={"step": episode.snapshot().state.current_step})
+                    episode.record_reward(reward)
+            await self._refresh_observations()
+
+        return EnvironmentStep(
+            episode_id=episode.episode_id,
+            accepted=True,
+            validation=ActionValidationResult(valid=True),
+            execution=result,
+            reward=reward,
+            observation=episode.snapshot(),
+        )
+
+    def terminate(
+        self,
+        *,
+        status: EpisodeStatus = EpisodeStatus.COMPLETED,
+        reason: str | None = None,
+    ) -> EpisodeSnapshot:
+        """Explicitly close the current episode and return its final snapshot."""
+        episode = self._require_episode()
+        episode.terminate(status, reason)
+        return episode.snapshot()
+
+    @property
+    def episode(self) -> Episode | None:
+        """Return the active episode controller for persistence integrations."""
+        return self._episode
+
+    def _require_episode(self) -> Episode:
+        """Return the active episode or raise a useful lifecycle error."""
+        if self._episode is None:
+            raise EnvironmentStateError("environment has not been reset")
+        if self._episode.status in {
+            EpisodeStatus.COMPLETED,
+            EpisodeStatus.FAILED,
+            EpisodeStatus.CANCELLED,
+        }:
+            raise EnvironmentStateError(
+                f"episode '{self._episode.episode_id}' is already {self._episode.status.value}"
+            )
+        return self._episode
+
+    async def _refresh_observations(self) -> None:
+        """Ask the observation port for values and commit them atomically."""
+        if self.observation_builder is None:
+            return
+        episode = self._require_episode()
+        observations = await self.observation_builder.build(
+            self.specification,
+            self.task,
+            episode.snapshot(),
+        )
+        episode.record_observations(list(observations))
+
+    def _resolve_task(self, task_id: str) -> TaskSpecification:
+        """Resolve a task from the immutable benchmark specification."""
+        task = next((item for item in self.specification.tasks if item.id == task_id), None)
+        if task is None:
+            raise EnvironmentStateError(f"unknown task '{task_id}'")
+        return task
+
+    def _normalize_result(
+        self,
+        intent: ActionIntent,
+        result: ActionExecutionResult,
+    ) -> ActionExecutionResult:
+        """Turn executor protocol mismatches into a failed typed result."""
+        errors: list[str] = []
+        if result.intent_id != intent.intent_id:
+            errors.append("executor returned a different intent_id")
+        if result.action_id != intent.action_id:
+            errors.append("executor returned a different action_id")
+        action = next(item for item in self.specification.actions if item.id == intent.action_id)
+        produced = set(result.outputs) | {artifact.artifact_id for artifact in result.artifacts}
+        missing_outputs = sorted(set(action.expected_outputs) - produced)
+        if result.status == ActionStatus.SUCCEEDED and missing_outputs:
+            errors.append(f"executor omitted expected output(s): {', '.join(missing_outputs)}")
+        if not errors:
+            return result
+        message = "; ".join(errors)
+        return ActionExecutionResult(
+            intent_id=intent.intent_id,
+            action_id=intent.action_id,
+            status=ActionStatus.FAILED,
+            error=message,
+            resource_usage=result.resource_usage,
+        )
+
+    def _apply_resource_constraints(
+        self,
+        result: ActionExecutionResult,
+        constraints: Any,
+        previous_usage: Any,
+    ) -> ActionExecutionResult:
+        """Convert resource violations into failed results before state commit."""
+        if result.status == ActionStatus.FAILED:
+            return result
+        violations = self.constraint_monitor.check(
+            constraints,
+            result.resource_usage,
+            previous_usage,
+        )
+        if not violations:
+            return result
+        return ActionExecutionResult(
+            intent_id=result.intent_id,
+            action_id=result.action_id,
+            status=ActionStatus.FAILED,
+            error="; ".join(violations),
+            resource_usage=result.resource_usage,
+        )
+
+
+__all__ = ["ScientificEnvironment"]

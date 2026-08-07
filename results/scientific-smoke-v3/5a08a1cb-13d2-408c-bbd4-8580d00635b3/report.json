@@ -1,0 +1,380 @@
+{
+  "report_version": "1.0.0",
+  "benchmark_id": "pbmc-cell-annotation",
+  "benchmark_title": "PBMC Cell-Type Annotation",
+  "run_id": "5a08a1cb-13d2-408c-bbd4-8580d00635b3",
+  "dataset_metadata": {
+    "organism": "Homo sapiens",
+    "assay": "scRNA-seq",
+    "technology": "10x Genomics",
+    "cells": 100,
+    "genes": 765,
+    "metadata_columns": [
+      "bulk_labels",
+      "n_genes",
+      "percent_mito",
+      "n_counts",
+      "S_score",
+      "G2M_score",
+      "phase",
+      "louvain"
+    ],
+    "source": "scanpy.datasets.pbmc68k_reduced"
+  },
+  "pipeline": {
+    "name": "pbmc_default",
+    "dataset": {
+      "name": "pbmc",
+      "source": "scanpy.datasets.pbmc68k_reduced"
+    },
+    "steps": [
+      {
+        "operation": "qc_filter",
+        "parameters": {
+          "max_pct_mt": 15,
+          "min_genes": 200
+        }
+      },
+      {
+        "operation": "normalize",
+        "parameters": {
+          "target_sum": 10000
+        }
+      },
+      {
+        "operation": "select_hvg",
+        "parameters": {
+          "n_top_genes": 2000
+        }
+      },
+      {
+        "operation": "pca",
+        "parameters": {
+          "n_comps": 50
+        }
+      }
+    ]
+  },
+  "trajectory": [
+    {
+      "step": 1,
+      "intent": {
+        "intent_id": "c0486bee-11a2-4e0a-922b-53ead735ccf2",
+        "action_id": "qc_filter",
+        "parameters": {
+          "max_pct_mt": 15,
+          "min_genes": 200
+        },
+        "rationale": null,
+        "metadata": {
+          "pipeline": "pbmc_default",
+          "pipeline_step": 1
+        },
+        "submitted_at": "2026-08-07T17:31:05.746044Z"
+      },
+      "result": {
+        "intent_id": "c0486bee-11a2-4e0a-922b-53ead735ccf2",
+        "action_id": "qc_filter",
+        "status": "succeeded",
+        "outputs": {
+          "cells_before": 100,
+          "cells_after": 100,
+          "genes": 765,
+          "median_counts": 3354.0,
+          "median_genes": 765.0,
+          "median_pct_mt": 1.6493401527404785
+        },
+        "observations": [],
+        "artifacts": [
+          {
+            "artifact_id": "qc_statistics",
+            "kind": "table",
+            "format": "csv",
+            "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\qc_statistics.csv",
+            "checksum": "f9286593d5eb590328147f4eb29b1ce6837345d820bfd903498e86271bb930b6",
+            "validated": true,
+            "metadata": {
+              "cells_before": 100,
+              "cells_after": 100,
+              "input_already_preprocessed": true
+            }
+          }
+        ],
+        "resource_usage": {
+          "wall_time_seconds": 0.029084499983582646,
+          "cpu_seconds": null,
+          "peak_memory_mb": null,
+          "gpu_used": false
+        },
+        "error": null,
+        "started_at": "2026-08-07T17:31:05.746044Z",
+        "completed_at": "2026-08-07T17:31:05.775615Z"
+      },
+      "recorded_at": "2026-08-07T17:31:05.775615Z"
+    },
+    {
+      "step": 2,
+      "intent": {
+        "intent_id": "44e873e8-02db-4629-b8be-c1613c27978c",
+        "action_id": "normalize",
+        "parameters": {
+          "target_sum": 10000
+        },
+        "rationale": null,
+        "metadata": {
+          "pipeline": "pbmc_default",
+          "pipeline_step": 2
+        },
+        "submitted_at": "2026-08-07T17:31:05.775615Z"
+      },
+      "result": {
+        "intent_id": "44e873e8-02db-4629-b8be-c1613c27978c",
+        "action_id": "normalize",
+        "status": "succeeded",
+        "outputs": {
+          "target_sum": 10000.0,
+          "input_already_preprocessed": true
+        },
+        "observations": [],
+        "artifacts": [
+          {
+            "artifact_id": "normalized_anndata",
+            "kind": "anndata",
+            "format": "h5ad",
+            "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\normalized_anndata.h5ad",
+            "checksum": "03a1e7baca9e67dbb5611647eaf87d86f429936ba58f547e3daf799ba091555f",
+            "validated": true,
+            "metadata": {
+              "target_sum": 10000.0,
+              "log1p": false,
+              "input_already_preprocessed": true
+            }
+          }
+        ],
+        "resource_usage": {
+          "wall_time_seconds": 0.040119500015862286,
+          "cpu_seconds": null,
+          "peak_memory_mb": null,
+          "gpu_used": false
+        },
+        "error": null,
+        "started_at": "2026-08-07T17:31:05.775615Z",
+        "completed_at": "2026-08-07T17:31:05.816195Z"
+      },
+      "recorded_at": "2026-08-07T17:31:05.816195Z"
+    },
+    {
+      "step": 3,
+      "intent": {
+        "intent_id": "4ebcf0d4-ed2c-4f42-b5b1-5ca5a3ba5b14",
+        "action_id": "select_hvg",
+        "parameters": {
+          "n_top_genes": 2000
+        },
+        "rationale": null,
+        "metadata": {
+          "pipeline": "pbmc_default",
+          "pipeline_step": 3
+        },
+        "submitted_at": "2026-08-07T17:31:05.816195Z"
+      },
+      "result": {
+        "intent_id": "4ebcf0d4-ed2c-4f42-b5b1-5ca5a3ba5b14",
+        "action_id": "select_hvg",
+        "status": "succeeded",
+        "outputs": {
+          "hvg_count": 309
+        },
+        "observations": [],
+        "artifacts": [
+          {
+            "artifact_id": "highly_variable_genes",
+            "kind": "table",
+            "format": "csv",
+            "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\highly_variable_genes.csv",
+            "checksum": "8235b04734a803d3393243cf659c9801756c3e9ac47e81b6c99bd67badfb2f87",
+            "validated": true,
+            "metadata": {
+              "n_top_genes": 765
+            }
+          }
+        ],
+        "resource_usage": {
+          "wall_time_seconds": 0.020824500010348856,
+          "cpu_seconds": null,
+          "peak_memory_mb": null,
+          "gpu_used": false
+        },
+        "error": null,
+        "started_at": "2026-08-07T17:31:05.816195Z",
+        "completed_at": "2026-08-07T17:31:05.836769Z"
+      },
+      "recorded_at": "2026-08-07T17:31:05.836769Z"
+    },
+    {
+      "step": 4,
+      "intent": {
+        "intent_id": "829a662c-cd86-449b-961b-29de88407f63",
+        "action_id": "pca",
+        "parameters": {
+          "n_comps": 50
+        },
+        "rationale": null,
+        "metadata": {
+          "pipeline": "pbmc_default",
+          "pipeline_step": 4
+        },
+        "submitted_at": "2026-08-07T17:31:05.836769Z"
+      },
+      "result": {
+        "intent_id": "829a662c-cd86-449b-961b-29de88407f63",
+        "action_id": "pca",
+        "status": "succeeded",
+        "outputs": {
+          "embedding": "X_pca",
+          "n_comps": 50
+        },
+        "observations": [],
+        "artifacts": [
+          {
+            "artifact_id": "pca_anndata",
+            "kind": "anndata",
+            "format": "h5ad",
+            "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\pca_anndata.h5ad",
+            "checksum": "36871f4a02dae552aed5aa988acc69470638b1258905254701d5e06583149f0e",
+            "validated": true,
+            "metadata": {
+              "embedding": "X_pca",
+              "n_comps": 50
+            }
+          }
+        ],
+        "resource_usage": {
+          "wall_time_seconds": 0.1693092999921646,
+          "cpu_seconds": null,
+          "peak_memory_mb": null,
+          "gpu_used": false
+        },
+        "error": null,
+        "started_at": "2026-08-07T17:31:05.836769Z",
+        "completed_at": "2026-08-07T17:31:06.005534Z"
+      },
+      "recorded_at": "2026-08-07T17:31:06.005534Z"
+    }
+  ],
+  "artifacts": [
+    {
+      "artifact_id": "qc_statistics",
+      "kind": "table",
+      "format": "csv",
+      "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\qc_statistics.csv",
+      "checksum": "f9286593d5eb590328147f4eb29b1ce6837345d820bfd903498e86271bb930b6",
+      "validated": true,
+      "metadata": {
+        "cells_before": 100,
+        "cells_after": 100,
+        "input_already_preprocessed": true
+      }
+    },
+    {
+      "artifact_id": "normalized_anndata",
+      "kind": "anndata",
+      "format": "h5ad",
+      "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\normalized_anndata.h5ad",
+      "checksum": "03a1e7baca9e67dbb5611647eaf87d86f429936ba58f547e3daf799ba091555f",
+      "validated": true,
+      "metadata": {
+        "target_sum": 10000.0,
+        "log1p": false,
+        "input_already_preprocessed": true
+      }
+    },
+    {
+      "artifact_id": "highly_variable_genes",
+      "kind": "table",
+      "format": "csv",
+      "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\highly_variable_genes.csv",
+      "checksum": "8235b04734a803d3393243cf659c9801756c3e9ac47e81b6c99bd67badfb2f87",
+      "validated": true,
+      "metadata": {
+        "n_top_genes": 765
+      }
+    },
+    {
+      "artifact_id": "pca_anndata",
+      "kind": "anndata",
+      "format": "h5ad",
+      "uri": "results\\scientific-smoke-v3\\5a08a1cb-13d2-408c-bbd4-8580d00635b3\\artifacts\\pca_anndata.h5ad",
+      "checksum": "36871f4a02dae552aed5aa988acc69470638b1258905254701d5e06583149f0e",
+      "validated": true,
+      "metadata": {
+        "embedding": "X_pca",
+        "n_comps": 50
+      }
+    }
+  ],
+  "metric_results": [
+    {
+      "metric_id": "annotation_ari",
+      "metric_name": "Adjusted Rand index",
+      "level": "artifact",
+      "direction": "higher_is_better",
+      "raw_value": 0.29338967571087093,
+      "value": 0.29338967571087093,
+      "normalized_score": 0.29338967571087093,
+      "status": "succeeded",
+      "evidence": [
+        "obs.bulk_labels",
+        "obs.louvain"
+      ],
+      "artifact_ids": [],
+      "error": null,
+      "metadata": {}
+    },
+    {
+      "metric_id": "annotation_nmi",
+      "metric_name": "Normalized mutual information",
+      "level": "artifact",
+      "direction": "higher_is_better",
+      "raw_value": 0.6019061467023405,
+      "value": 0.6019061467023405,
+      "normalized_score": 0.6019061467023405,
+      "status": "succeeded",
+      "evidence": [
+        "obs.bulk_labels",
+        "obs.louvain"
+      ],
+      "artifact_ids": [],
+      "error": null,
+      "metadata": {}
+    },
+    {
+      "metric_id": "annotation_silhouette",
+      "metric_name": "Annotation silhouette",
+      "level": "artifact",
+      "direction": "higher_is_better",
+      "raw_value": 0.5182103756815195,
+      "value": 0.5182103756815195,
+      "normalized_score": 0.5182103756815195,
+      "status": "succeeded",
+      "evidence": [
+        "obsm embedding",
+        "obs.louvain"
+      ],
+      "artifact_ids": [],
+      "error": null,
+      "metadata": {
+        "raw_silhouette": 0.03642075136303902
+      }
+    }
+  ],
+  "scores": {
+    "annotation_ari": 0.29338967571087093,
+    "annotation_nmi": 0.6019061467023405,
+    "annotation_silhouette": 0.5182103756815195
+  },
+  "final_score": 0.47116873269824366,
+  "started_at": "2026-08-07T17:31:05.746044Z",
+  "completed_at": "2026-08-07T17:31:06.009534Z",
+  "errors": []
+}

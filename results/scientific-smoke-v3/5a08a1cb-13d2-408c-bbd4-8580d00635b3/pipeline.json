@@ -1,0 +1,34 @@
+{
+  "name": "pbmc_default",
+  "dataset": {
+    "name": "pbmc",
+    "source": "scanpy.datasets.pbmc68k_reduced"
+  },
+  "steps": [
+    {
+      "operation": "qc_filter",
+      "parameters": {
+        "max_pct_mt": 15,
+        "min_genes": 200
+      }
+    },
+    {
+      "operation": "normalize",
+      "parameters": {
+        "target_sum": 10000
+      }
+    },
+    {
+      "operation": "select_hvg",
+      "parameters": {
+        "n_top_genes": 2000
+      }
+    },
+    {
+      "operation": "pca",
+      "parameters": {
+        "n_comps": 50
+      }
+    }
+  ]
+}

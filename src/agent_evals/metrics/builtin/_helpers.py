@@ -1,0 +1,85 @@
+"""Shared evaluator-side extraction helpers."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from agent_evals.metrics.context import ScientificMetricContext
+from agent_evals.metrics.registry import MetricComputation
+
+
+def labels(context: ScientificMetricContext) -> tuple[Any, Any] | None:
+    """Return reference and candidate labels from standardized evidence."""
+    table = context.candidate_artifacts.get("prediction")
+    if table is not None and context.reference_artifacts.get("labels") is not None:
+        reference = context.reference_artifacts["labels"]
+        if hasattr(reference, "columns") and "reference_label" in reference.columns:
+            reference = reference["reference_label"].to_numpy()
+        elif hasattr(reference, "to_numpy"):
+            reference = reference.to_numpy()
+        return reference, table["predicted_label"].to_numpy()
+    adata = context.adata
+    if adata is None:
+        return None
+    reference_key = next(
+        (
+            key
+            for key in ("cell_type", "cell_type_ref", "known_labels", "bulk_labels")
+            if key in adata.obs
+        ),
+        None,
+    )
+    predicted_key = next(
+        (
+            key
+            for key in ("predicted_labels", "leiden", "louvain", "cluster")
+            if key in adata.obs
+        ),
+        None,
+    )
+    if reference_key is None or predicted_key is None:
+        return None
+    return (
+        adata.obs[reference_key].astype(str).to_numpy(),
+        adata.obs[predicted_key].astype(str).to_numpy(),
+    )
+
+
+def embedding(context: ScientificMetricContext, name: str | None = None) -> Any | None:
+    """Extract a candidate/reference representation."""
+    if name is not None:
+        if name in context.candidate_artifacts:
+            return context.candidate_artifacts[name]
+        if context.adata is not None and name in context.adata.obsm:
+            return context.adata.obsm[name]
+    if context.adata is not None:
+        for key in ("X_integrated", "X_pca", "X_umap"):
+            if key in context.adata.obsm:
+                return context.adata.obsm[key]
+    return None
+
+
+def failed(reason: str) -> MetricComputation:
+    """Return a computation failure with machine-readable reason."""
+    return MetricComputation(raw_value=None, metadata={"failure_reason": reason})
+
+
+def de_ranked(context: ScientificMetricContext) -> tuple[list[str], set[str]] | None:
+    """Extract ranked genes and evaluator-owned reference markers."""
+    table = context.candidate_artifacts.get("de_table")
+    reference = context.metadata.get("reference_markers")
+    if table is not None:
+        column = "gene" if "gene" in table.columns else "names"
+        ranked = [str(value) for value in table[column].tolist()]
+    elif context.adata is not None and "rank_genes_groups" in context.adata.uns:
+        names = context.adata.uns["rank_genes_groups"]["names"]
+        group = names.dtype.names[0] if getattr(names.dtype, "names", None) else None
+        ranked = [str(row[group] if group else row) for row in names]
+    else:
+        return None
+    if not reference:
+        return None
+    return ranked, {str(value) for value in reference}
+
+
+__all__ = ["de_ranked", "embedding", "failed", "labels"]

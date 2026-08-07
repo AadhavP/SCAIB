@@ -1,0 +1,40 @@
+site_name: agent-evals Documentation
+site_description: Open-source benchmark framework for autonomous AI single-cell biology agents.
+site_url: https://agent-evals.org
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.indexes
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Benchmark specification: benchmark-specification.md
+  - Scientific environment: environment.md
+  - Agent harness: agent-harness.md

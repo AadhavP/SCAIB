@@ -1,0 +1,750 @@
+"""Agent-driven scientific episode bridge."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from agent_evals.agents import (
+    AgentConfiguration,
+    AgentHarness,
+    AgentRun,
+    agent_adapter_registry,
+)
+from agent_evals.agents.trajectory import DecisionCategory
+from agent_evals.benchmarks.io import load_benchmark
+from agent_evals.benchmarks.registry import benchmark_spec_registry
+from agent_evals.benchmarks.schema import BenchmarkSpecification
+from agent_evals.environment.models import (
+    ActionExecutionResult,
+    ActionIntent,
+    ArtifactRecord,
+    RewardRecord,
+)
+from agent_evals.environment.ports import ExecutionContext
+from agent_evals.environment.runtime import ScientificEnvironment
+from agent_evals.evaluation import (
+    DecisionEvaluator,
+    LocalRewardEvaluator,
+    MethodEvaluator,
+    MethodSelectionEvaluator,
+    ScientificEvaluation,
+    ScientificMetricEngine,
+    TrajectoryEvaluator,
+    compute_global_agent_score,
+)
+from agent_evals.evaluation.methods import method_score
+from agent_evals.evaluation.metrics import (
+    ArtifactBundle,
+    EvaluationContext,
+    ReferenceBundle,
+)
+from agent_evals.evaluation.metrics import (
+    ScientificMetricEngine as GenericScientificMetricEngine,
+)
+from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
+from agent_evals.evaluation.models import MethodScore
+from agent_evals.evaluation.profiles import load_metric_profile, pbmc_annotation_profile
+from agent_evals.evaluation.scoring import (
+    MetricScoreInput,
+    WeightedGeometricAggregator,
+    aggregate_domains,
+)
+from agent_evals.evaluation.taxonomy import DecisionProfile, decision_ontology
+from agent_evals.evaluators.models import MetricResult
+from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
+from agent_evals.metrics import MetricGroup, MetricWeight
+from agent_evals.metrics.context import ScientificMetricContext
+from agent_evals.scientific.artifacts.storage import LocalArtifactStore
+from agent_evals.scientific.context import ScientificContext
+from agent_evals.scientific.executor.scanpy import ScanpyExecutor
+from agent_evals.scientific.metrics import (
+    aggregate_objective_score,
+    compute_objective_metrics,
+)
+from agent_evals.scientific.observations import ScientificObservationBuilder
+
+
+class AgentScientificRun(BaseModel):
+    """Persisted result of one agent interacting with the scientific world."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    agent_id: str
+    benchmark_id: str
+    task_id: str
+    episode_id: str
+    agent_run: AgentRun
+    trajectory: list[dict[str, Any]] = Field(default_factory=list)
+    artifacts: list[ArtifactRecord] = Field(default_factory=list)
+    local_rewards: list[RewardRecord] = Field(default_factory=list)
+    global_reward: GlobalReward
+    final_metrics: list[MetricResult] = Field(default_factory=list)
+    evaluation: ScientificEvaluation | None = None
+    report_path: str | None = None
+
+    def to_json(self) -> str:
+        """Serialize the agent-scientific run."""
+        return self.model_dump_json(indent=2)
+
+    def to_markdown(self) -> str:
+        """Render an agent-focused benchmark report."""
+        local_score = (
+            sum(reward.value for reward in self.local_rewards) / len(self.local_rewards)
+            if self.local_rewards
+            else None
+        )
+        lines = [
+            "# Agent Evaluation Report",
+            "",
+            f"- Agent: {self.agent_id}",
+            f"- Benchmark: {self.benchmark_id}",
+            f"- Run: {self.run_id}",
+            f"- Episode: {self.episode_id}",
+            f"- Agent type: {self.agent_run.manifest.type if self.agent_run.manifest else self.agent_run.adapter_name}",
+            f"- Model: {self.agent_run.manifest.model.name if self.agent_run.manifest else self.agent_run.model or 'unspecified'}",
+            "",
+            "## Decision summary",
+            "",
+            "| Step | Decision | Method | Execution | Local reward |",
+            "| ---: | --- | --- | --- | ---: |",
+        ]
+        for index, step in enumerate(self.trajectory, start=1):
+            decision = step.get("decision", {})
+            result = step.get("result") or {}
+            reward = step.get("reward") or {}
+            lines.append(
+                f"| {index} | {decision.get('action_category', '-')} | "
+                f"{decision.get('method', '-')} | {result.get('status', 'rejected')} | "
+                f"{reward.get('value', '-')} |"
+            )
+        lines.extend(
+            [
+                "",
+                "## Scores",
+                "",
+                f"- Local decision score: {local_score if local_score is not None else 'unavailable'}",
+                f"- Final pipeline score: {self.global_reward.value if self.global_reward.value is not None else 'unavailable'}",
+                "",
+                "| Metric | Status | Score |",
+                "| --- | --- | ---: |",
+            ]
+        )
+        lines.extend(
+            f"| {metric.metric_name} ({metric.metric_id}) | {metric.status.value} | "
+            f"{metric.normalized_score if metric.normalized_score is not None else '-'} |"
+            for metric in self.final_metrics
+        )
+        if self.evaluation is not None:
+            evaluation = self.evaluation
+            lines.extend(
+                [
+                    "",
+                    "## Evaluation dimensions",
+                    "",
+                    f"- Scientific outcome score: {evaluation.scientific_outcome_score}",
+                    *[
+                        f"- {domain.domain.title()} score: {domain.value}"
+                        for domain in evaluation.domain_scores
+                    ],
+                    f"- Decision score: {evaluation.decision_score}",
+                    f"- Method score: {evaluation.method_score}",
+                    f"- Decision quality multiplier: {evaluation.decision_quality_score}",
+                    f"- Trajectory score: {evaluation.trajectory_score}",
+                    f"- Final agent score: {evaluation.global_agent_score}",
+                    f"- Global agent score: {evaluation.global_agent_score}",
+                    f"- Score formula: `{evaluation.score_formula}`",
+                    "",
+                    "### Applicability matrix",
+                    "",
+                    "| Metric | Eligible | Structural exclusion | Reason |",
+                    "| --- | --- | --- | --- |",
+                ]
+            )
+            lines.extend(
+                f"| {item.metric_id}@{item.version} | {item.eligible} | "
+                f"{item.structurally_ineligible} | {item.reason} |"
+                for item in evaluation.applicability
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Versioned metric results",
+                    "",
+                    "| Metric | Status | Raw | Normalized |",
+                    "| --- | --- | ---: | ---: |",
+                ]
+            )
+            lines.extend(
+                f"| {item.metric_id}@{item.version} | {item.status.value} | "
+                f"{item.raw_value if item.raw_value is not None else '-'} | "
+                f"{item.normalized_value if item.normalized_value is not None else '-'} |"
+                for item in evaluation.metric_results
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Decision timeline",
+                    "",
+                    "| Decision | Method | Appropriateness | Parameters | Execution | Overall |",
+                    "| --- | --- | ---: | ---: | ---: | ---: |",
+                ]
+            )
+            lines.extend(
+                f"| {item.decision_id} | {item.method or '-'} | {item.appropriateness:.3f} | "
+                f"{item.parameter_quality:.3f} | {item.execution_quality:.3f} | {item.overall:.3f} |"
+                for item in evaluation.method_selection_evaluations
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Local decision rewards",
+                    "",
+                    "| Decision | Category | Value | Formula |",
+                    "| --- | --- | ---: | --- |",
+                ]
+            )
+            lines.extend(
+                f"| {item.get('decision_id', '-')} | {item.get('category', '-')} | "
+                f"{item.get('value', '-')} | {item.get('formula', '-')} |"
+                for item in evaluation.local_decision_rewards
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Trajectory analysis",
+                    "",
+                    f"- Method exploration score: {evaluation.trajectory.method_exploration_score}",
+                    f"- Alternative coverage: {evaluation.trajectory.alternative_coverage}",
+                    f"- Decision regret: {evaluation.trajectory.decision_regret}",
+                    f"- Decision efficiency: {evaluation.trajectory.decision_efficiency}",
+                    f"- Decision consistency: {evaluation.trajectory.decision_consistency}",
+                    f"- Adaptation ability: {evaluation.trajectory.adaptation_ability}",
+                    f"- Counterproductive-action signal: {evaluation.trajectory.counterproductive_action_detection}",
+                    f"- Short-term gain signal: {evaluation.trajectory.short_term_gain}",
+                    f"- Long-term damage signal: {evaluation.trajectory.long_term_damage}",
+                    f"- Good: {', '.join(evaluation.trajectory.good_signals) or 'none recorded'}",
+                    f"- Bad: {', '.join(evaluation.trajectory.bad_signals) or 'none recorded'}",
+                    f"- Recommended improvement: {', '.join(evaluation.trajectory.recommended_improvements) or 'none recorded'}",
+                ]
+            )
+            lines.extend(
+                [
+                    "",
+                    "### Scientific domain scores",
+                    "",
+                    "| Domain | Score | Included | Excluded | Failed |",
+                    "| --- | ---: | --- | --- | --- |",
+                ]
+            )
+            lines.extend(
+                f"| {domain.domain} | {domain.value if domain.value is not None else '-'} | "
+                f"{', '.join(domain.included_metrics) or '-'} | "
+                f"{', '.join(domain.excluded_metrics) or '-'} | "
+                f"{', '.join(domain.failed_metrics) or '-'} |"
+                for domain in evaluation.domain_scores
+            )
+            if evaluation.robustness is not None:
+                lines.extend(
+                    [
+                        "",
+                        "### Robustness",
+                        "",
+                        f"- Seeds: {', '.join(str(seed) for seed in evaluation.robustness.seeds)}",
+                        f"- Seed stability: {evaluation.robustness.seed_stability}",
+                        f"- Clustering pairwise ARI: {evaluation.robustness.clustering_pairwise_ari}",
+                        f"- Prediction agreement: {evaluation.robustness.annotation_prediction_agreement}",
+                    ]
+                )
+        return "\n".join(lines) + "\n"
+
+
+class ScientificActionExecutor:
+    """Async environment port that adapts Scanpy results to benchmark artifacts."""
+
+    def __init__(self, context: ScientificContext) -> None:
+        self.context = context
+        self.executor = ScanpyExecutor()
+
+    async def execute(
+        self,
+        intent: ActionIntent,
+        context: ExecutionContext,
+    ) -> ActionExecutionResult:
+        """Execute a validated action without exposing AnnData to the agent."""
+        del context
+        result = self.executor.execute(intent, self.context)
+        expected_outputs = [
+            str(output)
+            for output in intent.metadata.get("expected_outputs", [])
+        ]
+        if result.status.value != "succeeded" or not expected_outputs:
+            return result
+        artifacts = [
+            artifact.model_copy(
+                update={
+                    "artifact_id": expected_outputs[index]
+                    if index < len(expected_outputs)
+                    else artifact.artifact_id
+                }
+            )
+            for index, artifact in enumerate(result.artifacts)
+        ]
+        return result.model_copy(update={"artifacts": artifacts})
+
+
+class ScientificLoop:
+    """Run an interchangeable agent adapter inside a real scientific episode."""
+
+    def __init__(self, *, cache_dir: Path | str = Path(".cache/datasets")) -> None:
+        self.cache_dir = Path(cache_dir)
+
+    async def run(
+        self,
+        benchmark: str | Path,
+        *,
+        agent_type: str = "rule-based",
+        output_dir: Path | str = Path("results"),
+        seed: int = 0,
+        max_cells: int | None = None,
+        max_steps: int | None = None,
+    ) -> AgentScientificRun:
+        """Load data, run the harness, score local/global outcomes, and persist."""
+        specification = self._resolve_benchmark(benchmark)
+        task = specification.tasks[0]
+        from agent_evals.datasets.pbmc import PBMCDataset
+
+        dataset = PBMCDataset(cache_dir=self.cache_dir)
+        adata = dataset.load(max_cells=max_cells)
+        requested_run_id = str(uuid4())
+        pending_root = Path(output_dir) / requested_run_id
+        store = LocalArtifactStore(pending_root / "artifacts")
+        context = ScientificContext(
+            adata=adata,
+            dataset_metadata=dataset.metadata.model_dump(),
+            artifact_store=store,
+            workspace=pending_root,
+        )
+        observation_builder = ScientificObservationBuilder(context)
+        reward_evaluator = RewardEvaluator()
+        environment = ScientificEnvironment(
+            specification,
+            task_id=task.id,
+            executor=ScientificActionExecutor(context),
+            observation_builder=observation_builder,
+            reward_evaluator=reward_evaluator,
+        )
+        adapter = agent_adapter_registry.create(agent_type)
+        configuration = AgentConfiguration(
+            agent_type=agent_type,
+            seed=seed,
+            max_steps=max_steps,
+            workspace={"root": str(pending_root)},
+            metadata={
+                "dataset_id": task.datasets[0] if task.datasets else "pbmc",
+                "scientific_loop": True,
+                "run_id": requested_run_id,
+            },
+        )
+        agent_run = await AgentHarness().run(adapter, environment, configuration)
+        pipeline_parameters: dict[str, Any] = {}
+        metrics = compute_objective_metrics(
+            specification.metadata.id,
+            context.adata,
+            pipeline_parameters,
+        )
+        global_reward = GlobalReward(
+            value=aggregate_objective_score(specification.metadata.id, metrics),
+            components={
+                metric.metric_id: float(metric.normalized_score)
+                for metric in metrics
+                if metric.normalized_score is not None
+            },
+            metric_ids=[metric.metric_id for metric in metrics],
+            status="succeeded"
+            if aggregate_objective_score(specification.metadata.id, metrics) is not None
+            else "unavailable",
+        )
+        trace = getattr(adapter, "decision_trace", [])
+        evaluation = self._evaluate_scientific_run(
+            specification,
+            task,
+            agent_run,
+            context,
+            store,
+        )
+        final_root = Path(output_dir) / agent_run.run_id
+        final_root.parent.mkdir(parents=True, exist_ok=True)
+        if pending_root != final_root:
+            pending_root.rename(final_root)
+        run = AgentScientificRun(
+            run_id=agent_run.run_id,
+            agent_id=agent_run.agent_id,
+            benchmark_id=agent_run.benchmark_id,
+            task_id=agent_run.task_id,
+            episode_id=agent_run.episode_id,
+            agent_run=agent_run,
+            trajectory=trace,
+            artifacts=agent_run.generated_artifacts,
+            local_rewards=agent_run.final_environment_state.state.rewards,
+            global_reward=global_reward,
+            final_metrics=metrics,
+            evaluation=evaluation,
+            report_path=str(final_root / "report.md"),
+        )
+        (final_root / "trajectory.json").write_text(
+            json.dumps(
+                {
+                    "agent": agent_run.agent_id,
+                    "benchmark": agent_run.benchmark_id,
+                    "steps": trace,
+                    "local_rewards": [
+                        reward.model_dump(mode="json") for reward in run.local_rewards
+                    ],
+                    "global_reward": global_reward.model_dump(mode="json"),
+                    "final_reward": global_reward.value,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (final_root / "agent_run.json").write_text(agent_run.to_json(), encoding="utf-8")
+        (final_root / "agent.json").write_text(
+            json.dumps(
+                {
+                    "manifest": agent_run.manifest.model_dump(mode="json") if agent_run.manifest else None,
+                    "configuration": agent_run.configuration.model_dump(mode="json"),
+                    "agent_id": agent_run.agent_id,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (final_root / "actions.json").write_text(
+            json.dumps(
+                [action.model_dump(mode="json") for action in agent_run.final_environment_state.state.actions],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (final_root / "tool_calls.json").write_text(
+            json.dumps(
+                [
+                    event.model_dump(mode="json")
+                    for event in agent_run.trajectory.events
+                    if event.event_type.value in {"agent.tool_call", "agent.tool_result"}
+                ],
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (final_root / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "final_metrics": [metric.model_dump(mode="json") for metric in run.final_metrics],
+                    "evaluation": run.evaluation.model_dump(mode="json") if run.evaluation else None,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (final_root / "report.json").write_text(run.to_json(), encoding="utf-8")
+        (final_root / "report.md").write_text(run.to_markdown(), encoding="utf-8")
+        return run
+
+    @staticmethod
+    def _evaluate_scientific_run(  # noqa: C901
+        specification: BenchmarkSpecification,
+        task: Any,
+        agent_run: AgentRun,
+        context: ScientificContext,
+        store: LocalArtifactStore,
+    ) -> ScientificEvaluation:
+        """Run versioned evaluation on hidden reference data and visible outputs."""
+        import pandas as pd
+
+        adata = context.adata
+        cell_ids = [str(value) for value in adata.obs_names]
+        prediction_column = next(
+            (
+                column
+                for column in ("predicted_labels", "cell_type", "louvain", "leiden", "bulk_labels")
+                if column in adata.obs
+            ),
+            None,
+        )
+        candidate: dict[str, Any] = {"cell_id": cell_ids}
+        if prediction_column is not None:
+            candidate["predicted_label"] = [str(value) for value in adata.obs[prediction_column]]
+        else:
+            candidate["predicted_label"] = ["__unassigned__"] * len(cell_ids)
+        prediction = pd.DataFrame(candidate)
+        prediction_artifact = store.save_table(
+            "evaluation-prediction",
+            prediction,
+            metadata={"hidden_from_agent": True, "source_column": prediction_column},
+        )
+        candidate_artifacts: dict[str, Any] = {"prediction": prediction}
+        if prediction_column in {"louvain", "leiden"}:
+            candidate_artifacts["cluster_labels"] = prediction["predicted_label"].to_numpy()
+        if "X_pca" in adata.obsm:
+            candidate_artifacts["embedding"] = adata.obsm["X_pca"]
+        label_column = next(
+            (
+                column
+                for column in ("cell_type", "cell_type_ref", "known_labels", "bulk_labels")
+                if column in adata.obs
+            ),
+            None,
+        )
+        reference_artifacts = (
+            {"labels": pd.DataFrame({"reference_label": adata.obs[label_column].astype(str).to_numpy()})}
+            if label_column is not None
+            else {}
+        )
+        metric_ids = [
+            item.metric_id
+            for group in specification.metric_groups
+            for item in group.metrics
+        ]
+        if not metric_ids:
+            metric_ids = [
+                "cell_annotation.macro_f1",
+                "cell_annotation.mcc",
+                "cell_annotation.balanced_accuracy",
+                "cell_annotation.rare_recall",
+                "cell_annotation.accuracy",
+            ]
+        metric_profile = ScientificLoop._load_metric_profile(specification)
+        for group in metric_profile.metric_groups.values():
+            metric_ids.extend(name for name in group.metrics if name not in metric_ids)
+        metric_ids = [
+            name
+            for name in metric_ids
+            if name != metric_profile.metric_groups["robustness"].external_score
+        ]
+        groups = [
+            MetricGroup(
+                group_id=group.group_id,
+                metrics=[MetricWeight(metric_id=item.metric_id, weight=item.weight, role=item.role) for item in group.metrics],
+                aggregation=group.aggregation,
+                minimum_required=group.minimum_required,
+                contributes_to_primary=group.contributes_to_primary,
+            )
+            for group in specification.metric_groups
+        ]
+        metric_context = ScientificMetricContext(
+            adata=adata,
+            candidate_artifacts=candidate_artifacts,
+            reference_artifacts=reference_artifacts,
+            metadata={**context.metadata, "prediction_artifact_uri": str(prediction_artifact.path)},
+            trajectory=agent_run.trajectory.model_dump(mode="json"),
+        )
+        engine = ScientificMetricEngine()
+        results, applicability, group_results, _legacy_scientific_score = engine.evaluate(
+            metric_ids,
+            metric_context,
+            groups=groups,
+        )
+        generic_results = GenericScientificMetricEngine().evaluate(
+            metric_ids,
+            ArtifactBundle(values=candidate_artifacts),
+            ReferenceBundle(values=reference_artifacts),
+            EvaluationContext(
+                metadata=metric_context.metadata,
+                available_artifacts=set(candidate_artifacts),
+                available_metadata=set(metric_context.metadata),
+                payload=metric_context,
+            ),
+        )
+        for result in results:
+            result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
+        robustness = RobustnessEvaluator().evaluate(
+            [
+                {
+                    "seed": agent_run.configuration.seed,
+                    "cluster_labels": candidate_artifacts.get("cluster_labels"),
+                    "predicted_labels": prediction["predicted_label"].tolist(),
+                    "artifact_checksums": [prediction_artifact.checksum],
+                }
+            ]
+        )
+        metric_inputs = [
+            MetricScoreInput(
+                name=result.metric_name,
+                value=result.normalized_value,
+                applicable=result.applicable,
+                structurally_ineligible=result.status.value == "structurally_ineligible",
+                status=result.status.value,
+            )
+            for result in generic_results
+        ]
+        domain_scores = []
+        for domain_name, group in metric_profile.metric_groups.items():
+            inputs = list(metric_inputs)
+            if group.external_score == "robustness.seed_stability":
+                inputs.append(
+                    MetricScoreInput(
+                        name=group.external_score,
+                        value=robustness.seed_stability,
+                    )
+                )
+            domain_scores.append(
+                WeightedGeometricAggregator().aggregate(domain_name, group, inputs)
+            )
+        scientific_score = aggregate_domains(domain_scores).value
+        decisions = DecisionEvaluator().evaluate(agent_run, task)
+        methods = MethodEvaluator().evaluate(agent_run, task, metric_ids, scientific_score)
+        local_reward_values = [reward.value for reward in agent_run.final_environment_state.state.rewards]
+        trajectory = TrajectoryEvaluator().evaluate(
+            agent_run,
+            task,
+            scientific_score,
+            local_rewards=local_reward_values,
+            alternative_methods={
+                category: profile.alternatives
+                for category, profile in specification.decision_evaluation.items()
+            },
+        )
+        decision_value = sum(item.score for item in decisions) / len(decisions) if decisions else 1.0
+        method_value = method_score(methods)
+        profiles = ScientificLoop._decision_profiles(specification)
+        selection_evaluator = MethodSelectionEvaluator(decision_ontology)
+        selection_scores: list[MethodScore] = []
+        local_decision_rewards: list[dict[str, Any]] = []
+        reward_by_step = {
+            reward.step: reward.value
+            for reward in agent_run.final_environment_state.state.rewards
+        }
+        normalized_metric_values = {
+            result.metric_id: float(result.normalized_value)
+            for result in results
+            if result.normalized_value is not None
+        }
+        local_evaluator = LocalRewardEvaluator()
+        for decision in agent_run.trajectory.decisions.decisions:
+            if decision.parent_decision_id is not None:
+                continue
+            profile = profiles.get(decision.decision_category)
+            selection_scores.append(
+                selection_evaluator.evaluate(
+                    decision,
+                    context.dataset_metadata,
+                    profile,
+                    results,
+                )
+            )
+            evidence = dict(normalized_metric_values)
+            try:
+                step_number = int(decision.step_id.rsplit("-", 1)[-1])
+            except ValueError:
+                step_number = decision.order + 1
+            evidence["decision_local_reward"] = reward_by_step.get(step_number, 0.0)
+            local_decision_rewards.append(
+                local_evaluator.evaluate(decision, None, None, evidence).model_dump(mode="json")
+            )
+        selection_value = (
+            sum(item.overall for item in selection_scores) / len(selection_scores)
+            if selection_scores
+            else 1.0
+        )
+        decision_quality = decision_value * selection_value
+        global_score = compute_global_agent_score(
+            scientific_score,
+            decision_quality,
+            trajectory.trajectory_quality,
+        )
+        benchmark_score = global_score.value if global_score is not None else None
+        return ScientificEvaluation(
+            metric_results=results,
+            applicability=applicability,
+            groups=group_results,
+            domain_scores=domain_scores,
+            robustness=robustness,
+            decision_evaluations=decisions,
+            method_evaluations=methods,
+            method_selection_evaluations=selection_scores,
+            local_decision_rewards=local_decision_rewards,
+            trajectory=trajectory,
+            scientific_outcome_score=scientific_score,
+            decision_score=decision_value,
+            method_score=method_value,
+            decision_quality_score=decision_quality,
+            trajectory_score=trajectory.trajectory_quality,
+            global_agent_score=benchmark_score,
+            benchmark_score=benchmark_score,
+            score_formula="scientific_outcome * decision_score * method_selection_score * trajectory_score",
+        )
+
+    @staticmethod
+    def _load_metric_profile(specification: BenchmarkSpecification) -> Any:
+        """Load the declarative profile, with a typed built-in fallback."""
+        if specification.metadata.id == "pbmc-cell-annotation":
+            path = (
+                Path(__file__).resolve().parents[3]
+                / "configs"
+                / "metrics"
+                / "pbmc_annotation.yaml"
+            )
+            if path.exists():
+                return load_metric_profile(path)
+            return pbmc_annotation_profile()
+        return pbmc_annotation_profile()
+
+    @staticmethod
+    def _decision_profiles(
+        specification: BenchmarkSpecification,
+    ) -> dict[DecisionCategory, DecisionProfile]:
+        """Translate declarative YAML profiles into typed ontology profiles."""
+        profiles: dict[DecisionCategory, DecisionProfile] = {}
+        aliases = {
+            "qc": DecisionCategory.QC_STRATEGY,
+            "qc_strategy": DecisionCategory.QC_STRATEGY,
+            "normalization": DecisionCategory.NORMALIZATION,
+            "integration": DecisionCategory.INTEGRATION,
+            "annotation": DecisionCategory.ANNOTATION,
+        }
+        for key, profile in specification.decision_evaluation.items():
+            category = aliases.get(key)
+            if category is None:
+                try:
+                    category = DecisionCategory(key)
+                except ValueError:
+                    continue
+            profiles[category] = DecisionProfile(
+                category=category,
+                allowed_methods=profile.allowed_methods,
+                expected_inputs=profile.expected_inputs,
+                possible_alternatives=profile.alternatives,
+                evaluator_metrics=profile.metrics,
+                parameter_ranges=profile.parameter_ranges,
+            )
+        return profiles
+
+    @staticmethod
+    def _resolve_benchmark(reference: str | Path) -> BenchmarkSpecification:
+        path = Path(reference)
+        if path.exists():
+            return load_benchmark(path)
+        if not benchmark_spec_registry.list_ids():
+            from agent_evals.scientific.benchmarks import register_scientific_benchmarks
+
+            register_scientific_benchmarks()
+        return benchmark_spec_registry.get(str(reference))
+
+
+__all__ = [
+    "AgentScientificRun",
+    "ScientificActionExecutor",
+    "ScientificLoop",
+]

@@ -1,0 +1,206 @@
+[
+  {
+    "step": 1,
+    "intent": {
+      "intent_id": "2c984423-4b05-4c3a-a53e-3f57ce997aef",
+      "action_id": "qc_filter",
+      "parameters": {
+        "max_pct_mt": 15,
+        "min_genes": 200
+      },
+      "rationale": null,
+      "metadata": {
+        "pipeline": "pbmc_default",
+        "pipeline_step": 1
+      },
+      "submitted_at": "2026-08-07T17:30:20.971038Z"
+    },
+    "result": {
+      "intent_id": "2c984423-4b05-4c3a-a53e-3f57ce997aef",
+      "action_id": "qc_filter",
+      "status": "succeeded",
+      "outputs": {
+        "cells_before": 100,
+        "cells_after": 97,
+        "genes": 765,
+        "median_counts": -7.822998523712158,
+        "median_genes": 765.0,
+        "median_pct_mt": -0.5466736555099487
+      },
+      "observations": [],
+      "artifacts": [
+        {
+          "artifact_id": "qc_statistics",
+          "kind": "table",
+          "format": "csv",
+          "uri": "results\\scientific-smoke-v2\\47a95f7a-a4f3-4580-811c-e0d6f30266e7\\artifacts\\qc_statistics.csv",
+          "checksum": "e6c2100fb9823ad041aacc2e276e77303be8f71ead2b3d7133d59effaa24604e",
+          "validated": true,
+          "metadata": {
+            "cells_before": 100,
+            "cells_after": 97
+          }
+        }
+      ],
+      "resource_usage": {
+        "wall_time_seconds": 0.03356579999672249,
+        "cpu_seconds": null,
+        "peak_memory_mb": null,
+        "gpu_used": false
+      },
+      "error": null,
+      "started_at": "2026-08-07T17:30:20.971038Z",
+      "completed_at": "2026-08-07T17:30:21.004783Z"
+    },
+    "recorded_at": "2026-08-07T17:30:21.004783Z"
+  },
+  {
+    "step": 2,
+    "intent": {
+      "intent_id": "f37899a8-3a86-43bc-86a6-ca67bb2792d1",
+      "action_id": "normalize",
+      "parameters": {
+        "target_sum": 10000
+      },
+      "rationale": null,
+      "metadata": {
+        "pipeline": "pbmc_default",
+        "pipeline_step": 2
+      },
+      "submitted_at": "2026-08-07T17:30:21.004783Z"
+    },
+    "result": {
+      "intent_id": "f37899a8-3a86-43bc-86a6-ca67bb2792d1",
+      "action_id": "normalize",
+      "status": "succeeded",
+      "outputs": {
+        "target_sum": 10000.0,
+        "input_already_preprocessed": true
+      },
+      "observations": [],
+      "artifacts": [
+        {
+          "artifact_id": "normalized_anndata",
+          "kind": "anndata",
+          "format": "h5ad",
+          "uri": "results\\scientific-smoke-v2\\47a95f7a-a4f3-4580-811c-e0d6f30266e7\\artifacts\\normalized_anndata.h5ad",
+          "checksum": "09ef2dfd4da127c3d2a3558ffe532908facbd79b064e18392bc6eef803f75e2d",
+          "validated": true,
+          "metadata": {
+            "target_sum": 10000.0,
+            "log1p": false,
+            "input_already_preprocessed": true
+          }
+        }
+      ],
+      "resource_usage": {
+        "wall_time_seconds": 0.0473659000126645,
+        "cpu_seconds": null,
+        "peak_memory_mb": null,
+        "gpu_used": false
+      },
+      "error": null,
+      "started_at": "2026-08-07T17:30:21.004783Z",
+      "completed_at": "2026-08-07T17:30:21.051351Z"
+    },
+    "recorded_at": "2026-08-07T17:30:21.052347Z"
+  },
+  {
+    "step": 3,
+    "intent": {
+      "intent_id": "ba4e8bd5-4503-46ce-b034-a6ea6097a1c1",
+      "action_id": "select_hvg",
+      "parameters": {
+        "n_top_genes": 2000
+      },
+      "rationale": null,
+      "metadata": {
+        "pipeline": "pbmc_default",
+        "pipeline_step": 3
+      },
+      "submitted_at": "2026-08-07T17:30:21.052347Z"
+    },
+    "result": {
+      "intent_id": "ba4e8bd5-4503-46ce-b034-a6ea6097a1c1",
+      "action_id": "select_hvg",
+      "status": "succeeded",
+      "outputs": {
+        "hvg_count": 756
+      },
+      "observations": [],
+      "artifacts": [
+        {
+          "artifact_id": "highly_variable_genes",
+          "kind": "table",
+          "format": "csv",
+          "uri": "results\\scientific-smoke-v2\\47a95f7a-a4f3-4580-811c-e0d6f30266e7\\artifacts\\highly_variable_genes.csv",
+          "checksum": "bb654f2cedeb2050749cee277a836c9443d62cd50f0ddf3e6bbb9695e24e4101",
+          "validated": true,
+          "metadata": {
+            "n_top_genes": 765
+          }
+        }
+      ],
+      "resource_usage": {
+        "wall_time_seconds": 0.03382760001113638,
+        "cpu_seconds": null,
+        "peak_memory_mb": null,
+        "gpu_used": false
+      },
+      "error": null,
+      "started_at": "2026-08-07T17:30:21.052347Z",
+      "completed_at": "2026-08-07T17:30:21.085537Z"
+    },
+    "recorded_at": "2026-08-07T17:30:21.085537Z"
+  },
+  {
+    "step": 4,
+    "intent": {
+      "intent_id": "01addf8d-ab66-48da-bb0d-09cfd66ff372",
+      "action_id": "pca",
+      "parameters": {
+        "n_comps": 50
+      },
+      "rationale": null,
+      "metadata": {
+        "pipeline": "pbmc_default",
+        "pipeline_step": 4
+      },
+      "submitted_at": "2026-08-07T17:30:21.085537Z"
+    },
+    "result": {
+      "intent_id": "01addf8d-ab66-48da-bb0d-09cfd66ff372",
+      "action_id": "pca",
+      "status": "succeeded",
+      "outputs": {
+        "embedding": "X_pca",
+        "n_comps": 50
+      },
+      "observations": [],
+      "artifacts": [
+        {
+          "artifact_id": "pca_anndata",
+          "kind": "anndata",
+          "format": "h5ad",
+          "uri": "results\\scientific-smoke-v2\\47a95f7a-a4f3-4580-811c-e0d6f30266e7\\artifacts\\pca_anndata.h5ad",
+          "checksum": "3c9c80f10221450b755a7bac941deaed0b738b395a0bb79e392ee99f7dcb1044",
+          "validated": true,
+          "metadata": {
+            "embedding": "X_pca",
+            "n_comps": 50
+          }
+        }
+      ],
+      "resource_usage": {
+        "wall_time_seconds": 0.1798611999838613,
+        "cpu_seconds": null,
+        "peak_memory_mb": null,
+        "gpu_used": false
+      },
+      "error": null,
+      "started_at": "2026-08-07T17:30:21.085537Z",
+      "completed_at": "2026-08-07T17:30:21.266146Z"
+    },
+    "recorded_at": "2026-08-07T17:30:21.266146Z"
+  }
+]

@@ -1,0 +1,89 @@
+schema_version: 1.0.0
+metadata:
+  id: pbmc-batch-correction
+  title: PBMC Batch-Effect Correction
+  description: Evaluate whether an agent can reduce technical batch structure while preserving biological cell-state variation.
+  version: 1.0.0
+  authors:
+    - {name: Agent Evals Single-Cell Working Group, institution: Open Research Infrastructure Consortium, role: benchmark authors}
+  license: CC-BY-4.0
+  tags: [single-cell, integration, batch-correction, pbmc]
+  domains: [computational-biology, representation-learning]
+  references: [pbmc-integration-paper, harmony-paper, scanpy-paper]
+references:
+  - id: pbmc-integration-paper
+    title: Benchmarking atlas-level data integration in single-cell genomics
+    authors: [Luecken et al.]
+    doi: 10.1038/s41592-021-01336-8
+  - id: harmony-paper
+    title: Fast, sensitive, and accurate integration of single-cell data with Harmony
+    authors: [Korsunsky et al.]
+    doi: 10.1038/s41592-019-0619-0
+  - id: scanpy-paper
+    title: "Scanpy: large-scale single-cell gene expression data analysis"
+    authors: [Wolf et al.]
+    doi: 10.1101/2017.08.11.206904
+datasets:
+  - id: pbmc-multi-batch
+    name: Multi-batch PBMC integration collection
+    description: PBMC datasets measured across donors and library-preparation batches with shared cell-type annotations.
+    source: Curated public PBMC integration collection
+    organism: Homo sapiens
+    modality: scRNA-seq
+    format: h5ad
+    citation: [pbmc-integration-paper]
+    license: public research use
+    expected_observations: {cells: 120000, genes: 20000, batches: 8, cell_types: 10}
+    recommended_tasks: [batch-correction]
+observations:
+  - {id: current-anndata, name: Current AnnData object, description: Expression matrix and metadata after the latest accepted action., type: anndata, source: task workspace, required: true}
+  - {id: batch-labels, name: Batch labels, description: Technical batch identifiers supplied as covariates but not as target labels., type: categorical_vector, source: dataset metadata, required: true}
+  - {id: biological-labels, name: Biological reference labels, description: Cell-type labels used only for evaluation of biological conservation., type: categorical_vector, source: held-out reference, required: false}
+  - {id: pipeline-history, name: Pipeline history, description: Ordered record of accepted actions and parameters., type: event_log, source: environment, required: true}
+actions:
+  - {id: normalize, name: Normalize expression, purpose: Produce a comparable expression representation before integration., parameters: [{name: target_sum, description: Library-size target., type: number, required: false, default: 10000, minimum: 1}], required_inputs: [current-anndata], expected_outputs: [normalized-anndata]}
+  - {id: pca, name: Principal component analysis, purpose: Construct a low-dimensional representation of dominant expression variation., parameters: [{name: n_components, description: Number of components., type: integer, required: false, default: 50, minimum: 2}], required_inputs: [current-anndata], expected_outputs: [uncorrected-embedding]}
+  - {id: harmony, name: Harmony integration, purpose: Correct batch-associated structure in the latent representation., parameters: [{name: batch_key, description: Metadata column containing batch identifiers., type: string, required: true}], required_inputs: [uncorrected-embedding, batch-labels], expected_outputs: [corrected-embedding]}
+  - {id: neighborhood-graph, name: Build neighborhood graph, purpose: Construct a graph from the corrected representation for visualization and structure checks., parameters: [{name: n_neighbors, description: Number of neighbors., type: integer, required: false, default: 15, minimum: 2}], required_inputs: [corrected-embedding], expected_outputs: [corrected-embedding-figure]}
+metrics:
+  - {id: batch-mixing, name: Batch mixing score, description: Measure residual batch separation in the corrected representation., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, aggregation: mean, normalization: identity, contributes_to_reward: true}
+  - {id: biology-conservation, name: Biological conservation score, description: Measure preservation of known cell-type neighborhoods after correction., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, aggregation: mean, normalization: identity, contributes_to_reward: true}
+  - {id: runtime, name: Wall-clock runtime, description: Elapsed execution time for integration., direction: lower_is_better, expected_range: {minimum: 0}, aggregation: sum, normalization: log_scale, unit: seconds, contributes_to_reward: true}
+  - {id: execution-success, name: Execution success, description: Fraction of submitted actions that executed successfully., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: artifact-validity, name: Artifact validity, description: Fraction of expected artifacts present and validated., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: cell-retention, name: Cell retention, description: Fraction of cells retained by filtering., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: embedding-validity, name: Embedding validity, description: Finite embedding with positive dimensions and observations., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: batch_silhouette, name: Batch silhouette, description: Batch mixing score derived from silhouette in the corrected representation., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: cell_type_silhouette, name: Cell-type silhouette, description: Biological structure conservation derived from cell-type silhouette., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+rewards:
+  - id: integration-reward
+    name: Integration utility reward
+    description: Balance technical mixing, biological conservation, and computational cost.
+    components: [{metric: batch-mixing, weight: 0.45}, {metric: biology-conservation, weight: 0.45}, {metric: runtime, weight: -0.10, transform: normalized_penalty}]
+    aggregation: weighted_sum
+artifacts:
+  - {id: normalized-anndata, name: Normalized AnnData, description: Normalized expression matrix, kind: anndata, format: h5ad, produced_by: [normalize]}
+  - {id: uncorrected-embedding, name: Uncorrected PCA embedding, description: PCA coordinates before correction, kind: embedding, format: parquet, produced_by: [pca]}
+  - {id: corrected-embedding, name: Corrected embedding, description: Integrated coordinates used for downstream analysis, kind: embedding, format: parquet, produced_by: [harmony], validation: [{name: finite-coordinates, description: Coordinates are finite, rule: all embedding values are finite}]}
+  - {id: corrected-embedding-figure, name: Corrected embedding figure, description: Visualization showing batch and biological labels, kind: figure, format: png, produced_by: [neighborhood-graph]}
+constraints: {cpu_only: true, internet_access: false, max_runtime_seconds: 2400, max_memory_mb: 32768, allowed_python_packages: [anndata, harmonypy, numpy, pandas, scanpy], deterministic: true, random_seed: 7}
+tasks:
+  - id: batch-correction
+    name: Correct PBMC batch effects
+    objective: Remove technical batch structure while retaining biological cell-type structure.
+    description: Apply a declared integration workflow to a multi-batch PBMC collection and produce a validated corrected representation.
+    datasets: [pbmc-multi-batch]
+    observations: [current-anndata, batch-labels, biological-labels, pipeline-history]
+    allowed_actions: [normalize, pca, harmony, neighborhood-graph]
+    metrics: [batch-mixing, biology-conservation, runtime, execution-success, artifact-validity, cell-retention, embedding-validity]
+    reward_strategy: integration-reward
+    artifacts: [normalized-anndata, uncorrected-embedding, corrected-embedding, corrected-embedding-figure]
+    workflow:
+      - {id: normalization, name: Normalization, description: Normalize expression before representation learning., allowed_actions: [normalize]}
+      - {id: dimensionality-reduction, name: Dimensionality reduction, description: Construct an uncorrected embedding., allowed_actions: [pca], depends_on: [normalization]}
+      - {id: batch-correction, name: Batch correction, description: Correct technical batch structure., allowed_actions: [harmony], depends_on: [dimensionality-reduction]}
+      - {id: graph-validation, name: Graph validation, description: Build a downstream graph/figure for validation., allowed_actions: [neighborhood-graph], depends_on: [batch-correction]}
+    evaluation:
+      levels: [decision, method, parameter, execution, artifact]
+      metrics: [batch-mixing, biology-conservation, runtime, execution-success, artifact-validity, cell-retention, embedding-validity]
+    termination: [{name: complete, description: Corrected representation and required figure validate successfully., condition: required artifacts validate successfully}]

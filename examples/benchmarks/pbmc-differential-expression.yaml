@@ -1,0 +1,65 @@
+schema_version: 1.0.0
+metadata:
+  id: pbmc-differential-expression
+  title: PBMC Differential Expression and Marker Recovery
+  description: Evaluate whether an agent can define and execute a statistically defensible differential-expression analysis between biologically specified cell populations.
+  version: 1.0.0
+  authors: [{name: Agent Evals Single-Cell Working Group, institution: Open Research Infrastructure Consortium, role: benchmark authors}]
+  license: CC-BY-4.0
+  tags: [single-cell, differential-expression, marker-genes, pbmc]
+  domains: [computational-biology, statistics]
+  references: [pbmc68k-paper, scran-paper, scanpy-paper]
+references:
+  - {id: pbmc68k-paper, title: The circulating immune cell atlas, authors: [Zheng et al.], doi: 10.1038/nmeth.4292}
+  - {id: scran-paper, title: Normalization of single-cell RNA-seq data, authors: [Lun et al.], doi: 10.1186/s13059-016-0947-7}
+  - {id: scanpy-paper, title: Scanpy large-scale single-cell gene expression data analysis, authors: [Wolf et al.], doi: 10.1101/2017.08.11.206904}
+datasets:
+  - id: pbmc68k-de
+    name: PBMC 68k differential-expression split
+    description: PBMC 68k expression data with a prespecified comparison between CD14 monocytes and FCGR3A monocytes.
+    source: 10x Genomics public datasets
+    organism: Homo sapiens
+    modality: scRNA-seq
+    format: h5ad
+    citation: [pbmc68k-paper]
+    license: public research use
+    expected_observations: {cells: 68579, genes: 32738, comparison_groups: [CD14_Monocytes, FCGR3A_Monocytes]}
+    recommended_tasks: [differential-expression]
+observations:
+  - {id: current-anndata, name: Current AnnData object, description: Expression matrix after accepted preprocessing actions., type: anndata, source: task workspace, required: true}
+  - {id: comparison-definition, name: Prespecified comparison, description: The two cell populations and contrast direction are provided without reference marker rankings., type: contrast, source: benchmark definition, required: true, schema: {group_a: CD14_Monocytes, group_b: FCGR3A_Monocytes}}
+  - {id: pipeline-history, name: Pipeline history, description: Ordered record of analysis decisions and parameters., type: event_log, source: environment, required: true}
+actions:
+  - {id: normalize, name: Normalize expression, purpose: "Normalize counts with a declared method suitable for between-cell comparison.", parameters: [{name: method, description: Normalization method., type: enum, required: true, choices: [scran, library_size_log1p]}], required_inputs: [current-anndata], expected_outputs: [normalized-anndata]}
+  - {id: differential-expression, name: Differential expression, purpose: "Estimate effect sizes and statistical evidence for the prespecified contrast.", parameters: [{name: method, description: Statistical testing method., type: enum, required: true, choices: [wilcoxon, t_test, pseudobulk_nb]}, {name: covariates, description: Covariates included in the model., type: "list[string]", required: false, default: []}], required_inputs: [normalized-anndata, comparison-definition], expected_outputs: [de-table]}
+  - {id: report, name: Generate analysis report, purpose: "Summarize the contrast, filtering decisions, effect sizes, and significant genes.", parameters: [{name: top_n, description: Number of top genes displayed., type: integer, required: false, default: 50, minimum: 1}], required_inputs: [de-table], expected_outputs: [de-report]}
+metrics:
+  - {id: marker-recovery-precision, name: Marker recovery precision, description: Fraction of reported top markers supported by the held-out reference marker set., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, aggregation: mean, normalization: identity, contributes_to_reward: true}
+  - {id: effect-size-calibration, name: Effect-size calibration, description: Agreement between reported and reference effect directions and magnitudes., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, aggregation: mean, normalization: identity, contributes_to_reward: true}
+  - {id: marker_overlap, name: Marker overlap, description: Overlap between ranked DE genes and the declared reference marker set., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: precision_at_k, name: Marker precision@K, description: Fraction of top-K reported genes in the declared reference marker set., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: auroc, name: Marker AUROC, description: Ranking quality for positive reference markers versus other ranked genes., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+  - {id: runtime, name: Wall-clock runtime, description: Elapsed analysis time., direction: lower_is_better, expected_range: {minimum: 0}, aggregation: sum, normalization: log_scale, unit: seconds, contributes_to_reward: true}
+rewards:
+  - id: de-reward
+    name: Differential-expression utility reward
+    description: Reward reproducible, accurate marker recovery with a modest runtime penalty.
+    components: [{metric: marker-recovery-precision, weight: 0.55}, {metric: effect-size-calibration, weight: 0.35}, {metric: runtime, weight: -0.10, transform: normalized_penalty}]
+    aggregation: weighted_sum
+artifacts:
+  - {id: normalized-anndata, name: Normalized AnnData, description: Expression object used for testing., kind: anndata, format: h5ad, produced_by: [normalize]}
+  - {id: de-table, name: Differential-expression table, description: "Gene-level effect sizes, test statistics, adjusted p-values, and provenance.", kind: table, format: parquet, required: true, produced_by: [differential-expression], validation: [{name: required-columns, description: Statistical result columns are present, rule: "columns include gene,effect_size,p_value,q_value"}]}
+  - {id: de-report, name: Differential-expression report, description: Human-readable summary of the prespecified contrast., kind: report, format: html, produced_by: [report]}
+constraints: {cpu_only: true, internet_access: false, max_runtime_seconds: 1800, max_memory_mb: 16384, allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, statsmodels], deterministic: true, random_seed: 13}
+tasks:
+  - id: differential-expression
+    name: Recover monocyte markers
+    objective: Identify genes that distinguish CD14 and FCGR3A monocytes with calibrated statistical evidence.
+    description: Use only the prespecified contrast and visible data to produce a ranked, validated differential-expression table and report.
+    datasets: [pbmc68k-de]
+    observations: [current-anndata, comparison-definition, pipeline-history]
+    allowed_actions: [normalize, differential-expression, report]
+    metrics: [marker-recovery-precision, effect-size-calibration, runtime]
+    reward_strategy: de-reward
+    artifacts: [normalized-anndata, de-table, de-report]
+    termination: [{name: complete, description: Results include statistical evidence and required report., condition: required artifacts validate successfully}]
