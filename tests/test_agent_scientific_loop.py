@@ -7,6 +7,16 @@ import pytest
 pytest.importorskip("anndata")
 pytest.importorskip("scanpy")
 
+from agent_evals.agents.runtime import (
+    AgentAction,
+    AgentContext,
+    AgentManifest,
+    AgentObservation,
+    AgentRuntime,
+    AgentSession,
+    FinalSubmission,
+    agent_runtime_registry,
+)
 from agent_evals.agents.trajectory import ScientificDecision
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.datasets.pbmc import PBMCDataset
@@ -26,6 +36,34 @@ from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.observations import ScientificObservationBuilder
 
 PBMC_CACHE = Path(".cache/datasets/pbmc68k_reduced.h5ad")
+
+
+class FakeScientificRuntime(AgentRuntime):
+    def __init__(self) -> None:
+        self.agent_id = "fake-scientific-runtime"
+        self.manifest = AgentManifest(
+            name="Fake scientific runtime",
+            type="test-runtime",
+            capabilities=["structured_actions"],
+        )
+
+    async def initialize(self, context: AgentContext) -> AgentSession:
+        return AgentSession(context=context, state={"step": 0})
+
+    async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
+        del observation
+        actions = ["qc", "normalize", "finish"]
+        index = int(session.state.get("step", 0))
+        session.state["step"] = index + 1
+        return AgentAction(action_type=actions[index])
+
+    async def terminate(
+        self,
+        session: AgentSession,
+        observation: AgentObservation | None = None,
+    ) -> FinalSubmission:
+        del session, observation
+        return FinalSubmission(summary="completed")
 
 
 def _dataset() -> PBMCDataset:
@@ -106,3 +144,23 @@ async def test_rule_based_scientific_loop_persists_rewards_and_report(tmp_path: 
     assert root.joinpath("trajectory.json").exists()
     assert root.joinpath("report.md").exists()
     assert all(Path(artifact.uri).exists() for artifact in run.artifacts if artifact.uri)
+
+
+@pytest.mark.asyncio
+async def test_scientific_loop_runs_universal_runtime_agents(tmp_path: Path) -> None:
+    runtime_name = "fake-scientific-runtime"
+    if runtime_name not in agent_runtime_registry.list():
+        agent_runtime_registry.register(runtime_name, FakeScientificRuntime, capabilities=["structured_actions"])
+
+    run = await ScientificLoop().run(
+        "pbmc-cell-annotation",
+        agent_type=runtime_name,
+        output_dir=tmp_path,
+        max_cells=120,
+        max_steps=4,
+    )
+
+    assert run.agent_run.succeeded
+    assert run.agent_run.manifest is not None
+    assert run.agent_run.manifest.name == "Fake scientific runtime"
+    assert (tmp_path / run.run_id / "agent_run.json").exists()

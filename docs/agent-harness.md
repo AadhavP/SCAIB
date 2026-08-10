@@ -62,6 +62,32 @@ uv run agent-evals run --benchmark pbmc-cell-annotation --agent openhands --work
 Live runs require a provider credential and may incur model usage charges;
 normal tests and the mock adapter never call a model.
 
+## Running with GPT or Claude
+
+Install the provider SDKs only when you want live model runs:
+
+```bash
+uv sync --extra science --extra providers
+```
+
+Configure credentials with environment variables. Do not put keys in benchmark
+YAML, manifests, or committed config files.
+
+```bash
+set OPENAI_API_KEY=your-openai-key
+uv run agent-evals run --benchmark pbmc-cell-annotation --agent openai --model gpt-5 --max-cells 120 --max-steps 4
+
+set ANTHROPIC_API_KEY=your-anthropic-key
+uv run agent-evals run --benchmark pbmc-cell-annotation --agent anthropic --model claude-sonnet --max-cells 120 --max-steps 4
+```
+
+Universal runtimes use the real scientific loop, so provider decisions execute
+against the controlled Scanpy workspace and persist the same `agent_run.json`,
+`trajectory.json`, `actions.json`, `metrics.json`, and report artifacts as
+other scientific runs. `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` are supported
+for compatible deployments; API keys are passed only to SDK constructors and are
+not copied into agent manifests.
+
 ## Raw traces and normalized trajectories
 
 Raw events preserve the source framework's original payload and event type.

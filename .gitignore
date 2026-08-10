@@ -51,6 +51,12 @@ coverage.xml
 # Documentation
 site/
 
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/tsconfig.tsbuildinfo
+
 # Environment & Secret files
 .env
 .env.local

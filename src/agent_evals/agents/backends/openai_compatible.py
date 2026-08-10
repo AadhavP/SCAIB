@@ -26,7 +26,6 @@ class OpenAICompatibleRuntime(OpenAIRuntime):
             type="llm_tool_agent",
             model=AgentModelInfo(provider="openai-compatible", name=model),
             capabilities=["tool_use", "structured_actions"],
-            metadata={"base_url": base_url},
         )
         self.base_url = base_url
 

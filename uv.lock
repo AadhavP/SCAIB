@@ -62,6 +62,10 @@ openhands = [
     { name = "openhands-sdk" },
     { name = "openhands-tools" },
 ]
+providers = [
+    { name = "anthropic" },
+    { name = "openai" },
+]
 science = [
     { name = "anndata" },
     { name = "harmonypy" },
@@ -72,6 +76,7 @@ science = [
 [package.metadata]
 requires-dist = [
     { name = "anndata", marker = "extra == 'science'", specifier = ">=0.10.8,<1.0.0" },
+    { name = "anthropic", marker = "extra == 'providers'", specifier = ">=0.120.2" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=24.3.0" },
     { name = "fastapi", specifier = ">=0.110.0" },
     { name = "fastmcp-slim", extras = ["client"], marker = "extra == 'openhands'", specifier = ">=3.0.0,<4.0.0" },
@@ -81,6 +86,7 @@ requires-dist = [
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.5.0" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.24.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.9.0" },
+    { name = "openai", marker = "extra == 'providers'", specifier = ">=2.53.0" },
     { name = "openhands-sdk", marker = "extra == 'openhands'", specifier = ">=1.22.1,<1.23.0" },
     { name = "openhands-tools", marker = "extra == 'openhands'", specifier = ">=1.22.1,<1.23.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7.0" },
@@ -99,7 +105,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.28.0" },
 ]
-provides-extras = ["openhands", "science", "dev", "docs"]
+provides-extras = ["openhands", "science", "dev", "docs", "providers"]
 
 [[package]]
 name = "aiofile"

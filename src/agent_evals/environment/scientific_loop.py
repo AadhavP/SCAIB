@@ -13,7 +13,9 @@ from agent_evals.agents import (
     AgentConfiguration,
     AgentHarness,
     AgentRun,
+    RuntimeAgentAdapter,
     agent_adapter_registry,
+    agent_runtime_registry,
 )
 from agent_evals.agents.trajectory import DecisionCategory
 from agent_evals.benchmarks.io import load_benchmark
@@ -67,6 +69,8 @@ from agent_evals.scientific.metrics import (
     compute_objective_metrics,
 )
 from agent_evals.scientific.observations import ScientificObservationBuilder
+
+DEFAULT_RUNTIME_MAX_STEPS = 4
 
 
 class AgentScientificRun(BaseModel):
@@ -313,6 +317,8 @@ class ScientificLoop:
         seed: int = 0,
         max_cells: int | None = None,
         max_steps: int | None = None,
+        model: str | None = None,
+        provider: str | None = None,
     ) -> AgentScientificRun:
         """Load data, run the harness, score local/global outcomes, and persist."""
         specification = self._resolve_benchmark(benchmark)
@@ -339,11 +345,18 @@ class ScientificLoop:
             observation_builder=observation_builder,
             reward_evaluator=reward_evaluator,
         )
-        adapter = agent_adapter_registry.create(agent_type)
+        adapter = _create_scientific_adapter(agent_type, model=model)
+        effective_max_steps = (
+            DEFAULT_RUNTIME_MAX_STEPS
+            if max_steps is None and agent_type in agent_runtime_registry.list()
+            else max_steps
+        )
         configuration = AgentConfiguration(
             agent_type=agent_type,
+            model=model,
+            provider=provider,
             seed=seed,
-            max_steps=max_steps,
+            max_steps=effective_max_steps,
             workspace={"root": str(pending_root)},
             metadata={
                 "dataset_id": task.datasets[0] if task.datasets else "pbmc",
@@ -741,6 +754,16 @@ class ScientificLoop:
 
             register_scientific_benchmarks()
         return benchmark_spec_registry.get(str(reference))
+
+
+def _create_scientific_adapter(agent_type: str, *, model: str | None = None) -> Any:
+    """Create a legacy adapter or wrap a universal runtime for scientific episodes."""
+    if agent_type in agent_runtime_registry.list():
+        runtime_config: dict[str, object] = {}
+        if model is not None and agent_type not in {"gpt-5", "claude-sonnet"}:
+            runtime_config["model"] = model
+        return RuntimeAgentAdapter(agent_runtime_registry.create(agent_type, **runtime_config))
+    return agent_adapter_registry.create(agent_type)
 
 
 __all__ = [

@@ -1,7 +1,9 @@
 """Vertical-slice tests for adapters, runs, trajectories, and workspaces."""
 
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -154,6 +156,72 @@ def test_adapter_registry_reports_optional_availability() -> None:
     assert {"mock", "openhands"}.issubset(availability)
     assert availability["mock"] is True
     assert isinstance(availability["openhands"], bool)
+
+
+def test_openhands_sdk_session_ignores_serialized_metadata_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm_kwargs: dict[str, object] = {}
+
+    class LLM:
+        def __init__(self, **kwargs: object) -> None:
+            llm_kwargs.update(kwargs)
+
+    class Tool:
+        def __init__(self, *, name: str) -> None:
+            self.name = name
+
+    class Agent:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class Conversation:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "openhands.sdk",
+        SimpleNamespace(LLM=LLM, Tool=Tool, Agent=Agent, Conversation=Conversation),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openhands.tools.terminal",
+        SimpleNamespace(TerminalTool=SimpleNamespace(name="terminal")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openhands.tools.file_editor",
+        SimpleNamespace(FileEditorTool=SimpleNamespace(name="file_editor")),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "openhands.tools.task_tracker",
+        SimpleNamespace(TaskTrackerTool=SimpleNamespace(name="task_tracker")),
+    )
+    monkeypatch.setenv("LLM_API_KEY", "env-key")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+
+    OpenHandsAdapter()._create_sdk_session(
+        SPECIFICATION.tasks[0],
+        AgentConfiguration(
+            agent_type="openhands",
+            metadata={
+                "api_key": "serialized-key",
+                "base_url": "https://serialized.example.invalid",
+            },
+        ),
+        SimpleNamespace(
+            manifest=SimpleNamespace(
+                root=tmp_path,
+                log_dir=tmp_path / "logs",
+            )
+        ),
+    )
+
+    assert llm_kwargs["api_key"] == "env-key"
+    assert llm_kwargs["base_url"] is None
 
 
 @pytest.mark.asyncio

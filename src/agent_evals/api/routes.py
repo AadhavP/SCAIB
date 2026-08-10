@@ -1,15 +1,31 @@
 """FastAPI router endpoints."""
 
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_evals.agents.registry import agent_adapter_registry
-from agent_evals.benchmarks.registry import benchmark_registry
+from agent_evals.agents.runtime import agent_runtime_registry
+from agent_evals.api.jobs import EvaluationJob, EvaluationJobManager
+from agent_evals.benchmarks.registry import benchmark_registry, benchmark_spec_registry
+from agent_evals.core.config import get_settings
 from agent_evals.core.types import StatusEnum
 
-router = APIRouter(prefix="/v1", tags=["evaluations"])
+
+def _require_api_key(authorization: str | None = Header(default=None)) -> None:
+    """Require a bearer token when the deployment config enables one."""
+    configured = get_settings().api.api_key
+    if configured is None:
+        return
+    expected = f"Bearer {configured}"
+    if authorization != expected:
+        raise HTTPException(status_code=401, detail="authentication required")
+
+
+router = APIRouter(prefix="/v1", tags=["evaluations"], dependencies=[Depends(_require_api_key)])
+job_manager = EvaluationJobManager()
 
 
 class HealthCheckResponse(BaseModel):
@@ -20,7 +36,26 @@ class HealthCheckResponse(BaseModel):
 class RunBenchmarkRequest(BaseModel):
     benchmark_id: str
     agent_id: str
-    config_override: dict[str, Any] = {}
+    model_config = ConfigDict(extra="forbid")
+    model: str | None = None
+    provider: str | None = None
+    seed: int = 0
+    max_cells: int | None = Field(default=None, ge=1, le=10000)
+    max_steps: int | None = Field(default=None, ge=1, le=32)
+    config_override: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_overrides(self) -> "RunBenchmarkRequest":
+        for key, maximum in (("max_cells", 10000), ("max_steps", 32)):
+            value = self.config_override.get(key)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+                or value > maximum
+            ):
+                raise ValueError(f"config_override.{key} must be between 1 and {maximum}")
+        return self
 
 
 class RunBenchmarkResponse(BaseModel):
@@ -28,6 +63,14 @@ class RunBenchmarkResponse(BaseModel):
     benchmark_id: str
     agent_id: str
     status: StatusEnum
+
+
+def _ensure_benchmark_specs() -> None:
+    if benchmark_spec_registry.list_ids():
+        return
+    root = Path("examples/benchmarks")
+    if root.exists():
+        benchmark_spec_registry.discover(root, replace=True)
 
 
 @router.get("/health", response_model=HealthCheckResponse)
@@ -39,33 +82,90 @@ async def health_check() -> HealthCheckResponse:
 @router.get("/benchmarks", response_model=list[str])
 async def list_benchmarks() -> list[str]:
     """List all registered benchmark IDs."""
-    return benchmark_registry.list_ids()
+    _ensure_benchmark_specs()
+    return benchmark_spec_registry.list_ids() or benchmark_registry.list_ids()
 
 
-@router.get("/agents", response_model=list[str])
-async def list_agents() -> list[str]:
-    """List all registered agent adapter types."""
-    return agent_adapter_registry.list_types()
+@router.get("/agents", response_model=list[dict[str, Any]])
+async def list_agents() -> list[dict[str, Any]]:
+    """List legacy adapters and universal runtimes with public capabilities."""
+    legacy = [
+        {"id": name, "type": "adapter", "capabilities": [], "available": True}
+        for name in agent_adapter_registry.list_types()
+    ]
+    runtimes = [
+        {
+            "id": name,
+            "type": agent_runtime_registry.manifest(name).type,
+            "capabilities": agent_runtime_registry.manifest(name).capabilities,
+            "available": True,
+        }
+        for name in agent_runtime_registry.list()
+    ]
+    return legacy + runtimes
 
 
-@router.post(
-    "/evaluations/run",
-    response_model=RunBenchmarkResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def trigger_evaluation(payload: RunBenchmarkRequest) -> RunBenchmarkResponse:
-    """Trigger a benchmark evaluation run."""
+@router.get("/benchmarks/{benchmark_id}")
+async def benchmark_details(benchmark_id: str) -> dict[str, Any]:
+    """Return the declarative benchmark details needed by the run console."""
+    _ensure_benchmark_specs()
     try:
-        # Check if benchmark is registered
-        _ = benchmark_registry.get(payload.benchmark_id)
-    except Exception as err:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=str(err)
-        ) from err
+        specification = benchmark_spec_registry.get(benchmark_id)
+    except Exception as error:
+        raise HTTPException(status_code=404, detail="benchmark not found") from error
+    return {
+        "id": specification.metadata.id,
+        "title": specification.metadata.title,
+        "description": specification.metadata.description,
+        "version": specification.metadata.version,
+        "tags": specification.metadata.tags,
+        "datasets": [item.model_dump(mode="json") for item in specification.datasets],
+        "tasks": [item.model_dump(mode="json") for item in specification.tasks],
+        "actions": [item.model_dump(mode="json") for item in specification.actions],
+        "metrics": [item.model_dump(mode="json") for item in specification.metrics],
+    }
 
+
+@router.post("/evaluations/run", response_model=RunBenchmarkResponse, status_code=status.HTTP_202_ACCEPTED)
+async def trigger_evaluation_with_background(
+    payload: RunBenchmarkRequest,
+    background_tasks: BackgroundTasks,
+) -> RunBenchmarkResponse:
+    """Submit a validated run and execute it after the response is accepted."""
+    _ensure_benchmark_specs()
+    try:
+        benchmark_spec_registry.get(payload.benchmark_id)
+    except Exception as error:
+        raise HTTPException(status_code=404, detail="benchmark not found") from error
+    known_agents = set(agent_adapter_registry.list_types()) | set(agent_runtime_registry.list())
+    if payload.agent_id not in known_agents:
+        raise HTTPException(
+            status_code=404,
+            detail=f"agent '{payload.agent_id}' is not registered",
+        )
+    try:
+        job_id = job_manager.create(payload)
+    except RuntimeError as error:
+        raise HTTPException(status_code=429, detail=str(error)) from error
+    background_tasks.add_task(job_manager.execute, job_id)
     return RunBenchmarkResponse(
-        job_id="job_placeholder_12345",
+        job_id=job_id,
         benchmark_id=payload.benchmark_id,
         agent_id=payload.agent_id,
         status=StatusEnum.PENDING,
     )
+
+
+@router.get("/evaluations", response_model=list[EvaluationJob])
+async def list_evaluation_jobs() -> list[EvaluationJob]:
+    """List jobs submitted to this API process."""
+    return job_manager.list()
+
+
+@router.get("/evaluations/{job_id}", response_model=EvaluationJob)
+async def get_evaluation_job(job_id: str) -> EvaluationJob:
+    """Return current status and, when complete, the serialized run result."""
+    try:
+        return job_manager.get(job_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="evaluation job not found") from error

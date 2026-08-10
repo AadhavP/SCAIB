@@ -192,6 +192,12 @@ def run_command(
         min=1,
         help="Optional deterministic PBMC prefix subset for local runs.",
     ),
+    max_steps: int | None = typer.Option(
+        None,
+        "--max-steps",
+        min=1,
+        help="Maximum agent-environment interaction steps.",
+    ),
 ) -> None:
     """Execute one benchmark task through a framework-neutral harness."""
     benchmark_reference = benchmark or "examples/benchmarks/pbmc-cell-annotation.yaml"
@@ -202,8 +208,17 @@ def run_command(
         benchmark=benchmark_reference,
         agent=agent,
     )
-    if agent == "rule-based":
-        from agent_evals.environment.scientific_loop import ScientificLoop
+    if agent == "rule-based" or agent in agent_runtime_registry.list():
+        from agent_evals.environment.scientific_loop import (
+            DEFAULT_RUNTIME_MAX_STEPS,
+            ScientificLoop,
+        )
+
+        runtime_max_steps = (
+            DEFAULT_RUNTIME_MAX_STEPS
+            if max_steps is None and agent in agent_runtime_registry.list()
+            else max_steps
+        )
 
         scientific_run = asyncio.run(
             ScientificLoop().run(
@@ -212,6 +227,9 @@ def run_command(
                 output_dir=output_dir,
                 seed=seed,
                 max_cells=max_cells,
+                max_steps=runtime_max_steps,
+                model=model,
+                provider=provider,
             )
         )
         console.print(
@@ -233,6 +251,7 @@ def run_command(
             task_id=task,
             dataset_id=dataset,
             seed=seed,
+            max_steps=max_steps,
             output=run_output,
             mock_policy=mock_policy,
         )
@@ -258,6 +277,7 @@ async def _run_benchmark(
     task_id: str | None,
     dataset_id: str | None,
     seed: int,
+    max_steps: int | None,
     output: Path | None,
     mock_policy: str | None,
 ) -> AgentRun:
@@ -284,6 +304,7 @@ async def _run_benchmark(
         model=model,
         provider=provider,
         seed=seed,
+        max_steps=max_steps,
         workspace={"root": str(workspace)} if workspace else {},
         metadata={
             key: value

@@ -79,6 +79,22 @@ uv run agent-evals serve
 ```
 Interactive OpenAPI documentation will be available at `http://127.0.0.1:8000/docs`.
 
+### Scientific console
+
+The React/Vite console lives in `frontend/` and expects the API on port 8004 by
+default (override with `VITE_API_PROXY_TARGET`). Start both processes in two
+terminals:
+
+```powershell
+uv run agent-evals serve --port 8004
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Provider credentials remain backend environment
+variables; they are never entered into or persisted by the browser.
+
 ---
 
 ## ⚙️ Configuration System

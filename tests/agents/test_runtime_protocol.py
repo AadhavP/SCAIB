@@ -1,5 +1,6 @@
 """Universal runtime protocol and manager tests."""
 
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ import pytest
 from agent_evals.agents.backends import (
     AnthropicRuntime,
     CustomPythonRuntime,
+    OpenAICompatibleRuntime,
     OpenAIRuntime,
 )
 from agent_evals.agents.harness import AgentHarness
@@ -131,6 +133,109 @@ async def test_openai_and_anthropic_backends_parse_mock_structured_actions() -> 
     anthropic = AnthropicRuntime(client=anthropic_client)
     anthropic_session = await anthropic.initialize(context)
     assert (await anthropic.act(anthropic_session, observation)).action_type == "normalize"
+
+
+@pytest.mark.asyncio
+async def test_openai_runtime_builds_sdk_client_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_client: dict[str, object] = {}
+    create_call: dict[str, object] = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs: object) -> None:
+            created_client.update(kwargs)
+            self.responses = SimpleNamespace(
+                create=self._create,
+            )
+
+        def _create(self, **kwargs: object) -> object:
+            create_call.update(kwargs)
+            return SimpleNamespace(
+                output=[SimpleNamespace(type="function_call", name="qc", arguments='{"min_genes": 200}')]
+            )
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+
+    runtime = OpenAIRuntime()
+    session = await runtime.initialize(AgentContext(benchmark_id="b", task_id="t", workspace="."))
+    action = await runtime.act(session, AgentObservation())
+
+    assert action.action_type == "qc"
+    assert action.parameters == {"min_genes": 200}
+    assert created_client == {
+        "api_key": "test-openai-key",
+        "base_url": "https://example.invalid/v1",
+    }
+    assert isinstance(create_call["instructions"], str)
+    assert [message["role"] for message in create_call["input"]] == ["user"]
+    assert "api_key" not in runtime.manifest.metadata
+
+
+@pytest.mark.asyncio
+async def test_openai_runtime_parses_responses_text_content_as_action() -> None:
+    client = SimpleNamespace(
+        responses=SimpleNamespace(
+            create=lambda **_kwargs: SimpleNamespace(
+                output=[
+                    SimpleNamespace(
+                        content=[
+                            SimpleNamespace(
+                                type="output_text",
+                                text='{"action_type":"qc","parameters":{"min_genes":200}}',
+                            )
+                        ]
+                    )
+                ]
+            )
+        )
+    )
+    runtime = OpenAIRuntime(client=client)
+    session = await runtime.initialize(AgentContext(benchmark_id="b", task_id="t", workspace="."))
+
+    action = await runtime.act(session, AgentObservation())
+
+    assert action.action_type == "qc"
+    assert action.parameters == {"min_genes": 200}
+    assert isinstance(session.state["messages"][-1]["content"], str)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_runtime_builds_sdk_client_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    created_client: dict[str, object] = {}
+    create_call: dict[str, object] = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs: object) -> None:
+            created_client.update(kwargs)
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs: object) -> object:
+            create_call.update(kwargs)
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="tool_use", name="normalize", input={"target_sum": 10000})]
+            )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+
+    runtime = AnthropicRuntime()
+    session = await runtime.initialize(AgentContext(benchmark_id="b", task_id="t", workspace="."))
+    action = await runtime.act(session, AgentObservation())
+
+    assert action.action_type == "normalize"
+    assert created_client == {"api_key": "test-anthropic-key"}
+    assert isinstance(create_call["system"], str)
+    assert "api_key" not in runtime.manifest.metadata
+
+
+def test_openai_compatible_runtime_does_not_persist_endpoint_metadata() -> None:
+    runtime = OpenAICompatibleRuntime(
+        model="local-model",
+        base_url="https://user:password@example.invalid/v1?token=secret",
+    )
+
+    assert runtime.manifest.metadata == {}
 
 
 @pytest.mark.asyncio

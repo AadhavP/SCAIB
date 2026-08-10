@@ -61,6 +61,10 @@ docs = [
     "mkdocs-material>=9.5.0",
     "mkdocstrings[python]>=0.24.0",
 ]
+providers = [
+    "anthropic>=0.120.2",
+    "openai>=2.53.0",
+]
 
 [project.scripts]
 agent-evals = "agent_evals.cli.main:app"

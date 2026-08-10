@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from agent_evals.agents.runtime.base import AgentRuntime
@@ -16,6 +17,14 @@ from agent_evals.agents.runtime.protocol import (
     FinalSubmission,
 )
 
+DEFAULT_ANTHROPIC_ACTION_PROMPT = (
+    "You are controlling a scientific benchmark environment. Return exactly one "
+    "structured action. Use a provider tool call when tools are supplied; otherwise "
+    'return JSON matching {"action_type": "...", "parameters": {}, '
+    '"reasoning_metadata": {"summary": "..."}}. Choose action_type from the '
+    "available_actions in the latest observation. Do not include private reasoning."
+)
+
 
 class AnthropicRuntime(AgentRuntime):
     """Use the Anthropic messages API without making the SDK mandatory."""
@@ -26,11 +35,17 @@ class AnthropicRuntime(AgentRuntime):
         model: str = "claude-sonnet",
         client: Any | None = None,
         tools: list[dict[str, Any]] | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        system_prompt: str | None = None,
     ) -> None:
         self.agent_id = "anthropic"
         self.client = client
         self.model = model
         self.tools = tools or []
+        self.api_key = api_key
+        self.base_url = base_url
+        self.system_prompt = system_prompt or DEFAULT_ANTHROPIC_ACTION_PROMPT
         self.manifest = AgentManifest(
             name="Anthropic scientific agent",
             type="llm_tool_agent",
@@ -43,7 +58,7 @@ class AnthropicRuntime(AgentRuntime):
 
     async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
         if self.client is None:
-            raise RuntimeError("Anthropic client is not configured; inject a client or install the provider SDK")
+            self.client = _build_anthropic_client(api_key=self.api_key, base_url=self.base_url)
         session.state.setdefault("messages", []).append(
             {"role": "user", "content": json.dumps(observation.model_dump(mode="json"))}
         )
@@ -51,6 +66,7 @@ class AnthropicRuntime(AgentRuntime):
             model=self.model,
             max_tokens=2048,
             messages=session.state["messages"],
+            system=self.system_prompt,
             tools=self.tools,
         )
         response = await response if hasattr(response, "__await__") else response
@@ -71,6 +87,26 @@ class AnthropicRuntime(AgentRuntime):
     ) -> FinalSubmission:
         del session, observation
         return FinalSubmission()
+
+
+def _build_anthropic_client(*, api_key: str | None, base_url: str | None) -> Any:
+    resolved_api_key = api_key or os.getenv("ANTHROPIC_API_KEY")
+    if not resolved_api_key:
+        raise RuntimeError(
+            "Anthropic client is not configured; set ANTHROPIC_API_KEY, pass api_key, "
+            "or inject a client"
+        )
+    try:
+        from anthropic import Anthropic
+    except ImportError as error:
+        raise RuntimeError(
+            "Anthropic SDK is not installed; install the provider extra or inject a client"
+        ) from error
+    kwargs: dict[str, Any] = {"api_key": resolved_api_key}
+    resolved_base_url = base_url or os.getenv("ANTHROPIC_BASE_URL")
+    if resolved_base_url:
+        kwargs["base_url"] = resolved_base_url
+    return Anthropic(**kwargs)
 
 
 def _first_content_block(response: Any) -> Any | None:

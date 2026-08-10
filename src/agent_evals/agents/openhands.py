@@ -101,8 +101,8 @@ class OpenHandsAdapter:
     def available(self) -> bool:
         """Report whether the SDK import surface is installed."""
         return self.session_factory is not None or (
-            importlib.util.find_spec("openhands.sdk") is not None
-            and importlib.util.find_spec("openhands.tools") is not None
+            _module_available("openhands.sdk")
+            and _module_available("openhands.tools")
         )
 
     async def run(
@@ -257,8 +257,8 @@ class OpenHandsAdapter:
             model = f"{configuration.provider}/{model}"
         llm_kwargs: dict[str, Any] = {
             "model": model,
-            "api_key": configuration.metadata.get("api_key") or os.getenv("LLM_API_KEY"),
-            "base_url": configuration.metadata.get("base_url") or os.getenv("LLM_BASE_URL"),
+            "api_key": os.getenv("LLM_API_KEY"),
+            "base_url": os.getenv("LLM_BASE_URL"),
         }
         if configuration.temperature is not None:
             llm_kwargs["temperature"] = configuration.temperature
@@ -330,6 +330,14 @@ def _session_events(session: Any) -> list[Any]:
         return list(events)
     except TypeError:
         return []
+
+
+def _module_available(name: str) -> bool:
+    """Return False when an optional parent package is not installed."""
+    try:
+        return importlib.util.find_spec(name) is not None
+    except ModuleNotFoundError:
+        return False
 
 
 def _session_usage(session: Any) -> tuple[TokenUsage | None, EstimatedCost | None]:

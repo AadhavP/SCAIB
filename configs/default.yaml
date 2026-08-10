@@ -7,8 +7,11 @@ log_json: false
 api:
   host: "127.0.0.1"
   port: 8000
+  # Set AGENT_EVALS_API__API_KEY (or add api_key here) when exposing the API beyond localhost.
   cors_origins:
     - "http://localhost:3000"
+    - "http://localhost:5173"
+    - "http://127.0.0.1:5173"
     - "http://127.0.0.1:8000"
 
 storage:
