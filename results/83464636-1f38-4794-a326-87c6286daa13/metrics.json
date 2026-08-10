@@ -1,0 +1,564 @@
+{
+  "final_metrics": [
+    {
+      "metric_id": "batch_silhouette",
+      "metric_name": "Batch silhouette",
+      "level": "artifact",
+      "direction": "higher_is_better",
+      "raw_value": null,
+      "value": null,
+      "normalized_score": null,
+      "status": "unavailable",
+      "evidence": [],
+      "artifact_ids": [],
+      "error": "a batch observation column is not present",
+      "metadata": {}
+    },
+    {
+      "metric_id": "cell_type_silhouette",
+      "metric_name": "Cell-type silhouette",
+      "level": "artifact",
+      "direction": "higher_is_better",
+      "raw_value": null,
+      "value": null,
+      "normalized_score": null,
+      "status": "unavailable",
+      "evidence": [],
+      "artifact_ids": [],
+      "error": "a batch observation column is not present",
+      "metadata": {}
+    }
+  ],
+  "evaluation": {
+    "metric_results": [
+      {
+        "metric_id": "cell_annotation.macro_f1",
+        "version": "1.0",
+        "metric_name": "Macro F1",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.0,
+        "normalized_value": 0.0,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "cell_annotation.mcc",
+        "version": "1.0",
+        "metric_name": "Multiclass MCC",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.0,
+        "normalized_value": 0.5,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "cell_annotation.balanced_accuracy",
+        "version": "1.0",
+        "metric_name": "Balanced accuracy",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.0,
+        "normalized_value": 0.0,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "cell_annotation.rare_recall",
+        "version": "1.0",
+        "metric_name": "Rare-class recall",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.0,
+        "normalized_value": 0.0,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "rare_labels": [
+            "CD34+",
+            "CD4+/CD45RA+/CD25- Naive T",
+            "CD4+/CD45RO+ Memory"
+          ],
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "cell_annotation.accuracy",
+        "version": "1.0",
+        "metric_name": "Exact accuracy",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.0,
+        "normalized_value": 0.0,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "clustering.ari",
+        "version": "1.0",
+        "metric_name": "Adjusted Rand index",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": 0.4147795455021274,
+        "normalized_value": 0.7073897727510637,
+        "eligible": true,
+        "status": "computed",
+        "eligibility_reason": "eligible",
+        "missing_artifacts": [],
+        "metadata": {
+          "evidence": [],
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "backend": "sklearn",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "batch_integration.iLISI",
+        "version": "1.0",
+        "metric_name": "iLISI",
+        "role": "primary",
+        "direction": "higher_is_better",
+        "raw_value": null,
+        "normalized_value": null,
+        "eligible": false,
+        "status": "structurally_ineligible",
+        "eligibility_reason": "structural requirements unavailable: metadata:batch",
+        "missing_artifacts": [],
+        "metadata": {
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "scipy": "1.18.0",
+            "backend": "sklearn/scipy",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      },
+      {
+        "metric_id": "batch_integration.graph_connectivity",
+        "version": "1.0",
+        "metric_name": "Graph connectivity",
+        "role": "secondary",
+        "direction": "higher_is_better",
+        "raw_value": null,
+        "normalized_value": null,
+        "eligible": false,
+        "status": "structurally_ineligible",
+        "eligibility_reason": "structural requirements unavailable: metadata:batch",
+        "missing_artifacts": [],
+        "metadata": {
+          "implementation": {
+            "agent-evals": "0.1.0",
+            "scikit-learn": "1.9.0",
+            "scipy": "1.18.0",
+            "backend": "sklearn/scipy",
+            "metric_version": "1.0"
+          },
+          "candidate_evidence_uri": "results/b5d4bdbb-e405-42d5-af84-9c68bc90405b/artifacts/evaluation-prediction.csv"
+        }
+      }
+    ],
+    "applicability": [
+      {
+        "metric_id": "cell_annotation.macro_f1",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "cell_annotation.mcc",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "cell_annotation.balanced_accuracy",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "cell_annotation.rare_recall",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "cell_annotation.accuracy",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "clustering.ari",
+        "version": "1.0",
+        "eligible": true,
+        "structurally_ineligible": false,
+        "reason": "eligible",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "batch_integration.iLISI",
+        "version": "1.0",
+        "eligible": false,
+        "structurally_ineligible": true,
+        "reason": "structural requirements unavailable: metadata:batch",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      },
+      {
+        "metric_id": "batch_integration.graph_connectivity",
+        "version": "1.0",
+        "eligible": false,
+        "structurally_ineligible": true,
+        "reason": "structural requirements unavailable: metadata:batch",
+        "missing_candidate_artifacts": [],
+        "missing_candidate_metadata": []
+      }
+    ],
+    "groups": [],
+    "domain_scores": [
+      {
+        "domain": "biology",
+        "value": 0.0,
+        "weight": 0.6,
+        "included_metrics": [
+          "clustering.ari",
+          "cell_annotation.macro_f1",
+          "cell_annotation.rare_recall"
+        ],
+        "excluded_metrics": [],
+        "failed_metrics": [],
+        "formula": "geometric_mean(clustering.ari^0.4, cell_annotation.macro_f1^0.4, cell_annotation.rare_recall^0.2)"
+      },
+      {
+        "domain": "technical",
+        "value": null,
+        "weight": 0.2,
+        "included_metrics": [],
+        "excluded_metrics": [
+          "batch_integration.iLISI",
+          "batch_integration.graph_connectivity"
+        ],
+        "failed_metrics": [],
+        "formula": "geometric_mean()"
+      },
+      {
+        "domain": "robustness",
+        "value": 1.0,
+        "weight": 0.2,
+        "included_metrics": [
+          "robustness.seed_stability"
+        ],
+        "excluded_metrics": [],
+        "failed_metrics": [],
+        "formula": "geometric_mean(robustness.seed_stability^1)"
+      }
+    ],
+    "robustness": {
+      "seeds": [
+        42
+      ],
+      "seed_stability": 1.0,
+      "clustering_pairwise_ari": null,
+      "embedding_neighbor_overlap": null,
+      "annotation_prediction_agreement": null,
+      "artifact_similarity": null,
+      "formula": "mean(available_pairwise_stability_metrics)"
+    },
+    "decision_evaluations": [
+      {
+        "decision_id": "decision-1",
+        "step_index": 1,
+        "action_category": "normalize",
+        "decision_category": "normalization",
+        "intent": null,
+        "hypothesis": null,
+        "method": null,
+        "parameters": {},
+        "evidence_used": [],
+        "confidence": null,
+        "expected_effect": {},
+        "downstream_dependency": {},
+        "valid": true,
+        "scientific_applicable": true,
+        "execution_succeeded": false,
+        "produced_artifacts": [],
+        "consumed_artifacts": [],
+        "local_reward": null,
+        "score": 0.5,
+        "reason": "action was valid but execution did not succeed"
+      },
+      {
+        "decision_id": "decision-2",
+        "step_index": 2,
+        "action_category": "pca",
+        "decision_category": "dimensionality_reduction",
+        "intent": null,
+        "hypothesis": null,
+        "method": null,
+        "parameters": {},
+        "evidence_used": [],
+        "confidence": null,
+        "expected_effect": {},
+        "downstream_dependency": {},
+        "valid": true,
+        "scientific_applicable": true,
+        "execution_succeeded": false,
+        "produced_artifacts": [],
+        "consumed_artifacts": [],
+        "local_reward": null,
+        "score": 0.5,
+        "reason": "action was valid but execution did not succeed"
+      }
+    ],
+    "method_evaluations": [
+      {
+        "decision_id": "decision-1",
+        "method": "normalize",
+        "schema_valid": true,
+        "scientifically_applicable": true,
+        "execution_succeeded": false,
+        "produced_artifacts": [],
+        "downstream_metric_ids": [
+          "cell_annotation.macro_f1",
+          "cell_annotation.mcc",
+          "cell_annotation.balanced_accuracy",
+          "cell_annotation.rare_recall",
+          "cell_annotation.accuracy",
+          "clustering.ari",
+          "batch_integration.iLISI",
+          "batch_integration.graph_connectivity"
+        ],
+        "local_objective": null,
+        "eventual_global_outcome": 0.0,
+        "score": 0.6666666666666666,
+        "reason": "method evidence was incomplete"
+      },
+      {
+        "decision_id": "decision-2",
+        "method": "pca",
+        "schema_valid": true,
+        "scientifically_applicable": true,
+        "execution_succeeded": false,
+        "produced_artifacts": [],
+        "downstream_metric_ids": [
+          "cell_annotation.macro_f1",
+          "cell_annotation.mcc",
+          "cell_annotation.balanced_accuracy",
+          "cell_annotation.rare_recall",
+          "cell_annotation.accuracy",
+          "clustering.ari",
+          "batch_integration.iLISI",
+          "batch_integration.graph_connectivity"
+        ],
+        "local_objective": null,
+        "eventual_global_outcome": 0.0,
+        "score": 0.6666666666666666,
+        "reason": "method evidence was incomplete"
+      }
+    ],
+    "method_selection_evaluations": [
+      {
+        "decision_id": "decision-1",
+        "method": null,
+        "appropriateness": 0.5,
+        "parameter_quality": 1.0,
+        "execution_quality": 0.20123162879184395,
+        "overall": 0.5670772095972813,
+        "evidence": [
+          "no benchmark method restriction was declared"
+        ]
+      },
+      {
+        "decision_id": "decision-2",
+        "method": null,
+        "appropriateness": 0.5,
+        "parameter_quality": 1.0,
+        "execution_quality": 0.20123162879184395,
+        "overall": 0.5670772095972813,
+        "evidence": [
+          "no benchmark method restriction was declared"
+        ]
+      }
+    ],
+    "local_decision_rewards": [
+      {
+        "decision_id": "decision-1",
+        "category": "normalization",
+        "value": 0.0,
+        "components": {
+          "decision_local_reward": 0.0
+        },
+        "formula": "decision_local_reward",
+        "evidence": [
+          "category-specific evidence was unavailable; environment local reward used"
+        ]
+      },
+      {
+        "decision_id": "decision-2",
+        "category": "dimensionality_reduction",
+        "value": 0.0,
+        "components": {
+          "decision_local_reward": 0.0
+        },
+        "formula": "decision_local_reward",
+        "evidence": [
+          "category-specific evidence was unavailable; environment local reward used"
+        ]
+      }
+    ],
+    "trajectory": {
+      "protocol_compliance": 0.16666666666666663,
+      "invalid_action_rate": 0.8333333333333334,
+      "failed_action_rate": 1.0,
+      "artifact_validity": 1.0,
+      "duplicate_action_rate": 0.0,
+      "step_count": 2,
+      "redundant_steps": 0,
+      "runtime_seconds": 235.762437,
+      "token_usage": null,
+      "resource_usage": {
+        "wall_time_seconds": 0.9112382789899129,
+        "cpu_seconds": null,
+        "peak_memory_mb": null,
+        "gpu_used": false
+      },
+      "failed_retries": 0,
+      "dependency_consistency": 1.0,
+      "outcome_alignment": 0.0,
+      "efficiency": 1.0,
+      "decision_efficiency": 1.0,
+      "decision_consistency": 1.0,
+      "adaptation_ability": 1.0,
+      "counterproductive_action_detection": 1.0,
+      "short_term_gain": 0.0,
+      "long_term_damage": 0.0,
+      "good_signals": [
+        "no contradictory transformations were detected"
+      ],
+      "bad_signals": [],
+      "recommended_improvements": [],
+      "method_exploration_score": 1.0,
+      "alternative_coverage": 1.0,
+      "unnecessary_retries": 0,
+      "decision_regret": 0.0,
+      "alternative_comparisons": [],
+      "trajectory_quality": 0.6916666666666667,
+      "step_table": [
+        {
+          "step": 1,
+          "action": "normalize",
+          "status": "failed",
+          "artifacts": [],
+          "resource_usage": {
+            "wall_time_seconds": 0.34352257099817507,
+            "cpu_seconds": null,
+            "peak_memory_mb": null,
+            "gpu_used": false
+          }
+        },
+        {
+          "step": 2,
+          "action": "pca",
+          "status": "failed",
+          "artifacts": [],
+          "resource_usage": {
+            "wall_time_seconds": 0.5677157079917379,
+            "cpu_seconds": null,
+            "peak_memory_mb": null,
+            "gpu_used": false
+          }
+        }
+      ],
+      "formula": "0.25*protocol + 0.15*consistency + 0.15*artifact_validity + 0.15*efficiency + 0.10*adaptation + 0.10*outcome_alignment + 0.10*method_exploration"
+    },
+    "scientific_outcome_score": 0.0,
+    "decision_score": 0.5,
+    "method_score": 0.6666666666666666,
+    "decision_quality_score": 0.2835386047986406,
+    "trajectory_score": 0.6916666666666667,
+    "global_agent_score": 0.0,
+    "benchmark_score": 0.0,
+    "score_formula": "scientific_outcome * decision_score * method_selection_score * trajectory_score"
+  }
+}

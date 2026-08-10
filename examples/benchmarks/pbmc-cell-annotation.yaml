@@ -104,6 +104,11 @@ actions:
         required: false
         default: 10000
         minimum: 1
+      - name: inplace
+        description: Keep the normalized AnnData object as the current pipeline state.
+        type: boolean
+        required: false
+        default: true
     required_inputs: [current-anndata, qc-statistics]
     expected_outputs: [normalized-anndata]
     estimated_cost: {cpu_seconds: 45, memory_mb: 4096, complexity: linear_in_nonzero_entries}

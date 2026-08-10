@@ -18,6 +18,9 @@ from agent_evals.environment import (
     ScientificEnvironment,
 )
 from agent_evals.environment.ports import ExecutionContext
+from agent_evals.environment.scientific_loop import ScientificActionExecutor
+from agent_evals.scientific.artifacts.storage import LocalArtifactStore
+from agent_evals.scientific.context import ScientificContext
 
 SPECIFICATION = load_benchmark(
     Path(__file__).parents[1] / "examples" / "benchmarks" / "pbmc-cell-annotation.yaml"
@@ -90,6 +93,49 @@ def make_environment(executor: Any) -> ScientificEnvironment:
         observation_builder=FakeObservationBuilder(),
         reward_evaluator=FakeRewardEvaluator(),
     )
+
+
+@pytest.mark.asyncio
+async def test_scientific_executor_maps_native_artifact_ids_to_benchmark_ids(tmp_path: Path) -> None:
+    """Native Scanpy names must not fail declarative output validation."""
+    context = ScientificContext(
+        adata=object(),
+        dataset_metadata={},
+        artifact_store=LocalArtifactStore(tmp_path / "artifacts"),
+        workspace=tmp_path,
+    )
+    bridge = ScientificActionExecutor(
+        context,
+        expected_outputs={
+            "normalize": ["normalized-anndata"],
+            "pca": ["uncorrected-embedding"],
+        },
+    )
+
+    def native_result(intent: ActionIntent, scientific_context: ScientificContext) -> ActionExecutionResult:
+        del scientific_context
+        native_id = "normalized_anndata" if intent.action_id == "normalize" else "pca_anndata"
+        return ActionExecutionResult(
+            intent_id=intent.intent_id,
+            action_id=intent.action_id,
+            status=ActionStatus.SUCCEEDED,
+            artifacts=[
+                ArtifactRecord(
+                    artifact_id=native_id,
+                    kind="anndata",
+                    format="h5ad",
+                )
+            ],
+        )
+
+    bridge.executor.execute = native_result
+    for action_id, expected_id in (
+        ("normalize", "normalized-anndata"),
+        ("pca", "uncorrected-embedding"),
+    ):
+        result = await bridge.execute(ActionIntent(action_id=action_id), None)
+        assert result.status == ActionStatus.SUCCEEDED
+        assert [artifact.artifact_id for artifact in result.artifacts] == [expected_id]
 
 
 @pytest.mark.asyncio

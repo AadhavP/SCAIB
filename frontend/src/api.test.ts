@@ -14,10 +14,25 @@ describe('API client', () => {
     await expect(createApiClient(fetcher).agents()).rejects.toThrow('API request failed (503): unavailable')
   })
 
+  it('builds a replayable evaluation event stream URL', () => {
+    expect(createApiClient().eventStream?.('job/1')).toBe('/v1/evaluations/job%2F1/events')
+  })
+
+  it('explains when an older backend does not understand GLM test mode', async () => {
+    const fetcher = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: async () => ({ detail: [{ type: 'extra_forbidden', loc: ['body', 'test_mode'], msg: 'Extra inputs are not permitted' }] }),
+    })
+    await expect(createApiClient(fetcher).run({ benchmark_id: 'pbmc', agent_id: 'mock', test_mode: true }))
+      .rejects.toThrow('backend is out of date for GLM test mode')
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
   it('posts a run request without mutating the supplied override', async () => {
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ job_id: 'job-1', benchmark_id: 'pbmc', agent_id: 'mock', status: 'pending' }) })
     const override = { seed: 42 }
-    await createApiClient(fetcher).run({ benchmark_id: 'pbmc', agent_id: 'mock', config_override: override })
+    await createApiClient(fetcher).run({ benchmark_id: 'pbmc', agent_id: 'mock', test_mode: false, config_override: override })
     expect(fetcher).toHaveBeenCalledWith('/v1/evaluations/run', expect.objectContaining({ method: 'POST', body: JSON.stringify({ benchmark_id: 'pbmc', agent_id: 'mock', config_override: { seed: 42 } }) }))
     expect(override).toEqual({ seed: 42 })
   })

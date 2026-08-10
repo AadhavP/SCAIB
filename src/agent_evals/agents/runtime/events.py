@@ -20,6 +20,7 @@ class AgentEventType(StrEnum):
     """Observable event categories; private chain-of-thought is not required."""
 
     OBSERVATION = "observation"
+    PLAN = "plan"
     REASONING_SUMMARY = "reasoning_summary"
     TOOL_CALL = "tool_call"
     TOOL_RESULT = "tool_result"

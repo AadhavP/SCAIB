@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+
+# Caches and tooling
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Secrets and environment files (never ship real secrets)
+.env
+.env.*
+!.env.example
+
+# Local data and outputs (mounted as volumes)
+data/
+runs/
+results/
+reports_output/
+logs/
+outputs/
+
+# Documentation site and frontend
+site/
+docs/
+frontend/
+mkdocs.yml
+
+# Local tooling files
+Makefile
+.pre-commit-config.yaml
+.gitignore
+
+# Git metadata
+.git/

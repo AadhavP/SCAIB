@@ -1,5 +1,6 @@
 """Pydantic Settings configuration system with YAML file loader support."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,44 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from agent_evals.core.exceptions import ConfigurationError
+
+
+def _env_shadowed_paths() -> set[tuple[str, ...]]:
+    """Return dotted paths supplied through ``AGENT_EVALS_`` environment variables.
+
+    Environment variables must outrank YAML configuration, so any YAML key that
+    is also configured through the environment is removed before validation.
+    """
+    paths: set[tuple[str, ...]] = set()
+    for name, value in os.environ.items():
+        if name.startswith("AGENT_EVALS_") and value != "":
+            paths.add(
+                tuple(part.lower() for part in name[len("AGENT_EVALS_") :].split("__"))
+            )
+    return paths
+
+
+def _strip_env_shadowed(
+    data: dict[str, Any],
+    paths: set[tuple[str, ...]],
+    prefix: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Remove YAML entries whose path is overridden by an environment variable."""
+    return {
+        key: value
+        for key, value in (
+            (
+                child_key,
+                (
+                    _strip_env_shadowed(child_value, paths, prefix + (child_key.lower(),))
+                    if isinstance(child_value, dict)
+                    else child_value
+                ),
+            )
+            for child_key, child_value in data.items()
+        )
+        if prefix + (key.lower(),) not in paths
+    }
 
 
 class APISettings(BaseModel):
@@ -53,6 +92,17 @@ class Settings(BaseSettings):
     debug: bool = True
     log_level: str = "INFO"
     log_json: bool = False
+    llm_model: str | None = Field(default=None, validation_alias="LLM_MODEL")
+    llm_api_key: str | None = Field(default=None, validation_alias="LLM_API_KEY", repr=False)
+    llm_base_url: str | None = Field(default=None, validation_alias="LLM_BASE_URL")
+    # Provider-specific aliases are loaded from .env too; os.getenv() cannot see
+    # values parsed by pydantic-settings from the dotenv file.
+    glm_model: str | None = Field(default=None, validation_alias="GLM_MODEL")
+    glm_api_key: str | None = Field(default=None, validation_alias="GLM_API_KEY", repr=False)
+    glm_base_url: str | None = Field(default=None, validation_alias="GLM_BASE_URL")
+    openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY", repr=False)
+    openrouter_base_url: str | None = Field(default=None, validation_alias="OPENROUTER_BASE_URL")
+    openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
 
     api: APISettings = Field(default_factory=APISettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
@@ -62,6 +112,9 @@ class Settings(BaseSettings):
         env_prefix="AGENT_EVALS_",
         env_nested_delimiter="__",
         case_sensitive=False,
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
     @classmethod
@@ -82,7 +135,7 @@ class Settings(BaseSettings):
                 data: dict[str, Any] | None = yaml.safe_load(f)
             if data is None:
                 data = {}
-            return cls(**data)
+            return cls(**_strip_env_shadowed(data, _env_shadowed_paths()))
         except Exception as err:
             raise ConfigurationError(
                 f"Failed to parse configuration YAML {yaml_path}: {err}"

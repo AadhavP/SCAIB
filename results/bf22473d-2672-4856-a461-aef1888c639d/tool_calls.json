@@ -1,0 +1,16 @@
+[
+  {
+    "event_id": "6a56c506-6a1c-41c5-bff5-76c233177004",
+    "run_id": "bf22473d-2672-4856-a461-aef1888c639d",
+    "episode_id": "a20caf31-a0ba-4275-ab47-10cb6a1ab0f8",
+    "sequence": 2,
+    "timestamp": "2026-08-10T20:36:37.188619Z",
+    "event_type": "agent.tool_result",
+    "source": "mock",
+    "payload": {
+      "action_id": "normalize",
+      "status": "failed"
+    },
+    "parent_event_id": null
+  }
+]

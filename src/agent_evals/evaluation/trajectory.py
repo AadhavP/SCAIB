@@ -73,7 +73,11 @@ class TrajectoryEvaluator:
             else (1.0 if methods_attempted else 0.0)
         )
         regret = decision_regret(outcome or 0.0, alternative_scores)
-        invalid_rate = rejected / max(1, proposed)
+        # Valid submissions and rejected intents are separate episode events.
+        # Dividing rejected intents by valid submissions alone can exceed 1.0
+        # after an agent retries invalid actions, violating the score model.
+        attempted = proposed + rejected
+        invalid_rate = rejected / max(1, attempted)
         failed_rate = failed / max(1, action_count)
         protocol = max(0.0, 1.0 - invalid_rate)
         efficiency = max(0.0, 1.0 - (duplicate_steps + failed_retries) / max(1, action_count))

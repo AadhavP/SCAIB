@@ -11,6 +11,7 @@ from agent_evals.agents import (
     AgentConfiguration,
     AgentHarness,
     MockActionExecutor,
+    AgentAction,
     MockAgentAdapter,
     MockObservationBuilder,
     OpenHandsAdapter,
@@ -22,6 +23,7 @@ from agent_evals.agents.trajectory import (
     ScientificDecision,
 )
 from agent_evals.benchmarks.io import load_benchmark
+from agent_evals.agents.runtime.manager import _action_to_intent
 from agent_evals.environment import (
     LocalWorkspace,
     ScientificEnvironment,
@@ -31,6 +33,18 @@ from agent_evals.environment import (
 SPECIFICATION = load_benchmark(
     Path(__file__).parents[1] / "examples" / "benchmarks" / "pbmc-cell-annotation.yaml"
 )
+
+
+def test_runtime_action_carries_declared_artifact_contract() -> None:
+    """Universal runtime actions must preserve benchmark output IDs."""
+    intent = _action_to_intent(
+        AgentAction(action_type="normalize", parameters={"target_sum": 10_000}),
+        SPECIFICATION,
+    )
+
+    assert intent.action_id == "normalize"
+    assert intent.metadata["expected_outputs"] == ["normalized-anndata"]
+    assert intent.metadata["expected_inputs"] == ["current-anndata", "qc-statistics"]
 
 
 def make_environment() -> ScientificEnvironment:

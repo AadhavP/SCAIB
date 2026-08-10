@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import inspect
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
@@ -15,10 +16,11 @@ from agent_evals.agents.runtime.protocol import (
     AgentAction,
     AgentContext,
     AgentObservation,
+    AgentPlan,
     FinalSubmission,
 )
 from agent_evals.agents.tools import ToolExecutor
-from agent_evals.benchmarks.schema import TaskSpecification
+from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
 from agent_evals.environment.models import ActionStatus, EpisodeSnapshot, EpisodeStatus
 from agent_evals.environment.runtime import ScientificEnvironment
 
@@ -50,6 +52,7 @@ class AgentRuntimeManager:
         *,
         terminal_actions: set[str] | None = None,
         tool_executor: ToolExecutor | None = None,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> None:
         self.terminal_actions = terminal_actions or {
             "terminate",
@@ -58,6 +61,15 @@ class AgentRuntimeManager:
             "done",
         }
         self.tool_executor = tool_executor
+        self.event_callback = event_callback
+
+    async def _emit(self, event: dict[str, Any]) -> None:
+        """Publish runtime lifecycle events without coupling the manager to the API."""
+        if self.event_callback is None:
+            return
+        result = self.event_callback(event)
+        if inspect.isawaitable(result):
+            await result
 
     async def run(  # noqa: C901
         self,
@@ -77,14 +89,93 @@ class AgentRuntimeManager:
         trajectory.observations.append(observation)
         trajectory.record(AgentEventType.OBSERVATION, observation.model_dump(mode="json"))
         session = await runtime.initialize(context)
+        await self._emit(
+            {
+                "type": "agent_planning",
+                "step": 0,
+                "message": "Asking the agent for an overall scientific plan.",
+            }
+        )
+        try:
+            plan = await runtime.plan(context, observation)
+            plan_source = "agent"
+        except Exception as error:
+            plan = None
+            plan_source = f"benchmark_fallback: {type(error).__name__}"
+        if plan is None:
+            metadata = observation.metadata
+            plan = AgentPlan(
+                goal=str(metadata.get("goal", "Complete the scientific benchmark objective.")),
+                steps=[
+                    "Inspect the current dataset and quality signals.",
+                    "Choose the next evidence-producing benchmark action.",
+                    "Reassess the plan after each result and stop when success criteria are met.",
+                ],
+                success_criteria=[
+                    str(item.get("description", item.get("condition", "")))
+                    for item in metadata.get("scenario", {}).get("success_criteria", [])
+                    if isinstance(item, dict)
+                ],
+                adaptation_policy="After every result, keep, revise, or end the plan based on the new evidence.",
+            )
+        session.state["plan"] = plan.model_dump(mode="json")
+        observation = observation.model_copy(
+            update={
+                "metadata": {
+                    **observation.metadata,
+                    "active_plan": plan.model_dump(mode="json"),
+                    "plan_review": "After each result, decide whether to keep, revise, or end this plan.",
+                }
+            }
+        )
+        await self._emit(
+            {
+                "type": "agent_plan",
+                "step": 0,
+                "message": "Initial scientific plan is ready.",
+                "plan": plan.model_dump(mode="json"),
+                "source": plan_source,
+            }
+        )
+        trajectory.record(AgentEventType.PLAN, plan.model_dump(mode="json"))
         status = "completed"
         reason = "agent runtime completed"
         submission: FinalSubmission | None = None
         steps = 0
         try:
             while max_steps is None or steps < max_steps:
+                current_step = steps + 1
+                await self._emit(
+                    {
+                        "type": "agent_prompt",
+                        "step": current_step,
+                        "message": "Environment observation sent to the agent.",
+                        "observation": observation.model_dump(mode="json"),
+                    }
+                )
+                await self._emit(
+                    {
+                        "type": "agent_waiting",
+                        "step": current_step,
+                        "message": "Waiting for the agent to return its next action.",
+                    }
+                )
                 raw_action = await runtime.act(session, observation)
                 action = AgentAction.model_validate(raw_action)
+                await self._emit(
+                    {
+                        "type": "agent_response",
+                        "step": current_step,
+                        "message": "Agent returned a structured action.",
+                        "action_type": action.action_type,
+                        "parameters": action.parameters,
+                        "reasoning_metadata": {
+                            key: value
+                            for key, value in action.reasoning_metadata.items()
+                            if key in {"summary", "explanation"}
+                        },
+                    }
+                )
                 trajectory.actions.append(action)
                 action_event = trajectory.record(
                     AgentEventType.ACTION,
@@ -137,7 +228,7 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                     break
-                intent = _action_to_intent(action)
+                intent = _action_to_intent(action, environment.specification)
                 result = await environment.step(intent)
                 trajectory.record(
                     AgentEventType.ENVIRONMENT_RESPONSE,
@@ -154,7 +245,16 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                 steps += 1
-                observation = _observation_from_snapshot(result.observation, environment.task)
+                next_observation = _observation_from_snapshot(result.observation, environment.task)
+                observation = next_observation.model_copy(
+                    update={
+                        "metadata": {
+                            **next_observation.metadata,
+                            "active_plan": plan.model_dump(mode="json"),
+                            "plan_review": "After this result, decide whether to keep, revise, or end the plan.",
+                        }
+                    }
+                )
                 trajectory.observations.append(observation)
                 trajectory.record(
                     AgentEventType.OBSERVATION,
@@ -162,8 +262,14 @@ class AgentRuntimeManager:
                     parent_event_id=action_event.event_id,
                 )
             else:
-                status = "timeout"
-                reason = "maximum runtime steps reached"
+                produced_artifacts = set(environment.episode.snapshot().state.artifacts) if environment.episode else set()
+                required_artifacts = set(environment.task.artifacts)
+                if required_artifacts and required_artifacts.issubset(produced_artifacts):
+                    status = "completed"
+                    reason = "required benchmark artifacts were produced within the step budget"
+                else:
+                    status = "timeout"
+                    reason = "maximum runtime steps reached before the benchmark goal was satisfied"
             if submission is None:
                 submission = await runtime.terminate(session, observation)
                 trajectory.final_submission = submission
@@ -212,8 +318,13 @@ class RuntimeAgentAdapter:
     adapter_name = "universal-runtime"
     adapter_version = "2.0.0"
 
-    def __init__(self, runtime: AgentRuntime) -> None:
+    def __init__(
+        self,
+        runtime: AgentRuntime,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+    ) -> None:
         self.runtime = runtime
+        self.event_callback = event_callback
 
     async def run(
         self,
@@ -247,7 +358,7 @@ class RuntimeAgentAdapter:
             constraints=constraints,
             metadata=configuration.metadata,
         )
-        universal = await AgentRuntimeManager().run(
+        universal = await AgentRuntimeManager(event_callback=self.event_callback).run(
             self.runtime,
             environment,
             context,
@@ -313,7 +424,15 @@ class RuntimeAgentAdapter:
 
 
 def _observation_from_snapshot(snapshot: EpisodeSnapshot, task: TaskSpecification) -> AgentObservation:
-    """Project an environment snapshot into the universal observation shape."""
+    """Project an environment snapshot and scientific goal into agent-visible context."""
+    termination = [
+        {
+            "name": condition.name,
+            "description": condition.description,
+            "condition": condition.condition,
+        }
+        for condition in task.termination
+    ]
     return AgentObservation(
         state=snapshot.state.model_dump(mode="json"),
         available_actions=list(task.allowed_actions),
@@ -321,6 +440,15 @@ def _observation_from_snapshot(snapshot: EpisodeSnapshot, task: TaskSpecificatio
         metadata={
             "episode_id": snapshot.state.episode_id,
             "step": snapshot.state.current_step,
+            "scenario": {
+                "name": task.name,
+                "objective": task.objective,
+                "description": task.description,
+                "success_criteria": termination,
+                "required_artifacts": list(task.artifacts),
+                "required_metrics": list(task.metrics),
+            },
+            "goal": task.objective,
             "observations": {
                 key: value.model_dump(mode="json") for key, value in snapshot.state.observations.items()
             },
@@ -328,17 +456,38 @@ def _observation_from_snapshot(snapshot: EpisodeSnapshot, task: TaskSpecificatio
     )
 
 
-def _action_to_intent(action: AgentAction) -> Any:
-    """Map a universal action to the existing typed environment request."""
+def _action_to_intent(
+    action: AgentAction,
+    specification: BenchmarkSpecification,
+) -> Any:
+    """Map a universal action to the typed request expected by the environment.
+
+    Universal runtimes do not otherwise see the benchmark's artifact contract.
+    Carrying it on the intent lets scientific executors translate their native
+    artifact names (for example ``normalized_anndata``) to the benchmark's
+    stable IDs (for example ``normalized-anndata``) before environment output
+    validation runs.
+    """
     from agent_evals.environment.models import ActionIntent
 
     parameters = dict(action.parameters)
     action_id = str(parameters.pop("action_id", action.action_type))
+    declared_action = next(
+        (item for item in specification.actions if item.id == action_id),
+        None,
+    )
     rationale = action.reasoning_metadata.get("explanation") or action.reasoning_metadata.get("summary")
     metadata = {
         "runtime_action_type": action.action_type,
         **action.reasoning_metadata,
     }
+    if declared_action is not None:
+        metadata.update(
+            {
+                "expected_inputs": list(declared_action.required_inputs),
+                "expected_outputs": list(declared_action.expected_outputs),
+            }
+        )
     return ActionIntent(
         action_id=action_id,
         parameters=parameters,

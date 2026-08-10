@@ -226,7 +226,11 @@ class ScientificEnvironment:
         produced = set(result.outputs) | {artifact.artifact_id for artifact in result.artifacts}
         missing_outputs = sorted(set(action.expected_outputs) - produced)
         if result.status == ActionStatus.SUCCEEDED and missing_outputs:
-            errors.append(f"executor omitted expected output(s): {', '.join(missing_outputs)}")
+            actual_outputs = ", ".join(sorted(produced)) or "none"
+            errors.append(
+                "executor omitted expected output(s): "
+                f"{', '.join(missing_outputs)}; produced: {actual_outputs}"
+            )
         if not errors:
             return result
         message = "; ".join(errors)

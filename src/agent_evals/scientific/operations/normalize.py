@@ -11,6 +11,9 @@ def normalize(context: ScientificContext, parameters: dict[str, Any]) -> Operati
     import scanpy as sc
 
     target_sum = float(parameters.get("target_sum", 10_000))
+    inplace = bool(parameters.get("inplace", True))
+    if not inplace:
+        raise ValueError("normalize requires inplace=true so the normalized AnnData remains available to the next action")
     values = context.adata.X
     minimum = float(np.nanmin(values.toarray() if hasattr(values, "toarray") else values))
     already_preprocessed = minimum < 0
@@ -24,9 +27,14 @@ def normalize(context: ScientificContext, parameters: dict[str, Any]) -> Operati
             "target_sum": target_sum,
             "log1p": not already_preprocessed,
             "input_already_preprocessed": already_preprocessed,
+            "inplace": inplace,
         },
     )
     return OperationOutput(
         artifacts=[artifact],
-        outputs={"target_sum": target_sum, "input_already_preprocessed": already_preprocessed},
+        outputs={
+            "target_sum": target_sum,
+            "input_already_preprocessed": already_preprocessed,
+            "inplace": inplace,
+        },
     )

@@ -1,0 +1,34 @@
+{
+  "manifest": {
+    "name": "mock",
+    "type": "mock",
+    "model": {
+      "provider": "Openrouter",
+      "name": "GLM 5.2"
+    },
+    "capabilities": [],
+    "temperature": null,
+    "context_window": null,
+    "metadata": {}
+  },
+  "configuration": {
+    "agent_type": "mock",
+    "model": "GLM 5.2",
+    "provider": "Openrouter",
+    "temperature": null,
+    "max_steps": null,
+    "timeout_seconds": null,
+    "seed": 0,
+    "workspace": {
+      "root": "results/f94bfd76-bda1-402e-9e0d-fe1389963552"
+    },
+    "tools": {},
+    "environment": {},
+    "metadata": {
+      "dataset_id": "pbmc-multi-batch",
+      "scientific_loop": true,
+      "run_id": "f94bfd76-bda1-402e-9e0d-fe1389963552"
+    }
+  },
+  "agent_id": "mock"
+}

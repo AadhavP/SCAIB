@@ -9,6 +9,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentContext,
     AgentManifest,
     AgentObservation,
+    AgentPlan,
     AgentSession,
     FinalSubmission,
 )
@@ -27,6 +28,11 @@ class AgentRuntime(ABC):
     @abstractmethod
     async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
         """Return one observable action for the current observation."""
+
+    async def plan(self, context: AgentContext, observation: AgentObservation) -> AgentPlan | None:
+        """Optionally propose an observable high-level plan before acting."""
+        del context, observation
+        return None
 
     @abstractmethod
     async def terminate(

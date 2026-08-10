@@ -1,0 +1,56 @@
+services:
+  api:
+    build:
+      context: .
+      args:
+        # Add --extra openhands here (or via a compose override) for live LLM runs.
+        UV_EXTRAS: "--extra science --extra providers"
+    image: agent-evals:latest
+    container_name: agent-evals-api
+    # The app also reads `AGENT_EVALS_*` settings from its own `.env` file.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Bind all interfaces inside the container; the port is exposed below.
+      AGENT_EVALS_API__HOST: "0.0.0.0"
+      AGENT_EVALS_API__PORT: "8000"
+    ports:
+      - "${AGENT_EVALS_API__PORT:-8000}:8000"
+    volumes:
+      # Persist datasets, run artifacts, scientific results, and reports.
+      - ./data:/app/data
+      - ./runs:/app/runs
+      - ./results:/app/results
+      - ./reports_output:/app/reports_output
+    # Compose uses this health check before starting the frontend, avoiding
+    # transient proxy failures while Uvicorn is still booting.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      interval: 5s
+      timeout: 5s
+      start_period: 5s
+      retries: 12
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    image: scaib-console:latest
+    container_name: agent-evals-frontend
+    environment:
+      # Route /v1 to the API service inside the compose network.
+      VITE_API_PROXY_TARGET: "http://api:8000"
+    ports:
+      - "5173:5173"
+    volumes:
+      # Live-reload source; node_modules stays in a named volume so the
+      # container's `npm ci` install is not shadowed by the host.
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  frontend_node_modules:

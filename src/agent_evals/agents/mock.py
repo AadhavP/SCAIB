@@ -188,6 +188,7 @@ class MockAgentAdapter:
                     "method_id": action_id,
                     "implementation": "mock-deterministic",
                     "alternatives_considered": list(task.allowed_actions),
+                    "expected_outputs": list(action_spec.expected_outputs),
                 },
             )
             raw_events.append(

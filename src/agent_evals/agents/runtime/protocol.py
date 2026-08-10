@@ -65,6 +65,17 @@ class AgentObservation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentPlan(BaseModel):
+    """Observable high-level plan for one scientific benchmark episode."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    goal: str = Field(min_length=1)
+    steps: list[str] = Field(default_factory=list)
+    success_criteria: list[str] = Field(default_factory=list)
+    adaptation_policy: str | None = None
+
+
 class AgentAction(BaseModel):
     """Minimal action envelope accepted from any agent implementation."""
 
@@ -89,6 +100,7 @@ class FinalSubmission(BaseModel):
 __all__ = [
     "AgentAction",
     "AgentContext",
+    "AgentPlan",
     "AgentManifest",
     "AgentModelInfo",
     "AgentObservation",

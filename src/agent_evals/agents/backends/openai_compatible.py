@@ -9,7 +9,7 @@ from agent_evals.agents.runtime.protocol import AgentManifest, AgentModelInfo
 
 
 class OpenAICompatibleRuntime(OpenAIRuntime):
-    """Support vLLM, LM Studio, Together, OpenRouter, and similar clients."""
+    """Support GLM, vLLM, LM Studio, Together, OpenRouter, and similar clients."""
 
     def __init__(
         self,
@@ -17,9 +17,19 @@ class OpenAICompatibleRuntime(OpenAIRuntime):
         model: str,
         client: Any | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        system_prompt: str | None = None,
     ) -> None:
-        super().__init__(model=model, client=client, tools=tools)
+        super().__init__(
+            model=model,
+            client=client,
+            base_url=base_url,
+            api_key=api_key,
+            tools=tools,
+            system_prompt=system_prompt,
+            use_chat_completions=True,
+        )
         self.agent_id = "openai-compatible"
         self.manifest = AgentManifest(
             name="OpenAI-compatible scientific agent",
@@ -27,7 +37,6 @@ class OpenAICompatibleRuntime(OpenAIRuntime):
             model=AgentModelInfo(provider="openai-compatible", name=model),
             capabilities=["tool_use", "structured_actions"],
         )
-        self.base_url = base_url
 
 
 __all__ = ["OpenAICompatibleRuntime"]

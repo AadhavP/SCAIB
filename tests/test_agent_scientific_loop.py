@@ -22,6 +22,7 @@ from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.datasets.pbmc import PBMCDataset
 from agent_evals.environment.ports import DeclarativeActionValidator
 from agent_evals.environment.runtime import ScientificEnvironment
+from agent_evals.agents.runtime.manager import _observation_from_snapshot
 from agent_evals.environment.scientific_loop import (
     ScientificActionExecutor,
     ScientificLoop,
@@ -100,6 +101,9 @@ async def test_observation_is_structured_and_hides_anndata(tmp_path: Path) -> No
     assert value["pipeline_state"]["qc_complete"] is False
     assert "X" not in value
     assert "qc" in value["available_actions"]
+    agent_observation = _observation_from_snapshot(snapshot, environment.task)
+    assert agent_observation.metadata["goal"] == environment.task.objective
+    assert agent_observation.metadata["scenario"]["success_criteria"]
 
 
 @pytest.mark.asyncio

@@ -17,6 +17,7 @@ def test_api_health() -> None:
     data = response.json()
     assert data["status"] == "ok"
     assert data["version"] == "0.1.0"
+    assert "glm_test_mode" in data["features"]
 
 
 def test_api_list_benchmarks() -> None:
@@ -56,7 +57,10 @@ def test_api_job_manager_tracks_successful_result(monkeypatch: pytest.MonkeyPatc
             assert mode == "json"
             return {"run_id": self.run_id, "global_reward": {"value": 0.9}}
 
+    captured: dict[str, object] = {}
+
     async def fake_run(*args: object, **kwargs: object) -> FakeRun:
+        captured.update(kwargs)
         return FakeRun()
 
     monkeypatch.setattr(jobs.ScientificLoop, "run", fake_run)
@@ -66,12 +70,20 @@ def test_api_job_manager_tracks_successful_result(monkeypatch: pytest.MonkeyPatc
             agent_id="rule-based",
             max_cells=10,
             max_steps=2,
+            test_mode=True,
         )
     )
     asyncio.run(routes.job_manager.execute(job_id))
+    assert captured["test_mode"] is True
     job = routes.job_manager.get(job_id)
     assert job.status == "COMPLETED"
     assert job.result == {"run_id": "run-123", "global_reward": {"value": 0.9}}
+    response = client.get(f"/v1/evaluations/{job_id}/events")
+    assert response.status_code == 200
+    assert '"type":"run_queued"' in response.text
+    assert '"terminal":true' in response.text
+    assert "\\\\n" not in response.text
+    assert "id: 1\n" in response.text
 
 
 def test_api_accepts_run_and_exposes_job(monkeypatch: pytest.MonkeyPatch) -> None:

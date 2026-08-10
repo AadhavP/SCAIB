@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import os
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -19,6 +23,7 @@ from agent_evals.agents import (
 )
 from agent_evals.agents.trajectory import DecisionCategory
 from agent_evals.benchmarks.io import load_benchmark
+from agent_evals.core.config import get_settings
 from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
 from agent_evals.environment.models import (
@@ -70,7 +75,7 @@ from agent_evals.scientific.metrics import (
 )
 from agent_evals.scientific.observations import ScientificObservationBuilder
 
-DEFAULT_RUNTIME_MAX_STEPS = 4
+DEFAULT_RUNTIME_MAX_STEPS = 12
 
 
 class AgentScientificRun(BaseModel):
@@ -271,9 +276,24 @@ class AgentScientificRun(BaseModel):
 class ScientificActionExecutor:
     """Async environment port that adapts Scanpy results to benchmark artifacts."""
 
-    def __init__(self, context: ScientificContext) -> None:
+    def __init__(
+        self,
+        context: ScientificContext,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+        expected_outputs: dict[str, list[str]] | None = None,
+    ) -> None:
         self.context = context
         self.executor = ScanpyExecutor()
+        self.event_callback = event_callback
+        self.expected_outputs = expected_outputs or {}
+
+    async def _emit(self, event: dict[str, Any]) -> None:
+        """Forward an observable action event without coupling the executor to the API."""
+        if self.event_callback is None:
+            return
+        callback_result = self.event_callback(event)
+        if inspect.isawaitable(callback_result):
+            await callback_result
 
     async def execute(
         self,
@@ -282,12 +302,36 @@ class ScientificActionExecutor:
     ) -> ActionExecutionResult:
         """Execute a validated action without exposing AnnData to the agent."""
         del context
-        result = self.executor.execute(intent, self.context)
+        step = len(self.context.operations) + 1
+        await self._emit(
+            {
+                "type": "action_started",
+                "step": step,
+                "action_id": intent.action_id,
+                "parameters": intent.parameters,
+            }
+        )
+        # Scanpy operations are synchronous and can otherwise block the API
+        # event loop, preventing SSE and polling updates from reaching the UI.
+        result = await asyncio.to_thread(self.executor.execute, intent, self.context)
         expected_outputs = [
             str(output)
-            for output in intent.metadata.get("expected_outputs", [])
+            for output in intent.metadata.get(
+                "expected_outputs",
+                self.expected_outputs.get(intent.action_id, []),
+            )
         ]
         if result.status.value != "succeeded" or not expected_outputs:
+            await self._emit(
+                {
+                    "type": "action_finished",
+                    "step": step,
+                    "action_id": intent.action_id,
+                    "status": result.status.value,
+                    "error": result.error,
+                    "artifacts": [artifact.artifact_id for artifact in result.artifacts],
+                }
+            )
             return result
         artifacts = [
             artifact.model_copy(
@@ -299,7 +343,18 @@ class ScientificActionExecutor:
             )
             for index, artifact in enumerate(result.artifacts)
         ]
-        return result.model_copy(update={"artifacts": artifacts})
+        result = result.model_copy(update={"artifacts": artifacts})
+        await self._emit(
+            {
+                "type": "action_finished",
+                "step": step,
+                "action_id": intent.action_id,
+                "status": result.status.value,
+                "error": result.error,
+                "artifacts": [artifact.artifact_id for artifact in result.artifacts],
+            }
+        )
+        return result
 
 
 class ScientificLoop:
@@ -319,6 +374,8 @@ class ScientificLoop:
         max_steps: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        test_mode: bool = False,
+        event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> AgentScientificRun:
         """Load data, run the harness, score local/global outcomes, and persist."""
         specification = self._resolve_benchmark(benchmark)
@@ -326,7 +383,9 @@ class ScientificLoop:
         from agent_evals.datasets.pbmc import PBMCDataset
 
         dataset = PBMCDataset(cache_dir=self.cache_dir)
-        adata = dataset.load(max_cells=max_cells)
+        # Dataset IO/decompression is synchronous; keep the API responsive while
+        # the first run populates the cache.
+        adata = await asyncio.to_thread(dataset.load, max_cells=max_cells)
         requested_run_id = str(uuid4())
         pending_root = Path(output_dir) / requested_run_id
         store = LocalArtifactStore(pending_root / "artifacts")
@@ -341,14 +400,29 @@ class ScientificLoop:
         environment = ScientificEnvironment(
             specification,
             task_id=task.id,
-            executor=ScientificActionExecutor(context),
+            executor=ScientificActionExecutor(
+                context,
+                event_callback=event_callback,
+                expected_outputs={
+                    action.id: list(action.expected_outputs)
+                    for action in specification.actions
+                },
+            ),
             observation_builder=observation_builder,
             reward_evaluator=reward_evaluator,
         )
-        adapter = _create_scientific_adapter(agent_type, model=model)
+        adapter = _create_scientific_adapter(
+            agent_type,
+            model=model,
+            provider=provider,
+            test_mode=test_mode,
+            event_callback=event_callback,
+        )
+        # Test mode replaces the selected legacy agent with the universal GLM
+        # runtime, so it must receive the same finite default step cap.
         effective_max_steps = (
             DEFAULT_RUNTIME_MAX_STEPS
-            if max_steps is None and agent_type in agent_runtime_registry.list()
+            if max_steps is None and (test_mode or agent_type in agent_runtime_registry.list())
             else max_steps
         )
         configuration = AgentConfiguration(
@@ -366,7 +440,8 @@ class ScientificLoop:
         )
         agent_run = await AgentHarness().run(adapter, environment, configuration)
         pipeline_parameters: dict[str, Any] = {}
-        metrics = compute_objective_metrics(
+        metrics = await asyncio.to_thread(
+            compute_objective_metrics,
             specification.metadata.id,
             context.adata,
             pipeline_parameters,
@@ -384,7 +459,23 @@ class ScientificLoop:
             else "unavailable",
         )
         trace = getattr(adapter, "decision_trace", [])
-        evaluation = self._evaluate_scientific_run(
+        if not trace:
+            trace = [
+                {
+                    "step": action.step,
+                    "decision": {
+                        "action_id": action.intent.action_id,
+                        "method": action.intent.metadata.get("method", action.intent.action_id),
+                        "parameters": action.intent.parameters,
+                        "rationale": action.intent.rationale,
+                    },
+                    "intent": action.intent.model_dump(mode="json"),
+                    "result": action.result.model_dump(mode="json"),
+                }
+                for action in agent_run.final_environment_state.state.actions
+            ]
+        evaluation = await asyncio.to_thread(
+            self._evaluate_scientific_run,
             specification,
             task,
             agent_run,
@@ -756,13 +847,64 @@ class ScientificLoop:
         return benchmark_spec_registry.get(str(reference))
 
 
-def _create_scientific_adapter(agent_type: str, *, model: str | None = None) -> Any:
+def _create_scientific_adapter(
+    agent_type: str,
+    *,
+    model: str | None = None,
+    provider: str | None = None,
+    test_mode: bool = False,
+    event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
+) -> Any:
     """Create a legacy adapter or wrap a universal runtime for scientific episodes."""
+    if test_mode:
+        settings = get_settings()
+        test_model = (
+            settings.llm_model
+            or settings.glm_model
+            or os.getenv("LLM_MODEL")
+            or os.getenv("GLM_MODEL")
+            or model
+            or "z-ai/glm-5.2"
+        )
+        test_base_url = (
+            settings.llm_base_url
+            or settings.glm_base_url
+            or settings.openrouter_base_url
+            or os.getenv("LLM_BASE_URL")
+            or os.getenv("GLM_BASE_URL")
+            or os.getenv("OPENROUTER_BASE_URL")
+            or "https://openrouter.ai/api/v1"
+        )
+        test_api_key = (
+            settings.llm_api_key
+            or settings.glm_api_key
+            or settings.openrouter_api_key
+            or settings.openai_api_key
+            or os.getenv("LLM_API_KEY")
+            or os.getenv("GLM_API_KEY")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        )
+        if not test_api_key:
+            raise RuntimeError(
+                "GLM test mode requires LLM_API_KEY, GLM_API_KEY, "
+                "OPENROUTER_API_KEY, or OPENAI_API_KEY in the backend environment"
+            )
+        runtime = agent_runtime_registry.create(
+            "openai-compatible",
+            model=test_model,
+            base_url=test_base_url,
+            api_key=test_api_key,
+        )
+        return RuntimeAgentAdapter(runtime, event_callback=event_callback)
     if agent_type in agent_runtime_registry.list():
         runtime_config: dict[str, object] = {}
         if model is not None and agent_type not in {"gpt-5", "claude-sonnet"}:
             runtime_config["model"] = model
-        return RuntimeAgentAdapter(agent_runtime_registry.create(agent_type, **runtime_config))
+        return RuntimeAgentAdapter(
+            agent_runtime_registry.create(agent_type, **runtime_config),
+            event_callback=event_callback,
+        )
     return agent_adapter_registry.create(agent_type)
 
 

@@ -1,9 +1,11 @@
 """FastAPI router endpoints."""
 
+import json
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_evals.agents.registry import agent_adapter_registry
@@ -31,6 +33,7 @@ job_manager = EvaluationJobManager()
 class HealthCheckResponse(BaseModel):
     status: str
     version: str
+    features: list[str] = Field(default_factory=list)
 
 
 class RunBenchmarkRequest(BaseModel):
@@ -39,6 +42,7 @@ class RunBenchmarkRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: str | None = None
     provider: str | None = None
+    test_mode: bool = False
     seed: int = 0
     max_cells: int | None = Field(default=None, ge=1, le=10000)
     max_steps: int | None = Field(default=None, ge=1, le=32)
@@ -76,7 +80,11 @@ def _ensure_benchmark_specs() -> None:
 @router.get("/health", response_model=HealthCheckResponse)
 async def health_check() -> HealthCheckResponse:
     """Return API service health status."""
-    return HealthCheckResponse(status="ok", version="0.1.0")
+    return HealthCheckResponse(
+        status="ok",
+        version="0.1.0",
+        features=["glm_test_mode", "sse_events"],
+    )
 
 
 @router.get("/benchmarks", response_model=list[str])
@@ -160,6 +168,46 @@ async def trigger_evaluation_with_background(
 async def list_evaluation_jobs() -> list[EvaluationJob]:
     """List jobs submitted to this API process."""
     return job_manager.list()
+
+
+@router.get("/evaluations/{job_id}/events")
+async def stream_evaluation_events(
+    job_id: str,
+    request: Request,
+    after: int = Query(default=0, ge=0),
+    last_event_id: str | None = Header(default=None),
+) -> StreamingResponse:
+    """Stream replayable evaluation events as server-sent events."""
+    try:
+        job_manager.get(job_id)
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="evaluation job not found") from error
+    try:
+        cursor = max(after, int(last_event_id or 0))
+    except ValueError:
+        cursor = after
+
+    async def event_stream() -> Any:
+        async for event in job_manager.events(job_id, after=cursor):
+            if await request.is_disconnected():
+                break
+            if event.get("type") == "heartbeat":
+                yield ": heartbeat\n\n"
+                continue
+            yield (
+                f"id: {event['event_id']}\n"
+                f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
+            )
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/evaluations/{job_id}", response_model=EvaluationJob)

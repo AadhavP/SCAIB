@@ -24,6 +24,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentManifest,
     AgentModelInfo,
     AgentObservation,
+    AgentPlan,
     AgentSession,
     FinalSubmission,
 )
@@ -60,6 +61,7 @@ __all__ = [
     "AgentManifest",
     "AgentModelInfo",
     "AgentObservation",
+    "AgentPlan",
     "AgentRuntime",
     "AgentRuntimeManager",
     "AgentRuntimeRegistry",

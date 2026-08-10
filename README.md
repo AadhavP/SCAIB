@@ -97,6 +97,40 @@ variables; they are never entered into or persisted by the browser.
 
 ---
 
+## 🐳 Docker
+
+The project ships a `Dockerfile`, a `frontend/Dockerfile`, and a
+`docker-compose.yml` to run the FastAPI backend (with the scientific
+`scanpy`/`anndata` and provider extras) together with the Vite/React console in
+dev mode with hot reload.
+
+```bash
+# 1. Configure environment
+cp .env.example .env          # then fill in LLM_API_KEY etc.
+
+# 2. Build and start the stack
+docker compose up --build -d
+#  API:      http://localhost:8000/docs
+#  Console:  http://localhost:5173
+```
+
+Datasets, run artifacts, scientific results, and reports persist on the host via
+mounted volumes (`./data`, `./runs`, `./results`, `./reports_output`); the
+frontend proxies `/v1` to the API service inside the compose network. To add the
+optional OpenHands adapter extra at build time:
+
+```bash
+docker build --build-arg UV_EXTRAS="--extra science --extra providers --extra openhands" -t agent-evals .
+```
+
+If the host port 8000 is already in use, override the published port:
+`AGENT_EVALS_API__PORT=18000 docker compose up -d`.
+
+Environment variables are loaded from your `.env` and take precedence over
+`configs/*.yaml` (see [Configuration System](#configuration-system)).
+
+---
+
 ## ⚙️ Configuration System
 
 `agent-evals` uses **Pydantic Settings** combined with **YAML** configuration overrides:
