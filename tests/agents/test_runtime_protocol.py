@@ -3,6 +3,7 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 
@@ -42,7 +43,34 @@ def make_environment() -> ScientificEnvironment:
     )
 
 
+#: Every action the cell-annotation task needs, with the parameters it declares.
+COMPLETE_WORKFLOW: list[tuple[str, dict[str, object]]] = [
+    ("qc", {"min_genes": 200, "max_mito_fraction": 0.2}),
+    ("normalize", {"target_sum": 10_000}),
+    ("pca", {"n_components": 10}),
+    ("cluster", {"resolution": 0.5}),
+    ("marker-genes", {"group_key": "predicted_clusters"}),
+    (
+        "annotate",
+        {
+            "label_vocabulary": ["T", "B"],
+            "markers": {"T": ["CD3D"], "B": ["MS4A1"]},
+        },
+    ),
+    ("finish", {}),
+]
+
+
 class FakeRuntime(AgentRuntime):
+    """A runtime that terminates before producing the required artifacts."""
+
+    # A class attribute so subclasses can swap in a different workflow.
+    workflow: ClassVar[list[tuple[str, dict[str, object]]]] = [
+        ("qc", {"min_genes": 200, "max_mito_fraction": 0.2}),
+        ("normalize", {"target_sum": 10_000}),
+        ("finish", {}),
+    ]
+
     def __init__(self) -> None:
         self.agent_id = "fake-scientist"
         self.manifest = AgentManifest(name="Fake scientist", type="test")
@@ -52,10 +80,10 @@ class FakeRuntime(AgentRuntime):
 
     async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
         del observation
-        actions = ["qc", "normalize", "finish"]
         index = int(session.state.get("index", 0))
         session.state["index"] = index + 1
-        return AgentAction(action_type=actions[index])
+        action_type, parameters = self.workflow[index]
+        return AgentAction(action_type=action_type, parameters=dict(parameters))
 
     async def terminate(
         self,
@@ -66,8 +94,34 @@ class FakeRuntime(AgentRuntime):
         return FinalSubmission(summary="completed")
 
 
+class CompleteRuntime(FakeRuntime):
+    """A runtime that produces every declared artifact before finishing."""
+
+    workflow = COMPLETE_WORKFLOW
+
+
 @pytest.mark.asyncio
 async def test_runtime_manager_normalizes_actions_and_captures_full_trajectory() -> None:
+    context = AgentContext(benchmark_id="pbmc-cell-annotation", task_id="cell-annotation", workspace=".")
+    result = await AgentRuntimeManager().run(
+        CompleteRuntime(),
+        make_environment(),
+        context,
+        seed=3,
+    )
+
+    assert result.termination_status == "completed"
+    assert result.step_count == len(COMPLETE_WORKFLOW) - 1
+    assert [action.action_type for action in result.trajectory.actions] == [
+        action_type for action_type, _ in COMPLETE_WORKFLOW
+    ]
+    assert any(event.event_type.value == "environment_response" for event in result.trajectory.events)
+    assert result.final_submission is not None
+
+
+@pytest.mark.asyncio
+async def test_terminal_action_without_required_artifacts_is_not_completed() -> None:
+    """Saying `finish` must not be enough; the declared artifacts must exist."""
     context = AgentContext(benchmark_id="pbmc-cell-annotation", task_id="cell-annotation", workspace=".")
     result = await AgentRuntimeManager().run(
         FakeRuntime(),
@@ -76,11 +130,8 @@ async def test_runtime_manager_normalizes_actions_and_captures_full_trajectory()
         seed=3,
     )
 
-    assert result.termination_status == "completed"
-    assert result.step_count == 2
-    assert [action.action_type for action in result.trajectory.actions] == ["qc", "normalize", "finish"]
-    assert any(event.event_type.value == "environment_response" for event in result.trajectory.events)
-    assert result.final_submission is not None
+    assert result.termination_status == "incomplete"
+    assert any(event.event_type.value == "failure" for event in result.trajectory.events)
 
 
 class MalformedRuntime(FakeRuntime):
@@ -253,7 +304,7 @@ async def test_custom_python_runtime_supports_user_owned_agent() -> None:
 @pytest.mark.asyncio
 async def test_runtime_adapter_bridges_into_existing_agent_run_contract() -> None:
     run = await AgentHarness().run(
-        RuntimeAgentAdapter(FakeRuntime()),
+        RuntimeAgentAdapter(CompleteRuntime()),
         make_environment(),
         AgentConfiguration(agent_type="fake-scientist", seed=5),
     )

@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 
 from agent_evals.agents.trajectory import RunTerminationStatus
 from agent_evals.cli.main import app
+from agent_evals.environment.scientific_loop import DEFAULT_RUNTIME_MAX_STEPS
 
 runner = CliRunner()
 
@@ -58,4 +59,5 @@ def test_cli_run_routes_universal_runtime_to_scientific_loop(monkeypatch) -> Non
     assert result.exit_code == 0
     assert calls["agent_type"] == "openai"
     assert calls["model"] == "gpt-5"
-    assert calls["max_steps"] == 4
+    assert calls["max_cells"] == 12
+    assert calls["max_steps"] == DEFAULT_RUNTIME_MAX_STEPS

@@ -33,6 +33,8 @@ export type EvaluationJob = {
   job_id: string
   benchmark_id: string
   agent_id: string
+  /** Seed the backend resolved for this run; may differ from the submitted form value. */
+  seed?: number
   status: string
   created_at?: string
   started_at?: string | null

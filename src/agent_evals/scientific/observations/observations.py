@@ -23,6 +23,9 @@ class ScientificObservation(BaseModel):
     biological_information: dict[str, Any] = Field(default_factory=dict)
     pipeline_state: dict[str, bool] = Field(default_factory=dict)
     available_actions: list[str] = Field(default_factory=list)
+    #: Why each declared action is or is not currently selectable. An agent that
+    #: can read the precondition does not have to infer it from a failure.
+    action_preconditions: dict[str, dict[str, Any]] = Field(default_factory=dict)
 
 
 class ScientificObservationBuilder:
@@ -108,18 +111,30 @@ class ScientificObservationBuilder:
             "hvg_selected": bool({"select_hvg", "hvg"} & operation_names),
             "pca_complete": "pca" in operation_names,
             "batch_corrected": bool({"batch_correct", "harmony"} & operation_names),
+            "clustered": bool(
+                {"cluster", "clustering", "leiden", "neighborhood-graph"} & operation_names
+            ),
+            "annotated": bool({"annotate", "annotation"} & operation_names),
             "differential_expression_complete": bool(
                 {"differential_expression", "differential-expression", "marker-genes"}
                 & operation_names
             ),
         }
         supported = set(ScanpyExecutor._operations)
-        available_actions = [
-            action.id
+        preconditions = {
+            action.id: self._action_precondition(
+                action.id,
+                supported=supported,
+                allowed=action.id in task.allowed_actions,
+                pipeline_state=pipeline_state,
+                batch_information=batch_information,
+            )
             for action in specification.actions
-            if action.id in task.allowed_actions
-            and action.id in supported
-            and not self._action_completed(action.id, pipeline_state)
+        }
+        available_actions = [
+            action_id
+            for action_id, precondition in preconditions.items()
+            if precondition["available"]
         ]
         return ScientificObservation(
             dataset_summary=dataset_summary,
@@ -128,7 +143,64 @@ class ScientificObservationBuilder:
             biological_information=biological_information,
             pipeline_state=pipeline_state,
             available_actions=available_actions,
+            action_preconditions=preconditions,
         )
+
+    @staticmethod
+    def _action_precondition(
+        action_id: str,
+        *,
+        supported: set[str],
+        allowed: bool,
+        pipeline_state: dict[str, bool],
+        batch_information: dict[str, Any],
+    ) -> dict[str, Any]:
+        """State whether an action can run now, and why not when it cannot."""
+        if not allowed:
+            return {"available": False, "reason": "not permitted by the task definition"}
+        if action_id not in supported:
+            return {"available": False, "reason": "no executor implements this operation"}
+        if ScientificObservationBuilder._action_completed(action_id, pipeline_state):
+            return {"available": False, "reason": "this pipeline stage already succeeded"}
+        # Batch correction needs a real covariate with at least two levels;
+        # advertising it against single-batch data invites a guaranteed failure.
+        if action_id in {"harmony", "batch_correct"}:
+            batches = int(batch_information.get("num_batches", 0) or 0)
+            if batch_information.get("label_key") is None:
+                return {
+                    "available": False,
+                    "reason": "no batch metadata column exists in this dataset",
+                }
+            if batches < 2:
+                return {
+                    "available": False,
+                    "reason": (
+                        f"batch column '{batch_information.get('label_key')}' has "
+                        f"{batches} distinct value(s); at least 2 are required"
+                    ),
+                }
+        # Annotation labels agent-produced groups, so a clustering must exist
+        # first; otherwise the only groups available are reference labels.
+        if action_id in {"annotate", "annotation"} and not pipeline_state.get("clustered", False):
+            return {
+                "available": False,
+                "reason": "a clustering action must produce cell groups before annotation",
+            }
+        # Normalization must precede representation learning; scoring a PCA of
+        # raw counts as though it were a considered choice is not meaningful.
+        if action_id == "pca" and not pipeline_state.get("normalized", False):
+            return {
+                "available": False,
+                "reason": "normalization must precede dimensionality reduction",
+            }
+        if action_id in {"cluster", "clustering", "leiden"} and not pipeline_state.get(
+            "normalized", False
+        ):
+            return {
+                "available": False,
+                "reason": "normalization must precede clustering",
+            }
+        return {"available": True, "reason": "preconditions satisfied"}
 
     @staticmethod
     def _quality_metrics(obs: Any) -> dict[str, Any]:
@@ -200,6 +272,12 @@ class ScientificObservationBuilder:
             "pca": "pca_complete",
             "harmony": "batch_corrected",
             "batch_correct": "batch_corrected",
+            "cluster": "clustered",
+            "clustering": "clustered",
+            "leiden": "clustered",
+            "neighborhood-graph": "clustered",
+            "annotate": "annotated",
+            "annotation": "annotated",
             "differential-expression": "differential_expression_complete",
             "marker-genes": "differential_expression_complete",
         }

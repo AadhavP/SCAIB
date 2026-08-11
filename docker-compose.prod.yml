@@ -1,0 +1,19 @@
+# Production overrides: static frontend build served by nginx.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Remember to set AGENT_EVALS_ENVIRONMENT=production and
+# AGENT_EVALS_API__API_KEY in .env before deploying.
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    image: scaib-console:prod
+    environment:
+      # nginx attaches this as `Authorization: Bearer ...` on proxied /v1
+      # requests. It is read at container start and never reaches the browser.
+      AGENT_EVALS_API__API_KEY: "${AGENT_EVALS_API__API_KEY:-}"
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    volumes: []

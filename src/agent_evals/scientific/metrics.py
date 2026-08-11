@@ -51,8 +51,16 @@ def _success(
     )
 
 
-def annotation_metrics(adata: Any) -> list[MetricResult]:
-    """Compute ARI, NMI, and embedding silhouette against observed labels."""
+def annotation_metrics(
+    adata: Any,
+    agent_produced_columns: set[str] | None = None,
+) -> list[MetricResult]:
+    """Compute ARI, NMI, and embedding silhouette against reference labels.
+
+    ``agent_produced_columns`` restricts prediction candidates to columns the
+    agent actually wrote. Without it, a dataset shipping its own ``louvain`` or
+    ``bulk_labels`` column would be scored as if the agent had predicted it.
+    """
     from sklearn.metrics import (
         adjusted_rand_score,
         normalized_mutual_info_score,
@@ -60,9 +68,24 @@ def annotation_metrics(adata: Any) -> list[MetricResult]:
     )
 
     reference_key = _column(adata, ("cell_type", "cell_type_ref", "known_labels", "bulk_labels"))
-    predicted_key = _column(adata, ("predicted_labels", "leiden", "louvain", "cluster"))
+    prediction_candidates = ("predicted_labels", "predicted_cell_type", "leiden", "louvain", "cluster")
+    if agent_produced_columns is None:
+        predicted_key = None
+    else:
+        predicted_key = next(
+            (
+                name
+                for name in prediction_candidates
+                if name in agent_produced_columns and name in adata.obs.columns
+            ),
+            None,
+        )
     if reference_key is None or predicted_key is None:
-        reason = "reference and predicted observation labels are required"
+        reason = (
+            "an agent-produced prediction column and reference labels are required"
+            if reference_key is not None
+            else "reference observation labels are required"
+        )
         return [
             _unavailable(metric, name, reason)
             for metric, name in (
@@ -166,10 +189,11 @@ def compute_objective_metrics(
     benchmark_id: str,
     adata: Any,
     pipeline_parameters: dict[str, Any] | None = None,
+    agent_produced_columns: set[str] | None = None,
 ) -> list[MetricResult]:
     """Dispatch the benchmark's objective metric family."""
     if "cell-annotation" in benchmark_id:
-        return annotation_metrics(adata)
+        return annotation_metrics(adata, agent_produced_columns)
     if "batch-correction" in benchmark_id:
         return batch_metrics(adata)
     if "differential-expression" in benchmark_id:

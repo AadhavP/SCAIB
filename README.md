@@ -129,6 +129,28 @@ If the host port 8000 is already in use, override the published port:
 Environment variables are loaded from your `.env` and take precedence over
 `configs/*.yaml` (see [Configuration System](#configuration-system)).
 
+### Production deployment
+
+`docker-compose.prod.yml` replaces the dev server with a static build served by
+nginx:
+
+```bash
+# Required outside development: any other environment refuses requests
+# until an API key is set.
+AGENT_EVALS_ENVIRONMENT=production
+AGENT_EVALS_API__API_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+#  Console: http://localhost:8080
+```
+
+The console never receives the API key. Compose passes it to the reverse proxy
+— nginx in production, the Vite dev proxy otherwise — which attaches
+`Authorization: Bearer …` to each proxied `/v1` request server-side. Do not
+create a `VITE_`-prefixed copy: Vite inlines those into the public bundle, and a
+browser `EventSource` cannot send the header itself, so proxy-side injection is
+also what keeps the live event stream working.
+
 ---
 
 ## ⚙️ Configuration System

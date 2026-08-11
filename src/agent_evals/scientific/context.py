@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,22 @@ class OperationOutput:
     outputs: dict[str, Any] = field(default_factory=dict)
 
 
+#: Observation columns that carry reference biology. These are evaluator inputs
+#: and must never be read back as though the agent had predicted them.
+RESERVED_REFERENCE_COLUMNS = frozenset(
+    {
+        "bulk_labels",
+        "cell_type",
+        "cell_type_ref",
+        "known_labels",
+        "reference_labels",
+    }
+)
+
+#: Observation columns an agent may write to record its own predictions.
+AGENT_PREDICTION_COLUMNS = ("predicted_labels", "predicted_cell_type")
+
+
 @dataclass
 class ScientificContext:
     """Execution state shared by operations without coupling them to a backend."""
@@ -37,6 +54,31 @@ class ScientificContext:
     operations: list[OperationRecord] = field(default_factory=list)
     started_at: datetime = field(default_factory=utc_now)
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Observation columns written by agent actions during this run. Scoring may
+    #: only treat a column as a prediction when the agent actually produced it;
+    #: otherwise pre-existing dataset columns would leak into the score.
+    agent_produced_columns: set[str] = field(default_factory=set)
+
+    def record_produced_columns(self, columns: Iterable[str]) -> None:
+        """Attribute observation columns to the agent that just acted."""
+        for column in columns:
+            name = str(column)
+            if name in RESERVED_REFERENCE_COLUMNS:
+                raise ValueError(
+                    f"operation attempted to write reserved reference column '{name}'"
+                )
+            self.agent_produced_columns.add(name)
+
+    def agent_prediction_column(self) -> str | None:
+        """Return the agent's prediction column, or None when it produced none."""
+        return next(
+            (
+                column
+                for column in AGENT_PREDICTION_COLUMNS
+                if column in self.agent_produced_columns and column in self.adata.obs
+            ),
+            None,
+        )
 
     def record_operation(
         self,

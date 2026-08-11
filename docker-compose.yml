@@ -40,6 +40,9 @@ services:
     environment:
       # Route /v1 to the API service inside the compose network.
       VITE_API_PROXY_TARGET: "http://api:8000"
+      # The Vite dev proxy attaches this as a bearer token server-side; it is
+      # deliberately not `VITE_`-prefixed so it stays out of the browser bundle.
+      AGENT_EVALS_API__API_KEY: "${AGENT_EVALS_API__API_KEY:-}"
     ports:
       - "5173:5173"
     volumes:

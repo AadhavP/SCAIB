@@ -38,14 +38,14 @@ def _strip_env_shadowed(
             (
                 child_key,
                 (
-                    _strip_env_shadowed(child_value, paths, prefix + (child_key.lower(),))
+                    _strip_env_shadowed(child_value, paths, (*prefix, child_key.lower()))
                     if isinstance(child_value, dict)
                     else child_value
                 ),
             )
             for child_key, child_value in data.items()
         )
-        if prefix + (key.lower(),) not in paths
+        if (*prefix, key.lower()) not in paths
     }
 
 

@@ -23,9 +23,14 @@ from agent_evals.agents import (
 )
 from agent_evals.agents.trajectory import DecisionCategory
 from agent_evals.benchmarks.io import load_benchmark
-from agent_evals.core.config import get_settings
 from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
+from agent_evals.core.config import get_settings
+from agent_evals.datasets.preflight import (
+    DatasetContractError,
+    describe_readiness,
+    validate_dataset_contract,
+)
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
@@ -76,6 +81,18 @@ from agent_evals.scientific.metrics import (
 from agent_evals.scientific.observations import ScientificObservationBuilder
 
 DEFAULT_RUNTIME_MAX_STEPS = 12
+
+
+async def _emit_event(
+    event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None,
+    event: dict[str, Any],
+) -> None:
+    """Forward one observable event to an optional sync or async callback."""
+    if event_callback is None:
+        return
+    result = event_callback(event)
+    if inspect.isawaitable(result):
+        await result
 
 
 class AgentScientificRun(BaseModel):
@@ -386,6 +403,28 @@ class ScientificLoop:
         # Dataset IO/decompression is synchronous; keep the API responsive while
         # the first run populates the cache.
         adata = await asyncio.to_thread(dataset.load, max_cells=max_cells)
+        # Validate the benchmark's data contract before spending a model call.
+        # Without this an impossible task (batch correction on data with no batch
+        # column) reaches the agent, which is then blamed for the harness's gap.
+        readiness = describe_readiness(
+            adata,
+            specification,
+            task,
+            source=str(dataset.metadata.source),
+        )
+        for warning in readiness.warnings:
+            await _emit_event(
+                event_callback,
+                {"type": "dataset_warning", "message": warning},
+            )
+        try:
+            validate_dataset_contract(readiness, specification, task)
+        except DatasetContractError as error:
+            await _emit_event(
+                event_callback,
+                {"type": "dataset_rejected", "message": str(error)},
+            )
+            raise
         requested_run_id = str(uuid4())
         pending_root = Path(output_dir) / requested_run_id
         store = LocalArtifactStore(pending_root / "artifacts")
@@ -445,6 +484,7 @@ class ScientificLoop:
             specification.metadata.id,
             context.adata,
             pipeline_parameters,
+            set(context.agent_produced_columns),
         )
         global_reward = GlobalReward(
             value=aggregate_objective_score(specification.metadata.id, metrics),
@@ -579,14 +619,10 @@ class ScientificLoop:
 
         adata = context.adata
         cell_ids = [str(value) for value in adata.obs_names]
-        prediction_column = next(
-            (
-                column
-                for column in ("predicted_labels", "cell_type", "louvain", "leiden", "bulk_labels")
-                if column in adata.obs
-            ),
-            None,
-        )
+        # Only columns this run's agent actually wrote may count as predictions.
+        # Reading a pre-existing column (bulk_labels, cell_type, or the dataset's
+        # own louvain assignment) would score reference biology as agent output.
+        prediction_column = context.agent_prediction_column()
         candidate: dict[str, Any] = {"cell_id": cell_ids}
         if prediction_column is not None:
             candidate["predicted_label"] = [str(value) for value in adata.obs[prediction_column]]
@@ -596,11 +632,25 @@ class ScientificLoop:
         prediction_artifact = store.save_table(
             "evaluation-prediction",
             prediction,
-            metadata={"hidden_from_agent": True, "source_column": prediction_column},
+            metadata={
+                "hidden_from_agent": True,
+                "source_column": prediction_column,
+                "agent_produced_prediction": prediction_column is not None,
+            },
         )
         candidate_artifacts: dict[str, Any] = {"prediction": prediction}
-        if prediction_column in {"louvain", "leiden"}:
-            candidate_artifacts["cluster_labels"] = prediction["predicted_label"].to_numpy()
+        cluster_column = next(
+            (
+                column
+                for column in ("leiden", "louvain")
+                if column in context.agent_produced_columns and column in adata.obs
+            ),
+            None,
+        )
+        if cluster_column is not None:
+            candidate_artifacts["cluster_labels"] = (
+                adata.obs[cluster_column].astype(str).to_numpy()
+            )
         if "X_pca" in adata.obsm:
             candidate_artifacts["embedding"] = adata.obsm["X_pca"]
         label_column = next(

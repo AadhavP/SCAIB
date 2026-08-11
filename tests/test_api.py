@@ -86,6 +86,46 @@ def test_api_job_manager_tracks_successful_result(monkeypatch: pytest.MonkeyPatc
     assert "id: 1\n" in response.text
 
 
+def test_api_reports_the_seed_the_run_actually_uses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The job records the resolved seed so clients never assume a default."""
+    captured: dict[str, object] = {}
+
+    class FakeRun:
+        def model_dump(self, *, mode: str) -> dict[str, object]:
+            return {"run_id": "run-seed"}
+
+    async def fake_run(*args: object, **kwargs: object) -> FakeRun:
+        captured.update(kwargs)
+        return FakeRun()
+
+    monkeypatch.setattr(jobs.ScientificLoop, "run", fake_run)
+    job_id = routes.job_manager.create(
+        routes.RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="rule-based",
+            seed=1234,
+        )
+    )
+    # Reported before execution starts, while the job is still queued.
+    assert routes.job_manager.get(job_id).seed == 1234
+
+    asyncio.run(routes.job_manager.execute(job_id))
+    assert captured["seed"] == 1234
+    assert routes.job_manager.get(job_id).seed == 1234
+
+
+def test_api_seed_from_config_override_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A seed supplied only via `config_override` must still be visible."""
+    job_id = routes.job_manager.create(
+        routes.RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="rule-based",
+            config_override={"seed": 7},
+        )
+    )
+    assert routes.job_manager.get(job_id).seed == 7
+
+
 def test_api_accepts_run_and_exposes_job(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_execute(job_id: str) -> None:
         return None
@@ -106,6 +146,31 @@ def test_api_accepts_run_and_exposes_job(monkeypatch: pytest.MonkeyPatch) -> Non
     assert data["status"] == "PENDING"
     status = client.get(f"/v1/evaluations/{data['job_id']}")
     assert status.status_code == 200
+
+
+def test_api_requires_key_outside_local_environments(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = routes.get_settings()
+    monkeypatch.setattr(settings, "environment", "production")
+    monkeypatch.setattr(settings.api, "api_key", None)
+    monkeypatch.setattr(routes, "get_settings", lambda: settings)
+    response = client.get("/v1/benchmarks")
+    assert response.status_code == 503
+    health = client.get("/v1/health")
+    assert health.status_code == 200
+
+
+def test_api_enforces_configured_bearer_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = routes.get_settings()
+    monkeypatch.setattr(settings.api, "api_key", "secret-token")
+    monkeypatch.setattr(routes, "get_settings", lambda: settings)
+    unauthenticated = client.get("/v1/benchmarks")
+    assert unauthenticated.status_code == 401
+    wrong = client.get("/v1/benchmarks", headers={"Authorization": "Bearer wrong"})
+    assert wrong.status_code == 401
+    authorized = client.get(
+        "/v1/benchmarks", headers={"Authorization": "Bearer secret-token"}
+    )
+    assert authorized.status_code == 200
 
 
 def test_api_rejects_unbounded_or_path_like_run_options() -> None:

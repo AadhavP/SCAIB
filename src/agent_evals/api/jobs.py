@@ -13,8 +13,27 @@ from pydantic import BaseModel, ConfigDict, Field
 from agent_evals.core.types import StatusEnum
 from agent_evals.environment.scientific_loop import ScientificLoop
 
-
 JobEventCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+
+DEFAULT_SEED = 0
+SUPPORTED_EXECUTION_KEYS = frozenset(
+    {"seed", "max_cells", "max_steps", "model", "provider", "test_mode"}
+)
+
+
+def resolve_execution(request: dict[str, Any]) -> dict[str, Any]:
+    """Merge `config_override` into execution settings; explicit fields win.
+
+    Resolved once so the seed recorded on the job is the seed the run uses.
+    """
+    overrides = request.get("config_override", {})
+    execution = {
+        key: value
+        for key, value in overrides.items()
+        if key in SUPPORTED_EXECUTION_KEYS and key not in request
+    }
+    execution.update({key: request[key] for key in SUPPORTED_EXECUTION_KEYS if key in request})
+    return execution
 
 
 class EvaluationJob(BaseModel):
@@ -25,6 +44,8 @@ class EvaluationJob(BaseModel):
     job_id: str
     benchmark_id: str
     agent_id: str
+    # Reported so clients show the seed that actually ran rather than assuming one.
+    seed: int = DEFAULT_SEED
     status: StatusEnum = StatusEnum.PENDING
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     started_at: datetime | None = None
@@ -59,17 +80,17 @@ class EvaluationJobManager:
             raise RuntimeError("evaluation queue is full")
         self._evict_old_jobs()
         job_id = str(uuid4())
+        serialized = request.model_dump(exclude_none=True, exclude_defaults=True)
+        execution = resolve_execution(serialized)
         self._jobs[job_id] = EvaluationJob(
             job_id=job_id,
             benchmark_id=request.benchmark_id,
             agent_id=request.agent_id,
+            seed=int(execution.get("seed", DEFAULT_SEED)),
             current_stage="Queued",
             logs=["Run accepted by the evaluation queue."],
         )
-        self._requests[job_id] = request.model_dump(
-            exclude_none=True,
-            exclude_defaults=True,
-        )
+        self._requests[job_id] = serialized
         self._events[job_id] = []
         self._event_sequences[job_id] = 0
         self._subscribers[job_id] = set()
@@ -192,20 +213,7 @@ class EvaluationJobManager:
         )
         request = self._requests[job_id]
         try:
-            overrides = request.get("config_override", {})
-            supported = {"seed", "max_cells", "max_steps", "model", "provider", "test_mode"}
-            execution = {
-                key: value
-                for key, value in overrides.items()
-                if key in supported and key not in request
-            }
-            execution.update(
-                {
-                    key: request[key]
-                    for key in supported
-                    if key in request
-                }
-            )
+            execution = resolve_execution(request)
 
             async def on_scientific_event(event: dict[str, Any]) -> None:
                 action_id = str(event.get("action_id", "workflow"))
@@ -272,7 +280,7 @@ class EvaluationJobManager:
                 request["benchmark_id"],
                 agent_type=request["agent_id"],
                 output_dir="results",
-                seed=execution.get("seed", 0),
+                seed=int(execution.get("seed", DEFAULT_SEED)),
                 max_cells=execution.get("max_cells"),
                 max_steps=execution.get("max_steps"),
                 model=execution.get("model"),

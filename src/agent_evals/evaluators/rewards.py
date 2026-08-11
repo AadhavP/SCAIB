@@ -14,10 +14,6 @@ from agent_evals.environment.models import (
     EpisodeSnapshot,
     RewardRecord,
 )
-from agent_evals.scientific.metrics import (
-    aggregate_objective_score,
-    compute_objective_metrics,
-)
 
 
 class GlobalReward(BaseModel):
@@ -92,12 +88,26 @@ class RewardEvaluator:
         adata: Any,
         *,
         pipeline_parameters: dict[str, Any] | None = None,
+        agent_produced_columns: set[str] | None = None,
     ) -> GlobalReward:
-        """Compute final objective metrics without merging them into local rewards."""
+        """Compute final objective metrics without merging them into local rewards.
+
+        ``agent_produced_columns`` must list the observation columns the agent
+        actually wrote. Omitting it scores nothing rather than falling back to
+        dataset-supplied labels, which would leak the reference into the score.
+        """
+        # Imported here because `scientific.metrics` imports `evaluators.models`;
+        # a module-level import would close that cycle.
+        from agent_evals.scientific.metrics import (
+            aggregate_objective_score,
+            compute_objective_metrics,
+        )
+
         metrics = compute_objective_metrics(
             benchmark_id,
             adata,
-            pipeline_parameters=pipeline_parameters,
+            pipeline_parameters,
+            agent_produced_columns,
         )
         values = {
             metric.metric_id: float(metric.normalized_score)

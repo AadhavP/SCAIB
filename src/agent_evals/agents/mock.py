@@ -72,7 +72,8 @@ class MockActionExecutor:
     _OUTPUTS: ClassVar[dict[str, tuple[str, str, str]]] = {
         "qc": ("qc-table", "table", "parquet"),
         "normalize": ("normalized-anndata", "anndata", "h5ad"),
-        "pca": ("uncorrected-embedding", "embedding", "parquet"),
+        "pca": ("pca-embedding", "embedding", "h5ad"),
+        "cluster": ("cluster-table", "table", "parquet"),
         "harmony": ("corrected-embedding", "embedding", "parquet"),
         "neighborhood-graph": ("corrected-embedding-figure", "figure", "png"),
         "marker-genes": ("marker-table", "table", "parquet"),
@@ -89,6 +90,12 @@ class MockActionExecutor:
         artifacts = []
         if output is not None:
             artifact_id, kind, file_format = output
+            # Benchmarks name the same operation's output differently (a PCA is
+            # `pca-embedding` here and `uncorrected-embedding` there). Prefer the
+            # declared ID so the mock satisfies whichever spec is running.
+            declared = [str(name) for name in intent.metadata.get("expected_outputs", [])]
+            if declared:
+                artifact_id = declared[0]
             metadata: dict[str, Any] = {"schema_valid": True}
             if intent.action_id == "qc":
                 metadata.update({"cells_before": 4, "cells_after": 3, "columns": ["total_counts", "n_genes_by_counts", "pct_counts_mt"]})
@@ -96,6 +103,8 @@ class MockActionExecutor:
                 metadata.update({"cells_before": 3, "cells_after": 3})
             elif intent.action_id == "pca":
                 metadata.update({"n_observations": 3, "n_dimensions": intent.parameters.get("n_components", 50), "finite": True})
+            elif intent.action_id == "cluster":
+                metadata.update({"n_clusters": 2, "column": "predicted_clusters", "backend": "mock"})
             elif intent.action_id == "harmony":
                 metadata.update(
                     {

@@ -220,6 +220,10 @@ class AgentRuntimeManager:
                         steps += 1
                         continue
                 if action.action_type in self.terminal_actions:
+                    # A terminal action is a claim of completion, not proof of it.
+                    # Accepting it unverified lets an agent score "completed" by
+                    # finishing immediately without producing any artifact.
+                    missing = _missing_required_artifacts(environment)
                     submission = await runtime.terminate(session, observation)
                     trajectory.final_submission = submission
                     trajectory.record(
@@ -227,6 +231,21 @@ class AgentRuntimeManager:
                         submission.model_dump(mode="json"),
                         parent_event_id=action_event.event_id,
                     )
+                    if missing:
+                        status = "incomplete"
+                        reason = (
+                            "agent submitted a terminal action while required "
+                            f"benchmark artifacts were missing: {sorted(missing)}"
+                        )
+                        trajectory.record(
+                            AgentEventType.FAILURE,
+                            {
+                                "action_type": action.action_type,
+                                "error": reason,
+                                "missing_artifacts": sorted(missing),
+                            },
+                            parent_event_id=action_event.event_id,
+                        )
                     break
                 intent = _action_to_intent(action, environment.specification)
                 result = await environment.step(intent)
@@ -502,6 +521,19 @@ def _model_dump(value: Any) -> dict[str, Any]:
         return dict(value)
     dump = getattr(value, "model_dump", None)
     return dump(mode="json") if callable(dump) else {}
+
+
+def _missing_required_artifacts(environment: ScientificEnvironment) -> set[str]:
+    """Return the task's required artifact IDs that have not been produced."""
+    required = set(environment.task.artifacts)
+    if not required:
+        return set()
+    produced = (
+        set(environment.episode.snapshot().state.artifacts)
+        if environment.episode is not None
+        else set()
+    )
+    return required - produced
 
 
 def _is_registered_tool(executor: ToolExecutor, name: str) -> bool:

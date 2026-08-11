@@ -112,6 +112,39 @@ actions:
     required_inputs: [current-anndata, qc-statistics]
     expected_outputs: [normalized-anndata]
     estimated_cost: {cpu_seconds: 45, memory_mb: 4096, complexity: linear_in_nonzero_entries}
+  - id: pca
+    name: Principal component representation
+    purpose: Build a compact representation of the normalized expression matrix.
+    parameters:
+      - name: n_components
+        description: Number of principal components to retain.
+        type: integer
+        required: false
+        default: 50
+        minimum: 2
+    required_inputs: [current-anndata]
+    expected_outputs: [pca-embedding]
+    estimated_cost: {cpu_seconds: 90, memory_mb: 4096, complexity: linear_in_cells}
+  - id: cluster
+    name: Cluster cells
+    purpose: Group cells into unsupervised clusters without consulting reference labels.
+    parameters:
+      - name: resolution
+        description: Community-detection resolution; higher values yield more clusters.
+        type: number
+        required: false
+        default: 1.0
+        minimum: 0.1
+        maximum: 5
+      - name: n_neighbors
+        description: Neighborhood size used to build the cell graph.
+        type: integer
+        required: false
+        default: 15
+        minimum: 2
+    required_inputs: [current-anndata]
+    expected_outputs: [cluster-table]
+    estimated_cost: {cpu_seconds: 120, memory_mb: 8192, complexity: linear_in_cells}
   - id: marker-genes
     name: Find marker genes
     purpose: Identify genes that distinguish candidate cell populations.
@@ -120,7 +153,7 @@ actions:
         description: Observation column defining candidate groups.
         type: string
         required: true
-    required_inputs: [current-anndata]
+    required_inputs: [current-anndata, cluster-table]
     expected_outputs: [marker-table]
     estimated_cost: {cpu_seconds: 180, memory_mb: 8192, complexity: quadratic_in_groups}
   - id: annotate
@@ -132,7 +165,18 @@ actions:
         type: list[string]
         required: true
         constraints: {must_cover_all_cells: true}
-    required_inputs: [current-anndata, marker-table]
+      - name: markers
+        description: >-
+          Mapping of each cell-type label to the marker genes that justify it.
+          Annotation is scored against held-out reference labels, so the marker
+          evidence must be supplied by the agent rather than read from the data.
+        type: object
+        required: true
+      - name: group_key
+        description: Agent-produced cluster column to label; defaults to the clustering output.
+        type: string
+        required: false
+    required_inputs: [current-anndata, cluster-table, marker-table]
     expected_outputs: [annotated-anndata]
     estimated_cost: {cpu_seconds: 60, memory_mb: 4096, complexity: analyst_defined}
 metrics:
@@ -369,6 +413,22 @@ artifacts:
     produced_by: [normalize]
     validation:
       - {name: finite-expression, description: Expression values are finite, rule: X contains no NaN or infinite values}
+  - id: pca-embedding
+    name: PCA embedding
+    description: Principal-component representation of the normalized matrix.
+    kind: embedding
+    format: h5ad
+    produced_by: [pca]
+    validation:
+      - {name: finite-embedding, description: Embedding values are finite, rule: X_pca contains no NaN or infinite values}
+  - id: cluster-table
+    name: Cluster assignment table
+    description: One unsupervised cluster assignment per retained cell.
+    kind: table
+    format: parquet
+    produced_by: [cluster]
+    validation:
+      - {name: multiple-clusters, description: At least two clusters were recovered, rule: "cluster column has 2 or more distinct values"}
   - id: marker-table
     name: Marker-gene table
     description: Ranked marker evidence for candidate cell populations.
@@ -400,10 +460,16 @@ tasks:
       produce a fully labeled AnnData object with marker-based evidence.
     datasets: [pbmc68k]
     observations: [current-anndata, qc-statistics, pipeline-history, available-tools]
-    allowed_actions: [qc, normalize, marker-genes, annotate]
+    allowed_actions: [qc, normalize, pca, cluster, marker-genes, annotate]
     metrics: [annotation-accuracy, annotation-macro-f1, runtime]
     reward_strategy: annotation-reward
-    artifacts: [qc-table, normalized-anndata, marker-table, annotated-anndata]
+    artifacts:
+      - qc-table
+      - normalized-anndata
+      - pca-embedding
+      - cluster-table
+      - marker-table
+      - annotated-anndata
     termination:
       - {name: successful-completion, description: All retained cells have valid labels and required artifacts exist., condition: required artifacts validate successfully}
       - {name: resource-limit, description: Stop when the benchmark resource budget is exhausted., condition: runtime exceeds constraints.max_runtime_seconds}

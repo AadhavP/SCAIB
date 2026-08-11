@@ -1,10 +1,20 @@
 """FastAPI router endpoints."""
 
 import json
+import secrets
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -15,17 +25,27 @@ from agent_evals.benchmarks.registry import benchmark_registry, benchmark_spec_r
 from agent_evals.core.config import get_settings
 from agent_evals.core.types import StatusEnum
 
+LOCAL_ENVIRONMENTS = frozenset({"development", "testing", "local"})
+
 
 def _require_api_key(authorization: str | None = Header(default=None)) -> None:
-    """Require a bearer token when the deployment config enables one."""
-    configured = get_settings().api.api_key
+    """Require a bearer token; only local environments may run without one."""
+    settings = get_settings()
+    configured = settings.api.api_key
     if configured is None:
-        return
+        if settings.environment.lower() in LOCAL_ENVIRONMENTS:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="API authentication is not configured; set AGENT_EVALS_API__API_KEY",
+        )
     expected = f"Bearer {configured}"
-    if authorization != expected:
+    if authorization is None or not secrets.compare_digest(authorization, expected):
         raise HTTPException(status_code=401, detail="authentication required")
 
 
+# Health stays public so container orchestration probes work without credentials.
+public_router = APIRouter(prefix="/v1", tags=["health"])
 router = APIRouter(prefix="/v1", tags=["evaluations"], dependencies=[Depends(_require_api_key)])
 job_manager = EvaluationJobManager()
 
@@ -77,7 +97,7 @@ def _ensure_benchmark_specs() -> None:
         benchmark_spec_registry.discover(root, replace=True)
 
 
-@router.get("/health", response_model=HealthCheckResponse)
+@public_router.get("/health", response_model=HealthCheckResponse)
 async def health_check() -> HealthCheckResponse:
     """Return API service health status."""
     return HealthCheckResponse(

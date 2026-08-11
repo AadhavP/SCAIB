@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from agent_evals.api.routes import router
+from agent_evals.api.routes import public_router, router
 from agent_evals.core.config import get_settings
 from agent_evals.core.logging import configure_logging, get_logger
 
@@ -46,6 +46,7 @@ def create_app() -> FastAPI:
         allow_headers=["Authorization", "Content-Type"],
     )
 
+    app.include_router(public_router)
     app.include_router(router)
 
     return app

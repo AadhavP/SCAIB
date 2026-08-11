@@ -27,6 +27,11 @@ class ScientificActionMapper:
         "select_hvg": "select_hvg",
         "batch_correct": "harmony",
         "differential_expression": "differential-expression",
+        "leiden": "cluster",
+        "louvain": "cluster",
+        "clustering": "cluster",
+        "marker_based": "annotate",
+        "annotation": "annotate",
     }
 
     def __init__(self, validator: DeclarativeActionValidator | None = None) -> None:

@@ -8,22 +8,22 @@ from types import SimpleNamespace
 import pytest
 
 from agent_evals.agents import (
+    AgentAction,
     AgentConfiguration,
     AgentHarness,
     MockActionExecutor,
-    AgentAction,
     MockAgentAdapter,
     MockObservationBuilder,
     OpenHandsAdapter,
     agent_adapter_registry,
 )
+from agent_evals.agents.runtime.manager import _action_to_intent
 from agent_evals.agents.trajectory import (
     DecisionCascade,
     RunTerminationStatus,
     ScientificDecision,
 )
 from agent_evals.benchmarks.io import load_benchmark
-from agent_evals.agents.runtime.manager import _action_to_intent
 from agent_evals.environment import (
     LocalWorkspace,
     ScientificEnvironment,

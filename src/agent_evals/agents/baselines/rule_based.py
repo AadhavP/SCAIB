@@ -25,6 +25,20 @@ from agent_evals.scientific.action_mapper import (
     ScientificActionMapper,
 )
 from agent_evals.scientific.observations import ScientificObservation
+from agent_evals.scientific.operations.cluster import CLUSTER_COLUMN
+
+#: Canonical PBMC marker genes per cell type. The baseline states its evidence
+#: explicitly so its annotation score reflects this panel, not the answer key.
+PBMC_MARKER_PANEL: dict[str, tuple[str, ...]] = {
+    "CD4 T": ("IL7R", "CD3D", "CD3E", "CCR7"),
+    "CD8 T": ("CD8A", "CD8B", "CD3D", "GZMK"),
+    "B": ("MS4A1", "CD79A", "CD79B", "CD19"),
+    "NK": ("GNLY", "NKG7", "KLRD1", "NCAM1"),
+    "CD14 Monocyte": ("CD14", "LYZ", "S100A9", "VCAN"),
+    "FCGR3A Monocyte": ("FCGR3A", "MS4A7", "CDKN1C"),
+    "Dendritic": ("FCER1A", "CST3", "CLEC10A"),
+    "Megakaryocyte": ("PPBP", "PF4", "ITGA2B"),
+}
 
 
 def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RawTraceEvent:
@@ -204,13 +218,25 @@ class RuleBasedSingleCellAgent:
             action_id, method = "harmony", "harmony"
             parameters = {"batch_key": batch_key}
             rationale = "Correct the observed batch structure while preserving the biological labels."
-        elif "marker-genes" in available and not state.get("differential_expression_complete", False):
-            counts = observation.biological_information.get("counts", {})
-            if counts and min(int(count) for count in counts.values()) >= 2:
-                group_key = observation.biological_information.get("label_key") or "bulk_labels"
+        elif "cluster" in available and not state.get("clustered", False):
+            action_id, method = "cluster", "leiden"
+            parameters = {"resolution": 1.0, "n_neighbors": 15}
+            rationale = "Group cells without reference labels so annotation has agent-produced groups."
+        elif "marker-genes" in available and not state.get(
+            "differential_expression_complete", False
+        ):
+            if state.get("clustered", False):
                 action_id, method = "marker-genes", "marker-genes"
-                parameters = {"group_key": group_key}
-                rationale = "Generate ranked marker evidence using the observed biological grouping."
+                parameters = {"group_key": CLUSTER_COLUMN}
+                rationale = "Rank marker genes for the agent-produced clusters."
+        elif "annotate" in available and not state.get("annotated", False):
+            action_id, method = "annotate", "marker_based"
+            parameters = {
+                "label_vocabulary": sorted(PBMC_MARKER_PANEL),
+                "markers": {label: list(genes) for label, genes in PBMC_MARKER_PANEL.items()},
+                "group_key": CLUSTER_COLUMN,
+            }
+            rationale = "Label each cluster with the canonical PBMC panel it most expresses."
         if action_id is None:
             return None
         category_map = {
@@ -218,14 +244,18 @@ class RuleBasedSingleCellAgent:
             "normalize": DecisionCategory.NORMALIZATION,
             "pca": DecisionCategory.DIMENSIONALITY_REDUCTION,
             "harmony": DecisionCategory.INTEGRATION,
+            "cluster": DecisionCategory.CLUSTERING,
             "marker-genes": DecisionCategory.DIFFERENTIAL_EXPRESSION,
+            "annotate": DecisionCategory.ANNOTATION,
         }
         intent_map = {
             "qc": "remove low-quality cells before downstream analysis",
             "normalize": "put retained cells on a comparable library-size scale",
             "pca": "construct a compact representation for neighborhood analysis",
             "harmony": "reduce technical batch variation while preserving biology",
+            "cluster": "recover candidate cell populations without using reference labels",
             "marker-genes": "generate marker evidence for biological interpretation",
+            "annotate": "assign a cell-type label to every retained cell from marker evidence",
         }
         return ScientificDecision(
             decision_id=f"decision-{order + 1}",

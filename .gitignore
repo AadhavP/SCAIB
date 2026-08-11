@@ -66,3 +66,7 @@ frontend/tsconfig.tsbuildinfo
 data/
 outputs/
 logs/
+results/
+runs/
+reports_output/
+.freebuff/
