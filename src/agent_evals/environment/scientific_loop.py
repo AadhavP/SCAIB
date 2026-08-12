@@ -27,6 +27,7 @@ from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
 from agent_evals.core.config import get_settings
 from agent_evals.datasets.preflight import (
+    REFERENCE_COLUMN_CANDIDATES,
     DatasetContractError,
     describe_readiness,
     validate_dataset_contract,
@@ -654,11 +655,7 @@ class ScientificLoop:
         if "X_pca" in adata.obsm:
             candidate_artifacts["embedding"] = adata.obsm["X_pca"]
         label_column = next(
-            (
-                column
-                for column in ("cell_type", "cell_type_ref", "known_labels", "bulk_labels")
-                if column in adata.obs
-            ),
+            (column for column in REFERENCE_COLUMN_CANDIDATES if column in adata.obs),
             None,
         )
         reference_artifacts = (
@@ -703,6 +700,7 @@ class ScientificLoop:
             reference_artifacts=reference_artifacts,
             metadata={**context.metadata, "prediction_artifact_uri": str(prediction_artifact.path)},
             trajectory=agent_run.trajectory.model_dump(mode="json"),
+            agent_produced_columns=frozenset(context.agent_produced_columns),
         )
         engine = ScientificMetricEngine()
         results, applicability, group_results, _legacy_scientific_score = engine.evaluate(

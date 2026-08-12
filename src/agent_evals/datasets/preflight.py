@@ -16,6 +16,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.scientific.context import REFERENCE_LABEL_COLUMNS
 
 #: Observation IDs that require a usable technical batch covariate.
 BATCH_OBSERVATION_IDS = frozenset({"batch-labels"})
@@ -23,13 +24,9 @@ BATCH_OBSERVATION_IDS = frozenset({"batch-labels"})
 #: Candidate observation columns for a technical batch covariate.
 BATCH_COLUMN_CANDIDATES = ("batch", "batch_id", "batch_labels", "donor", "sample")
 
-#: Candidate observation columns holding held-out reference biology.
-REFERENCE_COLUMN_CANDIDATES = (
-    "cell_type",
-    "cell_type_ref",
-    "known_labels",
-    "bulk_labels",
-)
+#: Candidate observation columns holding held-out reference biology. Aliases the
+#: canonical list so preflight, redaction, and scoring cannot drift apart.
+REFERENCE_COLUMN_CANDIDATES = REFERENCE_LABEL_COLUMNS
 
 
 class DatasetContractError(RuntimeError):

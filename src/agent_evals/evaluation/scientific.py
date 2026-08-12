@@ -174,10 +174,7 @@ class ScientificMetricEngine:
             candidate_metadata=set(context.metadata),
             observation_columns=observation_columns,
             representations=representations,
-            reference_labels_available=(
-                adata is not None
-                and any(key in adata.obs for key in ("cell_type", "cell_type_ref", "bulk_labels"))
-            ),
+            reference_labels_available=context.has_reference_labels,
             predictions_available="prediction" in context.candidate_artifacts
             or "cluster_labels" in context.candidate_artifacts,
             payload=context,

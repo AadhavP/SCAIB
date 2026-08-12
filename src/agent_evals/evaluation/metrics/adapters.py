@@ -106,10 +106,7 @@ def _legacy_applicability_context(context: EvaluationContext) -> LegacyApplicabi
         candidate_metadata=set(scientific.metadata),
         observation_columns=columns,
         representations=representations,
-        reference_labels_available=(
-            adata is not None
-            and any(key in adata.obs for key in ("cell_type", "cell_type_ref", "bulk_labels"))
-        ),
+        reference_labels_available=scientific.has_reference_labels,
         predictions_available="prediction" in scientific.candidate_artifacts
         or "cluster_labels" in scientific.candidate_artifacts,
         payload=scientific,

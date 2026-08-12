@@ -6,6 +6,15 @@ from typing import Any
 
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.metrics.registry import MetricComputation
+from agent_evals.scientific.context import (
+    AGENT_PREDICTION_COLUMNS,
+    REFERENCE_LABEL_COLUMNS,
+)
+
+#: Observation columns that may carry an agent's own labelling, in preference
+#: order. A column here is only usable once the agent is known to have written
+#: it; see :func:`labels`.
+_CANDIDATE_COLUMNS = (*AGENT_PREDICTION_COLUMNS, "leiden", "louvain", "cluster")
 
 
 def labels(context: ScientificMetricContext) -> tuple[Any, Any] | None:
@@ -22,18 +31,18 @@ def labels(context: ScientificMetricContext) -> tuple[Any, Any] | None:
     if adata is None:
         return None
     reference_key = next(
-        (
-            key
-            for key in ("cell_type", "cell_type_ref", "known_labels", "bulk_labels")
-            if key in adata.obs
-        ),
+        (key for key in REFERENCE_LABEL_COLUMNS if key in adata.obs),
         None,
     )
+    # Only a column this run's agent actually wrote may stand in as its
+    # prediction. Without that check a dataset shipping its own `louvain` is
+    # scored as an agent result, and under free execution the agent can simply
+    # write the answer key into a column named `cluster`.
     predicted_key = next(
         (
             key
-            for key in ("predicted_labels", "leiden", "louvain", "cluster")
-            if key in adata.obs
+            for key in _CANDIDATE_COLUMNS
+            if key in adata.obs and key in context.agent_produced_columns
         ),
         None,
     )
