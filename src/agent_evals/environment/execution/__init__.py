@@ -12,6 +12,8 @@ The package is layered so that nothing above it branches on which backend ran:
 - :mod:`executor` -- :class:`WorkspaceActionExecutor`, which adapts all of the
   above to the pre-existing ``ActionExecutor`` port, so episodes, decisions,
   trajectories, and scoring continue to work unchanged above this layer.
+- :mod:`router` -- :class:`ActionKindRouter`, which lets typed actions and free
+  execution coexist in one benchmark behind that same single port.
 
 :mod:`container` is imported lazily by name rather than re-exported eagerly, so
 importing this package does not require a container runtime to be installed.
@@ -53,11 +55,16 @@ from agent_evals.environment.execution.isolation import (
     supports_resource_limits,
 )
 from agent_evals.environment.execution.local import LocalProcessBackend, resolve_within
+from agent_evals.environment.execution.router import (
+    ActionKindRouter,
+    free_execution_action_ids,
+)
 
 __all__ = [
     "DEFAULT_MAX_OUTPUT_BYTES",
     "DEFAULT_TIMEOUT_SECONDS",
     "EXECUTION_PARAMETERS",
+    "ActionKindRouter",
     "CommandOutcome",
     "CommandRequest",
     "DigestMethod",
@@ -80,6 +87,7 @@ __all__ = [
     "environment_allowlist",
     "fingerprint_file",
     "fingerprint_workspace",
+    "free_execution_action_ids",
     "interpreter_argv",
     "isolation_from_constraints",
     "resolve_within",

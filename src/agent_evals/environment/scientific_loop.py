@@ -174,17 +174,18 @@ class AgentScientificRun(BaseModel):
                     "",
                     "## Evaluation dimensions",
                     "",
-                    f"- Scientific outcome score: {evaluation.scientific_outcome_score}",
+                    f"- Scientific outcome score: {_unmeasured_or(evaluation.scientific_outcome_score)}",
                     *[
                         f"- {domain.domain.title()} score: {domain.value}"
                         for domain in evaluation.domain_scores
                     ],
-                    f"- Decision score: {evaluation.decision_score}",
+                    f"- Decision score: {_unmeasured_or(evaluation.decision_score)}",
                     f"- Method score: {evaluation.method_score}",
-                    f"- Decision quality multiplier: {evaluation.decision_quality_score}",
+                    f"- Decision quality multiplier: "
+                    f"{_unmeasured_or(evaluation.decision_quality_score)}",
                     f"- Trajectory score: {evaluation.trajectory_score}",
-                    f"- Final agent score: {evaluation.global_agent_score}",
-                    f"- Global agent score: {evaluation.global_agent_score}",
+                    f"- Final agent score: {_unmeasured_or(evaluation.global_agent_score)}",
+                    f"- Global agent score: {_unmeasured_or(evaluation.global_agent_score)}",
                     f"- Score formula: `{evaluation.score_formula}`",
                     "",
                     "### Applicability matrix",
@@ -768,7 +769,15 @@ class ScientificLoop:
                 for category, profile in specification.decision_evaluation.items()
             },
         )
-        decision_value = sum(item.score for item in decisions) / len(decisions) if decisions else 1.0
+        # ``None``, not 1.0, when there is nothing to score. An agent that runs
+        # its own workflow without recording decisions used to collect a free
+        # perfect score on this dimension, so the benchmark paid better for less
+        # structure. Unmeasured propagates to no global score at all, which is
+        # the convention ``compute_global_agent_score`` already follows for a
+        # missing scientific outcome.
+        decision_value = (
+            sum(item.score for item in decisions) / len(decisions) if decisions else None
+        )
         method_value = method_score(methods)
         profiles = ScientificLoop._decision_profiles(specification)
         selection_evaluator = MethodSelectionEvaluator(decision_ontology)
@@ -808,9 +817,13 @@ class ScientificLoop:
         selection_value = (
             sum(item.overall for item in selection_scores) / len(selection_scores)
             if selection_scores
-            else 1.0
+            else None
         )
-        decision_quality = decision_value * selection_value
+        decision_quality = (
+            None
+            if decision_value is None or selection_value is None
+            else decision_value * selection_value
+        )
         global_score = compute_global_agent_score(
             scientific_score,
             decision_quality,
@@ -835,7 +848,11 @@ class ScientificLoop:
             trajectory_score=trajectory.trajectory_quality,
             global_agent_score=benchmark_score,
             benchmark_score=benchmark_score,
-            score_formula="scientific_outcome * decision_score * method_selection_score * trajectory_score",
+            score_formula=_score_formula(
+                scientific_outcome=scientific_score,
+                decision=decision_value,
+                selection=selection_value,
+            ),
         )
 
     @staticmethod
@@ -893,6 +910,39 @@ class ScientificLoop:
 
             register_scientific_benchmarks()
         return benchmark_spec_registry.get(str(reference))
+
+
+def _score_formula(
+    *,
+    scientific_outcome: float | None,
+    decision: float | None,
+    selection: float | None,
+) -> str:
+    """Describe the score, naming any dimension that could not be measured.
+
+    The formula string is persisted into result JSON and read by people
+    comparing runs. A run with an unmeasured dimension has no global score, and
+    the recorded formula has to say which dimension is missing -- otherwise the
+    absent number looks like a crash rather than an honest gap.
+    """
+    formula = "scientific_outcome * decision_score * method_selection_score * trajectory_score"
+    unmeasured = [
+        name
+        for name, value in (
+            ("scientific_outcome", scientific_outcome),
+            ("decision_score", decision),
+            ("method_selection_score", selection),
+        )
+        if value is None
+    ]
+    if not unmeasured:
+        return formula
+    return f"{formula} (not computed: {', '.join(unmeasured)} unmeasured)"
+
+
+def _unmeasured_or(value: float | None) -> str:
+    """Render an optional score so a gap cannot be mistaken for a failure."""
+    return "unmeasured" if value is None else str(value)
 
 
 def _create_scientific_adapter(

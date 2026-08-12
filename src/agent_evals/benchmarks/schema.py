@@ -208,6 +208,21 @@ class EstimatedCost(SpecificationModel):
     complexity: str | None = None
 
 
+class ActionKind(StrEnum):
+    """Whether an action names an operation or hands the agent the keyboard.
+
+    A ``TYPED`` action is one the benchmark implements: the agent selects it and
+    supplies declared parameters, and the harness performs the science. A
+    ``FREE_EXECUTION`` action inverts that -- the agent supplies the program and
+    the harness only runs it and observes what changed. The two coexist because
+    they measure different things, and a benchmark that offers only the first
+    measures how well an agent fills in someone else's pipeline.
+    """
+
+    TYPED = "typed"
+    FREE_EXECUTION = "free_execution"
+
+
 class ActionSpecification(SpecificationModel):
     """Interface contract for an operation an agent may request.
 
@@ -219,12 +234,31 @@ class ActionSpecification(SpecificationModel):
     id: str
     name: str = Field(min_length=1)
     purpose: str = Field(min_length=1)
+    kind: ActionKind = ActionKind.TYPED
     parameters: list[ParameterSpecification] = Field(default_factory=list)
     required_inputs: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
     estimated_cost: EstimatedCost | None = None
 
     _identifier = field_validator("id")(_validate_identifier)
+
+    @model_validator(mode="after")
+    def validate_free_execution(self) -> Self:
+        """Keep the artifact contract per-intent for free-execution actions.
+
+        A free-execution action is invoked many times for different purposes, so
+        a fixed ``expected_outputs`` list would demand the same files from every
+        invocation. The contract instead travels on each intent's ``produces``
+        parameter, which the executor verifies against the workspace. Rejecting
+        the declaration here rather than ignoring it is what keeps the
+        environment's own output check unchanged for both kinds of action.
+        """
+        if self.kind is ActionKind.FREE_EXECUTION and self.expected_outputs:
+            raise ValueError(
+                f"free-execution action '{self.id}' must declare 'expected_outputs: []'; "
+                "its artifact contract belongs on each intent's 'produces' parameter"
+            )
+        return self
 
 
 class ExpectedRange(SpecificationModel):
@@ -383,6 +417,61 @@ class ConstraintSpecification(SpecificationModel):
         return self
 
 
+class EnvironmentBackend(StrEnum):
+    """Which execution tier a benchmark asks for.
+
+    ``LOCAL`` runs a subprocess on the evaluator's own host, which is fast and
+    portable but cannot confine writes or cut off the network. ``CONTAINER``
+    can, at the cost of requiring a container runtime. The declaration is a
+    request, not a guarantee: what was actually enforced is reported per control
+    in the run record, so a paper cannot claim isolation its runs lacked.
+    """
+
+    LOCAL = "local"
+    CONTAINER = "container"
+
+
+class EnvironmentSpecification(SpecificationModel):
+    """A workspace a free-execution agent may bring its own workflow into.
+
+    This block specifies the environment without prescribing the method: it says
+    which interpreter is available and how the workspace is isolated, and says
+    nothing about what analysis to run in it. Resource and reproducibility
+    limits deliberately stay in ``ConstraintSpecification`` so both action kinds
+    are bound by one set of numbers rather than two that can drift apart.
+    """
+
+    id: str
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    backend: EnvironmentBackend = EnvironmentBackend.LOCAL
+    image: str | None = None
+    languages: list[str] = Field(default_factory=lambda: ["python"])
+
+    _identifier = field_validator("id")(_validate_identifier)
+
+    @model_validator(mode="after")
+    def validate_backend(self) -> Self:
+        """Reject an under-specified container tier and an empty language list."""
+        if not self.languages:
+            raise ValueError(
+                f"environment '{self.id}' must declare at least one language; "
+                "an environment nothing can run in is not an environment"
+            )
+        if self.backend is EnvironmentBackend.CONTAINER and not self.image:
+            raise ValueError(
+                f"environment '{self.id}' requests the container backend and must "
+                "name an 'image'; resolving one implicitly would make the run "
+                "depend on whatever the host happened to have cached"
+            )
+        if self.backend is EnvironmentBackend.LOCAL and self.image:
+            raise ValueError(
+                f"environment '{self.id}' names an 'image' but requests the local "
+                "backend, which ignores it; the declaration would misdescribe the run"
+            )
+        return self
+
+
 class TerminationCondition(SpecificationModel):
     """Declarative condition describing when a task is complete or stopped."""
 
@@ -438,6 +527,7 @@ class TaskSpecification(SpecificationModel):
     depends_on: list[str] = Field(default_factory=list)
     termination: list[TerminationCondition] = Field(default_factory=list)
     constraints: ConstraintSpecification | None = None
+    environment: str | None = None
 
     _identifier = field_validator("id")(_validate_identifier)
 
@@ -477,6 +567,7 @@ class BenchmarkSpecification(SpecificationModel):
     references: list[Reference] = Field(default_factory=list)
     datasets: list[DatasetSpecification] = Field(default_factory=list)
     observations: list[ObservationSpecification] = Field(default_factory=list)
+    environments: list[EnvironmentSpecification] = Field(default_factory=list)
     actions: list[ActionSpecification] = Field(default_factory=list)
     metrics: list[MetricSpecification] = Field(default_factory=list)
     metric_groups: list[MetricGroupSpecification] = Field(default_factory=list)
@@ -514,7 +605,11 @@ class BenchmarkSpecification(SpecificationModel):
             )
         dataset_ids = self._unique_ids(self.datasets, "dataset")
         observation_ids = self._unique_ids(self.observations, "observation")
+        environment_ids = self._unique_ids(self.environments, "environment")
         action_ids = self._unique_ids(self.actions, "action")
+        free_execution_actions = {
+            action.id for action in self.actions if action.kind is ActionKind.FREE_EXECUTION
+        }
         metric_ids = self._unique_ids(self.metrics, "metric")
         group_ids = {group.group_id for group in self.metric_groups}
         if len(group_ids) != len(self.metric_groups):
@@ -600,6 +695,19 @@ class BenchmarkSpecification(SpecificationModel):
                 raise ValueError(
                     f"task '{task.id}' references unknown reward '{task.reward_strategy}'"
                 )
+            if task.environment is not None and task.environment not in environment_ids:
+                raise ValueError(
+                    f"task '{task.id}' references unknown environment '{task.environment}'"
+                )
+            free_actions = sorted(free_execution_actions.intersection(task.allowed_actions))
+            if free_actions and task.environment is None:
+                # Without this the benchmark would look complete and then fail at
+                # run time with no workspace to execute in, blaming the agent for
+                # the benchmark author's omission.
+                raise ValueError(
+                    f"task '{task.id}' allows free-execution action(s) "
+                    f"{', '.join(free_actions)} but declares no 'environment'"
+                )
             missing_artifacts = sorted(
                 artifact.id
                 for artifact in self.artifacts
@@ -652,6 +760,7 @@ MetricSpec = MetricSpecification
 RewardSpec = RewardSpecification
 ArtifactSpec = ArtifactSpecification
 ConstraintSpec = ConstraintSpecification
+EnvironmentSpec = EnvironmentSpecification
 TaskSpec = TaskSpecification
 ReferenceSpec = Reference
 WorkflowStageSpec = WorkflowStage
@@ -660,6 +769,7 @@ EvaluationConfig = EvaluationConfiguration
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "ActionKind",
     "ActionSpec",
     "ActionSpecification",
     "Aggregation",
@@ -677,6 +787,9 @@ __all__ = [
     "DatasetSpecification",
     "DecisionEvaluationSpecification",
     "Direction",
+    "EnvironmentBackend",
+    "EnvironmentSpec",
+    "EnvironmentSpecification",
     "EstimatedCost",
     "EvaluationConfig",
     "EvaluationConfiguration",

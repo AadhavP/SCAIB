@@ -76,6 +76,10 @@ class EventType(StrEnum):
     REWARD_RECORDED = "reward.recorded"
     TERMINATED = "episode.terminated"
     AGENT_MESSAGE = "agent.message"
+    #: The agent stated a plan. Distinct from a message because a plan is an
+    #: evaluation object: it is what a later decision can be compared against.
+    #: Folded into ``AGENT_MESSAGE`` it becomes unfindable in the trace.
+    PLAN_DECLARED = "agent.plan_declared"
     OBSERVATION_RECEIVED = "agent.observation_received"
     TOOL_CALL = "agent.tool_call"
     TOOL_RESULT = "agent.tool_result"

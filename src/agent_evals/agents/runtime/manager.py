@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_evals.agents.decisions import extract_decision
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.events import AgentEventType, AgentTrajectory
 from agent_evals.agents.runtime.protocol import (
@@ -495,10 +496,18 @@ def _action_to_intent(
         (item for item in specification.actions if item.id == action_id),
         None,
     )
-    rationale = action.reasoning_metadata.get("explanation") or action.reasoning_metadata.get("summary")
-    metadata = {
+    reasoning = action.reasoning_metadata
+    rationale = (
+        reasoning.get("explanation") or reasoning.get("summary") or reasoning.get("rationale")
+    )
+    # Coerce before the metadata reaches ``decision_cascade_from_episode``, which
+    # indexes these keys by type. Unparsed, a string where it expects a mapping
+    # raised, and a string where it expects a list recorded one item per
+    # character -- inventing evidence the agent never offered.
+    extracted = extract_decision(reasoning)
+    metadata: dict[str, Any] = {
         "runtime_action_type": action.action_type,
-        **action.reasoning_metadata,
+        **extracted.metadata,
     }
     if declared_action is not None:
         metadata.update(

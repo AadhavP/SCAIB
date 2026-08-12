@@ -8,6 +8,7 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from agent_evals.core.intent_parameters import EXECUTION_PARAMETERS
 from agent_evals.environment.models import (
     ActionStatus,
     ArtifactRecord,
@@ -197,6 +198,13 @@ class ScientificDecision(AgentRuntimeModel):
     decision_category: DecisionCategory = DecisionCategory.OTHER
     intent: str | None = None
     hypothesis: str | None = None
+    #: Step the agent's own plan said this was, when it said so. Recorded so a
+    #: reader can ask whether the agent followed its stated plan or abandoned
+    #: it, which is a finding either way. It is never checked against the plan
+    #: to *reject* a decision -- a plan is an evaluation object, not a
+    #: constraint, and an agent that adapts when the data contradicts its plan
+    #: is doing science rather than disobeying.
+    plan_reference: str | None = None
     method: str | None = None
     chosen_method: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -370,7 +378,16 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
         output_artifacts = [artifact.artifact_id for artifact in record.result.artifacts]
         method_name = metadata.get("method") or record.intent.parameters.get("method")
         category = _decision_category(metadata.get("decision_category"), record.intent.action_id)
+        # Coerced again here, not redundantly: only runtime turns pass through
+        # the decision extraction layer. ``mock``, ``action_mapper`` and
+        # ``scientific/runner`` build intents directly, so for those paths this
+        # is the only coercion these two fields ever get.
         evidence_used = [str(item) for item in metadata.get("evidence_used", [])]
+        # ``method`` is the method choice, not a parameter of it, and the
+        # execution parameters are mechanics rather than methodology: a
+        # free-execution step would otherwise emit a parameter decision whose
+        # selected value is the agent's entire program, scored as if choosing a
+        # script were a methodological choice comparable to choosing n_pcs=50.
         parameter_choices = [
             ParameterChoice(
                 name=name,
@@ -379,7 +396,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 source="action_intent",
             )
             for name, value in record.intent.parameters.items()
-            if name != "method"
+            if name != "method" and name not in EXECUTION_PARAMETERS
         ]
         method_choice = (
             MethodChoice(
@@ -403,6 +420,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 decision_category=category,
                 intent=metadata.get("intent"),
                 hypothesis=metadata.get("hypothesis"),
+                plan_reference=_optional_str(metadata.get("plan_reference")),
                 method=str(method_name) if method_name is not None else None,
                 chosen_method=str(method_name) if method_name is not None else None,
                 parameters=record.intent.parameters,
@@ -504,6 +522,11 @@ def _decision_category(value: Any, action_id: str) -> DecisionCategory:
         "differential-expression": DecisionCategory.DIFFERENTIAL_EXPRESSION,
     }
     return mapping.get(action_id, DecisionCategory.OTHER)
+
+
+def _optional_str(value: Any) -> str | None:
+    """Coerce an untyped metadata value to text, keeping absence as absence."""
+    return None if value is None else str(value)
 
 
 def _value_type(value: Any) -> str:

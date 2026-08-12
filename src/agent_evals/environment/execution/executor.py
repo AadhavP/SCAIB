@@ -27,6 +27,12 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_evals.benchmarks.schema import ConstraintSpecification
+from agent_evals.core.intent_parameters import (
+    CODE_PARAMETER,
+    EXECUTION_PARAMETERS,
+    LANGUAGE_PARAMETER,
+    PRODUCES_PARAMETER,
+)
 from agent_evals.environment.execution.backend import (
     DEFAULT_MAX_OUTPUT_BYTES,
     DEFAULT_TIMEOUT_SECONDS,
@@ -48,18 +54,6 @@ from agent_evals.environment.models import (
     utc_now,
 )
 from agent_evals.environment.ports import ExecutionContext
-
-#: Intent parameter holding the source to run.
-CODE_PARAMETER = "code"
-#: Intent parameter naming the language the source is written in.
-LANGUAGE_PARAMETER = "language"
-#: Intent parameter declaring the artifacts the source will produce.
-PRODUCES_PARAMETER = "produces"
-
-#: Parameters that carry execution mechanics rather than a methodological
-#: choice. Decision extraction must skip these, or every step emits a parameter
-#: decision whose selected value is an entire script.
-EXECUTION_PARAMETERS = frozenset({CODE_PARAMETER, LANGUAGE_PARAMETER, PRODUCES_PARAMETER})
 
 #: Fallback wall-clock ceiling per command when the benchmark caps only the
 #: whole episode. A single command may not consume the entire episode budget,

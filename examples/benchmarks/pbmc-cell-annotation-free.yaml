@@ -1,0 +1,319 @@
+# Free-execution counterpart of pbmc-cell-annotation.yaml.
+#
+# The typed benchmark hands the agent a six-action catalog and SCAIB runs the
+# science. This one hands it a workspace and an interpreter: the agent writes its
+# own Python and SCAIB observes what the code did. Same dataset, same metrics,
+# same scoring path -- the only difference is who owns the workflow.
+#
+# The environment description below says what exists and what the output contract
+# is. It deliberately does not say which methods to use, how many clusters to
+# expect, what the label vocabulary is, or how any of it is scored. An agent that
+# can read the recipe is not being measured on its ability to do the analysis.
+schema_version: 1.0.0
+metadata:
+  id: pbmc-cell-annotation-free
+  title: PBMC Cell-Type Annotation (agent-authored workflow)
+  description: >-
+    Evaluate whether an agent can design and implement a complete single-cell
+    annotation workflow from scratch, writing its own code in an isolated
+    workspace rather than selecting from a predefined action catalog.
+  version: 1.0.0
+  authors:
+    - name: Agent Evals Single-Cell Working Group
+      institution: Open Research Infrastructure Consortium
+      role: benchmark authors
+  license: CC-BY-4.0
+  tags: [single-cell, annotation, pbmc, free-execution]
+  domains: [computational-biology, cell-atlas]
+  references: [pbmc68k-paper, scanpy-paper, leiden-paper]
+references:
+  - id: pbmc68k-paper
+    title: "The circulating immune cell atlas: PBMC 68k"
+    authors: [Zheng et al.]
+    doi: 10.1038/nmeth.4292
+  - id: scanpy-paper
+    title: "Scanpy: large-scale single-cell gene expression data analysis"
+    authors: [Wolf et al.]
+    doi: 10.1101/2017.08.11.206904
+  - id: leiden-paper
+    title: "From Louvain to Leiden: guaranteeing well-connected communities"
+    authors: [Traag et al.]
+    doi: 10.1038/s41598-019-41695-z
+datasets:
+  - id: pbmc68k
+    name: 10x Genomics PBMC 68k
+    description: >-
+      Public peripheral blood mononuclear cell transcriptomes. The copy
+      materialized into the workspace is sanitized: reference annotation columns
+      are held in an evaluator-only store outside the workspace and are joined
+      back on cell barcode at scoring time.
+    source: 10x Genomics public datasets
+    source_url: https://www.10xgenomics.com/resources/datasets/8-k-pbm-cs-from-a-healthy-donor-1-standard-1-1-0
+    organism: Homo sapiens
+    modality: scRNA-seq
+    format: h5ad
+    citation: [pbmc68k-paper]
+    license: public research use
+    expected_observations: {cells: 68579, genes: 32738}
+    recommended_tasks: [cell-annotation-free]
+environments:
+  - id: local-python
+    name: Local Python workspace
+    description: >-
+      A writable working directory with the sanitized dataset under `inputs/`.
+      Source is passed to the interpreter on stdin and runs with the working
+      directory pinned to the workspace root; anything written outside it is not
+      accounted for. scanpy, anndata, numpy, pandas, scipy and scikit-learn are
+      importable. Network access is not available. stdout, stderr and the exit
+      status of every execution are returned so failures can be debugged and
+      retried.
+    backend: local
+    languages: [python, shell]
+observations:
+  - id: workspace-tree
+    name: Workspace tree
+    description: Paths, sizes and content digests of every file in the working directory.
+    type: file_listing
+    source: environment
+    required: true
+  - id: dataset-summary
+    name: Dataset summary
+    description: Shape and column names of the sanitized input dataset.
+    type: table
+    source: environment
+    required: true
+  - id: execution-output
+    name: Execution output
+    description: Standard output, standard error, and exit status of the previous execution.
+    type: text
+    source: environment
+    required: true
+  - id: pipeline-history
+    name: Pipeline history
+    description: Ordered record of accepted actions, declared methods, and artifact references.
+    type: event_log
+    source: environment
+    required: true
+actions:
+  - id: analyze
+    name: Run analysis code
+    purpose: >-
+      Execute agent-authored source in the workspace. One invocation is one
+      recorded decision, so a step should carry out one methodological choice
+      rather than an entire pipeline.
+    kind: free_execution
+    parameters:
+      - name: code
+        description: Source to execute. Passed to the interpreter on stdin; no file is written for it.
+        type: string
+        required: true
+      - name: language
+        description: Interpreter to run the source with.
+        type: string
+        required: false
+        default: python
+        choices: [python, shell]
+      - name: produces
+        description: >-
+          Artifact contract for this invocation, as a list of workspace-relative
+          paths or a mapping of artifact id to path. Every declared path is
+          checked after the code runs, and the action fails if one is absent.
+        type: array
+        required: false
+      - name: method
+        description: >-
+          Name of the method this step applies, in the agent's own words. Recorded
+          as the step's methodological choice.
+        type: string
+        required: false
+    required_inputs: [workspace-tree]
+    # Empty by declaration: the artifact contract for free execution is
+    # per-invocation and lives on the 'produces' parameter above, because two
+    # invocations of one action legitimately produce different files.
+    expected_outputs: []
+metrics:
+  - id: cell_annotation.macro_f1
+    name: Versioned annotation macro F1
+    description: Class-balanced F1 from the versioned scientific metric registry.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.mcc
+    name: Versioned annotation MCC
+    description: Multiclass Matthews correlation coefficient.
+    direction: higher_is_better
+    expected_range: {minimum: -1, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    native_min: -1
+    native_max: 1
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.rare_recall
+    name: Versioned rare-population recall
+    description: Recall restricted to low-abundance populations.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: agent-evals
+    required_artifacts: [prediction]
+  - id: cell_annotation.balanced_accuracy
+    name: Versioned balanced accuracy
+    description: Mean per-class recall over the reference vocabulary.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: cell_annotation.accuracy
+    name: Versioned annotation accuracy
+    description: Fraction of cells assigned their reference cell type.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: bounded
+    version: '1.0'
+    category: cell_annotation
+    role: primary
+    computation_backend: sklearn
+    required_artifacts: [prediction]
+  - id: annotation-accuracy
+    name: Cell-type annotation accuracy
+    description: Fraction of held-out cells assigned their reference cell type.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    aggregation: mean
+    normalization: identity
+    contributes_to_reward: true
+  - id: execution-success
+    name: Execution success
+    description: Fraction of submitted executions that completed successfully.
+    direction: higher_is_better
+    expected_range: {minimum: 0, maximum: 1}
+    normalization: identity
+  - id: runtime
+    name: Wall-clock runtime
+    description: Elapsed execution time for the complete task.
+    direction: lower_is_better
+    expected_range: {minimum: 0}
+    aggregation: sum
+    normalization: log_scale
+    unit: seconds
+    contributes_to_reward: true
+metric_groups:
+  - group_id: cell_annotation_quality
+    aggregation: weighted_mean
+    minimum_required: 5
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: cell_annotation.macro_f1, weight: 0.35, role: primary}
+      - {metric_id: cell_annotation.mcc, weight: 0.25, role: primary}
+      - {metric_id: cell_annotation.rare_recall, weight: 0.20, role: primary}
+      - {metric_id: cell_annotation.balanced_accuracy, weight: 0.10, role: primary}
+      - {metric_id: cell_annotation.accuracy, weight: 0.10, role: primary}
+decision_evaluation:
+  # Method vocabularies for scoring the agent's declared choices. They are
+  # evaluator-side: an unlisted method is scored as unrecognized, never refused,
+  # because a benchmark that rejects an unanticipated method measures its own
+  # imagination rather than the agent's.
+  qc_strategy:
+    allowed_methods: [qc_filter, mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+    alternatives: [mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+  normalization:
+    allowed_methods: [normalize, log_normalize, scran]
+    alternatives: [normalize, log_normalize, scran]
+  annotation:
+    allowed_methods: [marker_based, reference_mapping, supervised_classifier]
+    alternatives: [marker_based, reference_mapping, supervised_classifier]
+rewards:
+  - id: annotation-reward
+    name: Annotation utility reward
+    description: Favor accurate annotations while penalizing slow workflows.
+    components:
+      - {metric: annotation-accuracy, weight: 0.90}
+      - {metric: runtime, weight: -0.10, transform: normalized_penalty}
+    aggregation: weighted_sum
+artifacts:
+  # All optional: which files exist depends on the workflow the agent chose, and
+  # a required artifact would let the benchmark dictate the pipeline shape it is
+  # supposed to be measuring. Per-invocation enforcement happens through the
+  # action's 'produces' parameter instead.
+  - id: cell-labels
+    name: Cell-type label table
+    description: One cell-type label per retained cell, keyed by cell barcode.
+    kind: table
+    format: csv
+    required: false
+    produced_by: [analyze]
+    validation:
+      - {name: barcode-keyed, description: Table is keyed by cell barcode, rule: "columns include barcode,cell_type"}
+  - id: cluster-assignments
+    name: Cluster assignment table
+    description: Unsupervised cluster assignment per retained cell.
+    kind: table
+    format: csv
+    required: false
+    produced_by: [analyze]
+    validation:
+      - {name: multiple-clusters, description: At least two clusters were recovered, rule: "cluster column has 2 or more distinct values"}
+  - id: marker-evidence
+    name: Marker-gene evidence table
+    description: Ranked marker evidence supporting the assigned labels.
+    kind: table
+    format: csv
+    required: false
+    produced_by: [analyze]
+  - id: analysis-object
+    name: Analysis AnnData object
+    description: Serialized analysis state, if the workflow chose to persist one.
+    kind: anndata
+    format: h5ad
+    required: false
+    produced_by: [analyze]
+constraints:
+  cpu_only: true
+  internet_access: false
+  max_runtime_seconds: 1800
+  max_memory_mb: 16384
+  allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, scikit-learn]
+  deterministic: true
+  random_seed: 42
+tasks:
+  - id: cell-annotation-free
+    name: PBMC cell-type annotation with an agent-authored workflow
+    objective: Recover biologically meaningful cell types from PBMC expression profiles.
+    description: >-
+      Starting from the sanitized PBMC expression matrix in the workspace, design
+      and implement an annotation workflow and write a per-cell label table keyed
+      by cell barcode. The workflow, its methods, and its parameters are yours to
+      choose; declare each step's outputs so they can be verified.
+    datasets: [pbmc68k]
+    environment: local-python
+    observations: [workspace-tree, dataset-summary, execution-output, pipeline-history]
+    allowed_actions: [analyze]
+    metrics: [annotation-accuracy, execution-success, runtime]
+    reward_strategy: annotation-reward
+    artifacts: [cell-labels, cluster-assignments, marker-evidence, analysis-object]
+    evaluation:
+      levels: [decision, method, parameter, execution, artifact]
+      metrics: [annotation-accuracy, execution-success, runtime]
+    termination:
+      - {name: successful-completion, description: A per-cell label table exists and validates., condition: required artifacts validate successfully}
+      - {name: resource-limit, description: Stop when the benchmark resource budget is exhausted., condition: runtime exceeds constraints.max_runtime_seconds}

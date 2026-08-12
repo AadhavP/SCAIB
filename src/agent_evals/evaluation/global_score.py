@@ -19,11 +19,17 @@ class GlobalAgentScore(BaseModel):
 
 def compute_global_agent_score(
     scientific_outcome: float | None,
-    decision_quality: float,
+    decision_quality: float | None,
     trajectory_quality: float,
 ) -> GlobalAgentScore | None:
-    """Compute the global score or preserve unavailable scientific outcomes."""
-    if scientific_outcome is None:
+    """Compute the global score, or nothing when a dimension is unmeasured.
+
+    A missing dimension yields no score rather than a substituted one. Filling
+    ``decision_quality`` with a neutral 1.0 made an agent that recorded no
+    decisions score *higher* than one whose decisions were scored and found
+    merely good, which inverts what the benchmark exists to measure.
+    """
+    if scientific_outcome is None or decision_quality is None:
         return None
     outcome = max(0.0, min(1.0, scientific_outcome))
     decision = max(0.0, min(1.0, decision_quality))

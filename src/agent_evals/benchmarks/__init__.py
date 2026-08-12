@@ -15,12 +15,15 @@ from agent_evals.benchmarks.registry import (
     benchmark_spec_registry,
 )
 from agent_evals.benchmarks.schema import (
+    ActionKind,
     ActionSpec,
     ArtifactSpec,
     BenchmarkSpec,
     BenchmarkSpecification,
     ConstraintSpec,
     DatasetSpec,
+    EnvironmentBackend,
+    EnvironmentSpec,
     EvaluationConfig,
     EvaluationConfiguration,
     MetricSpec,
@@ -32,6 +35,7 @@ from agent_evals.benchmarks.schema import (
 )
 
 __all__ = [
+    "ActionKind",
     "ActionSpec",
     "ArtifactSpec",
     "BaseBenchmark",
@@ -41,6 +45,8 @@ __all__ = [
     "BenchmarkSpecificationRegistry",
     "ConstraintSpec",
     "DatasetSpec",
+    "EnvironmentBackend",
+    "EnvironmentSpec",
     "EvaluationConfig",
     "EvaluationConfiguration",
     "MetricSpec",

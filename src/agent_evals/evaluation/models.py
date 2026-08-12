@@ -124,9 +124,14 @@ class ScientificEvaluation(BaseModel):
     local_decision_rewards: list[dict[str, Any]] = Field(default_factory=list)
     trajectory: TrajectoryEvaluation
     scientific_outcome_score: float | None = Field(default=None, ge=0, le=1)
-    decision_score: float = Field(ge=0, le=1)
+    #: ``None`` when the run produced no decisions to score. A run that never
+    #: told the benchmark what it was doing has an *unmeasured* decision
+    #: dimension, not a perfect one; scoring it 1.0 rewarded an agent for being
+    #: less structured than one that explained itself.
+    decision_score: float | None = Field(default=None, ge=0, le=1)
     method_score: float = Field(ge=0, le=1)
-    decision_quality_score: float = Field(default=0.0, ge=0, le=1)
+    #: ``None`` for the same reason as :attr:`decision_score`, which it multiplies.
+    decision_quality_score: float | None = Field(default=None, ge=0, le=1)
     trajectory_score: float = Field(ge=0, le=1)
     global_agent_score: float | None = Field(default=None, ge=0, le=1)
     benchmark_score: float | None = Field(default=None, ge=0, le=1)
