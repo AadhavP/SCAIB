@@ -87,7 +87,22 @@ class TrajectoryEvaluation(BaseModel):
     resource_usage: dict[str, float | bool | None] = Field(default_factory=dict)
     failed_retries: int = Field(ge=0)
     dependency_consistency: float = Field(ge=0, le=1)
+    #: Reported for continuity, and deliberately weighted zero. It is the clamped
+    #: scientific outcome, so weighting it inside trajectory quality counted the
+    #: same evidence twice and let a good final artifact raise the score for the
+    #: path that reached it.
     outcome_alignment: float = Field(ge=0, le=1)
+    #: ``None`` when no step produced a comparable change in scientific state --
+    #: the case for a run of one step, or one whose metrics never overlapped
+    #: between steps. Its weight is then redistributed over the terms that were
+    #: measured, because a benchmark that could not observe progress has not
+    #: observed an absence of progress.
+    scientific_progress: float | None = Field(default=None, ge=0, le=1)
+    progress_measured_steps: int = Field(default=0, ge=0)
+    progress_regressions: int = Field(default=0, ge=0)
+    recoveries: int = Field(default=0, ge=0)
+    progress_per_action: float | None = Field(default=None, ge=0, le=1)
+    progress_per_cost: float | None = Field(default=None, ge=0)
     efficiency: float = Field(ge=0, le=1)
     decision_efficiency: float = Field(default=0.0, ge=0, le=1)
     decision_consistency: float = Field(default=0.0, ge=0, le=1)

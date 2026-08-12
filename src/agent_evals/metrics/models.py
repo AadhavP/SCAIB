@@ -28,6 +28,13 @@ class MetricDirection(StrEnum):
 class MetricCategory(StrEnum):
     """Scientific or operational category of a metric."""
 
+    #: The two earliest pipeline stages. Added so that a per-stage score has a
+    #: category to live in; no metric is registered under either one yet, which
+    #: ``test_stage_progress`` asserts explicitly rather than leaving implied. A
+    #: stage with no scoreable metric contributes nothing to progress instead of
+    #: contributing a zero.
+    QC = "qc"
+    NORMALIZATION = "normalization"
     ANNOTATION = "cell_annotation"
     CLUSTERING = "clustering"
     BATCH_INTEGRATION = "batch_integration"

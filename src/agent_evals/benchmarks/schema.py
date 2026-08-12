@@ -494,6 +494,13 @@ class WorkflowStage(SpecificationModel):
     allowed_actions: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     required: bool = False
+    #: Metrics that become meaningful once this stage has run. This is the
+    #: declaration point for per-stage scoring: it says *when* a metric can be
+    #: asked, not what a good answer is. Leaving it empty keeps the stage
+    #: unscored rather than scoring it against metrics whose inputs cannot exist
+    #: yet -- a clustering metric asked before clustering does not measure a bad
+    #: agent, it measures a badly specified benchmark.
+    metrics: list[str] = Field(default_factory=list)
 
     _identifier = field_validator("id")(_validate_identifier)
 
@@ -697,6 +704,17 @@ class BenchmarkSpecification(SpecificationModel):
             for stage in task.workflow:
                 unknown_actions = self._unknown(stage.allowed_actions, action_ids)
                 unknown_stages = self._unknown(stage.depends_on, stage_ids)
+                # Rejected at load time for the same reason an unparseable
+                # validation rule is: a stage naming a metric the benchmark does
+                # not declare can only ever contribute nothing to per-stage
+                # progress, and a silently unscored stage is indistinguishable
+                # from a stage the agent handled badly.
+                unknown_metrics = self._unknown(stage.metrics, metric_ids)
+                if unknown_metrics:
+                    raise ValueError(
+                        f"workflow stage '{stage.id}' references unknown metric(s): "
+                        f"{', '.join(unknown_metrics)}"
+                    )
                 if unknown_actions:
                     raise ValueError(
                         f"workflow stage '{stage.id}' references unknown action(s): "

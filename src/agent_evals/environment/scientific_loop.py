@@ -6,7 +6,7 @@ import asyncio
 import inspect
 import json
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -26,8 +26,11 @@ from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
 from agent_evals.core.config import get_settings
+from agent_evals.core.decision_components import (
+    OBSERVED_CELL_COUNT,
+    OBSERVED_GENE_COUNT,
+)
 from agent_evals.datasets.preflight import (
-    REFERENCE_COLUMN_CANDIDATES,
     DatasetContractError,
     describe_readiness,
     validate_dataset_contract,
@@ -50,15 +53,26 @@ from agent_evals.evaluation import (
     TrajectoryEvaluator,
     compute_global_agent_score,
 )
+from agent_evals.evaluation.candidates import (
+    build_candidate_artifacts,
+    build_prediction_frame,
+    build_reference_artifacts,
+)
 from agent_evals.evaluation.methods import method_score
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
 from agent_evals.evaluation.models import MethodScore
 from agent_evals.evaluation.profiles import load_metric_profile, pbmc_annotation_profile
+from agent_evals.evaluation.progress import (
+    ProgressSignal,
+    ScientificProgressTracker,
+    summarize_progress,
+)
 from agent_evals.evaluation.scoring import (
     MetricScoreInput,
     WeightedGeometricAggregator,
     aggregate_domains,
 )
+from agent_evals.evaluation.stage_rewards import StageAwareRewardEvaluator
 from agent_evals.evaluation.taxonomy import DecisionProfile, decision_ontology
 from agent_evals.evaluators.models import MetricResult
 from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
@@ -431,7 +445,16 @@ class ScientificLoop:
             workspace=pending_root,
         )
         observation_builder = ScientificObservationBuilder(context)
-        reward_evaluator = RewardEvaluator()
+        # Wraps rather than replaces the reward evaluator, so the reward scalar the
+        # environment records is unchanged and ``S_t`` rides alongside it as
+        # evaluator-side evidence. Reference-derived quality must not become the
+        # number an agent optimizes directly.
+        reward_evaluator = StageAwareRewardEvaluator(
+            RewardEvaluator(),
+            ScientificProgressTracker(self._load_metric_profile(specification)),
+            context,
+            self._progress_metric_ids(specification),
+        )
         environment = ScientificEnvironment(
             specification,
             task_id=task.id,
@@ -521,6 +544,7 @@ class ScientificLoop:
             agent_run,
             context,
             store,
+            reward_evaluator.signals,
         )
         final_root = Path(output_dir) / agent_run.run_id
         final_root.parent.mkdir(parents=True, exist_ok=True)
@@ -607,28 +631,25 @@ class ScientificLoop:
         return run
 
     @staticmethod
-    def _evaluate_scientific_run(  # noqa: C901
+    def _evaluate_scientific_run(
         specification: BenchmarkSpecification,
         task: Any,
         agent_run: AgentRun,
         context: ScientificContext,
         store: LocalArtifactStore,
+        progress_signals: Sequence[ProgressSignal] = (),
     ) -> ScientificEvaluation:
         """Run versioned evaluation on hidden reference data and visible outputs."""
-        import pandas as pd
-
         adata = context.adata
-        cell_ids = [str(value) for value in adata.obs_names]
         # Only columns this run's agent actually wrote may count as predictions.
         # Reading a pre-existing column (bulk_labels, cell_type, or the dataset's
         # own louvain assignment) would score reference biology as agent output.
         prediction_column = context.agent_prediction_column()
-        candidate: dict[str, Any] = {"cell_id": cell_ids}
-        if prediction_column is not None:
-            candidate["predicted_label"] = [str(value) for value in adata.obs[prediction_column]]
-        else:
-            candidate["predicted_label"] = ["__unassigned__"] * len(cell_ids)
-        prediction = pd.DataFrame(candidate)
+        # Built through ``evaluation.candidates`` rather than inline, so the final
+        # outcome and the per-step ``S_t`` see the same artifacts. Assembled
+        # separately they could disagree for reasons that are the harness's, not
+        # the agent's, and the progress signal would measure that disagreement.
+        prediction = build_prediction_frame(adata, prediction_column)
         prediction_artifact = store.save_table(
             "evaluation-prediction",
             prediction,
@@ -638,23 +659,13 @@ class ScientificLoop:
                 "agent_produced_prediction": prediction_column is not None,
             },
         )
-        candidate_artifacts: dict[str, Any] = {"prediction": prediction}
-        cluster_column = context.agent_cluster_column()
-        if cluster_column is not None:
-            candidate_artifacts["cluster_labels"] = (
-                adata.obs[cluster_column].astype(str).to_numpy()
-            )
-        if "X_pca" in adata.obsm:
-            candidate_artifacts["embedding"] = adata.obsm["X_pca"]
-        label_column = next(
-            (column for column in REFERENCE_COLUMN_CANDIDATES if column in adata.obs),
-            None,
+        candidate_artifacts = build_candidate_artifacts(
+            adata,
+            prediction_column=prediction_column,
+            cluster_column=context.agent_cluster_column(),
+            prediction=prediction,
         )
-        reference_artifacts = (
-            {"labels": pd.DataFrame({"reference_label": adata.obs[label_column].astype(str).to_numpy()})}
-            if label_column is not None
-            else {}
-        )
+        reference_artifacts = build_reference_artifacts(adata)
         metric_ids = [
             item.metric_id
             for group in specification.metric_groups
@@ -744,6 +755,14 @@ class ScientificLoop:
         decisions = DecisionEvaluator().evaluate(agent_run, task)
         methods = MethodEvaluator().evaluate(agent_run, task, metric_ids, scientific_score)
         local_reward_values = [reward.value for reward in agent_run.final_environment_state.state.rewards]
+        progress = summarize_progress(
+            progress_signals,
+            action_count=len(agent_run.final_environment_state.state.actions),
+            token_usage=(
+                agent_run.token_usage.total_tokens if agent_run.token_usage else None
+            ),
+            runtime_seconds=agent_run.wall_clock_seconds,
+        )
         trajectory = TrajectoryEvaluator().evaluate(
             agent_run,
             task,
@@ -753,6 +772,7 @@ class ScientificLoop:
                 category: profile.alternatives
                 for category, profile in specification.decision_evaluation.items()
             },
+            progress=progress,
         )
         # ``None``, not 1.0, when there is nothing to score. An agent that runs
         # its own workflow without recording decisions used to collect a free
@@ -796,8 +816,11 @@ class ScientificLoop:
             except ValueError:
                 step_number = decision.order + 1
             evidence["decision_local_reward"] = reward_by_step.get(step_number, 0.0)
+            before, after = ScientificLoop._decision_observations(decision)
             local_decision_rewards.append(
-                local_evaluator.evaluate(decision, None, None, evidence).model_dump(mode="json")
+                local_evaluator.evaluate(decision, before, after, evidence).model_dump(
+                    mode="json"
+                )
             )
         selection_value = (
             sum(item.overall for item in selection_scores) / len(selection_scores)
@@ -838,6 +861,51 @@ class ScientificLoop:
                 decision=decision_value,
                 selection=selection_value,
             ),
+        )
+
+    @staticmethod
+    def _decision_observations(
+        decision: Any,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Report the observed cell and gene counts either side of a decision.
+
+        Sourced from the observed state delta rather than from the agent's claim,
+        and ``(None, None)`` when nothing was observed -- which excludes the
+        observation-derived reward components rather than scoring them zero.
+        """
+        delta = getattr(decision, "observed_state_delta", None)
+        if delta is None:
+            return None, None
+        return (
+            {
+                OBSERVED_CELL_COUNT: delta.n_obs_before,
+                OBSERVED_GENE_COUNT: delta.n_vars_before,
+            },
+            {
+                OBSERVED_CELL_COUNT: delta.n_obs_after,
+                OBSERVED_GENE_COUNT: delta.n_vars_after,
+            },
+        )
+
+    @staticmethod
+    def _progress_metric_ids(specification: BenchmarkSpecification) -> list[str]:
+        """List the metrics worth recomputing every step to track ``S_t``.
+
+        Restricted to the profile's weighted metrics because those are the only
+        ones the tracker can aggregate; computing the rest each step would cost
+        real time and change no number.
+        """
+        profile = ScientificLoop._load_metric_profile(specification)
+        external = {
+            group.external_score
+            for group in profile.metric_groups.values()
+            if group.external_score
+        }
+        return sorted(
+            name
+            for group in profile.metric_groups.values()
+            for name in group.metrics
+            if name not in external
         )
 
     @staticmethod

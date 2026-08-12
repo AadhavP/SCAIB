@@ -13,6 +13,43 @@ from agent_evals.evaluation.metrics.trajectory import (
     method_exploration_score,
 )
 from agent_evals.evaluation.models import TrajectoryEvaluation
+from agent_evals.evaluation.progress import ScientificProgressReport
+
+#: Trajectory-quality terms and their weights, summing to 1.0. Declared as data so
+#: an unmeasurable term can be dropped and the rest renormalized, which is the only
+#: honest way to score a dimension the harness could not observe: substituting zero
+#: would punish an agent for the benchmark's blindness, and substituting one would
+#: pay it for the same.
+_QUALITY_WEIGHTS: tuple[tuple[str, float], ...] = (
+    ("protocol", 0.25),
+    ("consistency", 0.15),
+    ("artifact_validity", 0.15),
+    ("efficiency", 0.15),
+    ("adaptation", 0.10),
+    ("scientific_progress", 0.10),
+    ("method_exploration", 0.10),
+)
+
+
+def _weighted_quality(terms: Mapping[str, float | None]) -> tuple[float, str]:
+    """Combine the measured terms and describe the combination that was used."""
+    measured = {
+        name: (weight, terms[name])
+        for name, weight in _QUALITY_WEIGHTS
+        if terms.get(name) is not None
+    }
+    total_weight = sum(weight for weight, _ in measured.values())
+    if not measured or total_weight <= 0:
+        return 0.0, "no trajectory term was measurable"
+    quality = sum(
+        (weight / total_weight) * float(value)
+        for weight, value in measured.values()
+        if value is not None
+    )
+    formula = " + ".join(
+        f"{weight / total_weight:.2f}*{name}" for name, (weight, _) in measured.items()
+    )
+    return max(0.0, min(1.0, quality)), formula
 
 
 class TrajectoryEvaluator:
@@ -26,6 +63,7 @@ class TrajectoryEvaluator:
         local_rewards: Sequence[float] | None = None,
         alternative_methods: Mapping[str, Sequence[str]] | None = None,
         alternative_scores: Mapping[str, float] | None = None,
+        progress: ScientificProgressReport | None = None,
     ) -> TrajectoryEvaluation:
         """Evaluate only persisted events, actions, artifacts, and resources."""
         actions = run.final_environment_state.state.actions
@@ -84,14 +122,20 @@ class TrajectoryEvaluator:
         alignment = max(0.0, min(1.0, outcome if outcome is not None else 0.0))
         short_term_gain, long_term_damage = self._counterproductive_signal(local_rewards, outcome)
         counterproductive_score = 1.0 - long_term_damage
-        quality = (
-            0.25 * protocol
-            + 0.15 * consistency_score
-            + 0.15 * artifact_validity
-            + 0.15 * efficiency
-            + 0.10 * adaptation_score
-            + 0.10 * alignment
-            + 0.10 * exploration_score
+        quality, formula = _weighted_quality(
+            {
+                "protocol": protocol,
+                "consistency": consistency_score,
+                "artifact_validity": artifact_validity,
+                "efficiency": efficiency,
+                "adaptation": adaptation_score,
+                # Not `alignment`. This term used to be the clamped outcome, which
+                # made a good artifact raise the score of the path that produced
+                # it and left the trajectory dimension with nothing of its own to
+                # measure.
+                "scientific_progress": None if progress is None else progress.value,
+                "method_exploration": exploration_score,
+            }
         )
         good_signals = []
         bad_signals = []
@@ -144,6 +188,12 @@ class TrajectoryEvaluator:
             failed_retries=failed_retries,
             dependency_consistency=dependency_score,
             outcome_alignment=alignment,
+            scientific_progress=None if progress is None else progress.value,
+            progress_measured_steps=0 if progress is None else progress.measured_steps,
+            progress_regressions=0 if progress is None else progress.regressions,
+            recoveries=0 if progress is None else progress.recoveries,
+            progress_per_action=None if progress is None else progress.progress_per_action,
+            progress_per_cost=None if progress is None else progress.progress_per_cost,
             efficiency=efficiency,
             decision_efficiency=efficiency,
             decision_consistency=consistency_score,
@@ -161,7 +211,7 @@ class TrajectoryEvaluator:
             alternative_comparisons=comparisons,
             trajectory_quality=quality,
             step_table=step_table,
-            formula="0.25*protocol + 0.15*consistency + 0.15*artifact_validity + 0.15*efficiency + 0.10*adaptation + 0.10*outcome_alignment + 0.10*method_exploration",
+            formula=formula,
         )
 
     @staticmethod
