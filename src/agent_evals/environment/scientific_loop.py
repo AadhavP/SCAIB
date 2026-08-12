@@ -73,6 +73,7 @@ from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
 from agent_evals.metrics import MetricGroup, MetricWeight
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.scientific.artifacts.storage import LocalArtifactStore
+from agent_evals.scientific.artifacts.validation import ArtifactRuleValidator
 from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.executor.scanpy import ScanpyExecutor
 from agent_evals.scientific.metrics import (
@@ -451,6 +452,10 @@ class ScientificLoop:
             ),
             observation_builder=observation_builder,
             reward_evaluator=reward_evaluator,
+            # Injected here rather than reached for inside the environment, so
+            # ``runtime.py`` keeps knowing only the port and stays importable
+            # without the science extra installed.
+            artifact_validator=ArtifactRuleValidator(),
         )
         adapter = _create_scientific_adapter(
             agent_type,

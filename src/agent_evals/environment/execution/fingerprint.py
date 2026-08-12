@@ -24,7 +24,7 @@ from pathlib import Path
 
 from pydantic import Field
 
-from agent_evals.environment.models import RuntimeModel
+from agent_evals.environment.models import KeyDelta, RuntimeModel
 
 #: Files at or below this size are hashed by content. Above it, hashing every
 #: step costs more than the provenance is worth; see :class:`DigestMethod`.
@@ -162,12 +162,40 @@ def fingerprint_workspace(
     )
 
 
+def diff_workspaces(
+    before: WorkspaceFingerprint,
+    after: WorkspaceFingerprint,
+) -> KeyDelta:
+    """Report which workspace files an execution created, removed, or rewrote.
+
+    A path lands in ``unproven`` whenever either side's identity came from the
+    size-and-mtime fallback, whichever way the comparison came out.  That is not
+    a hedge about the direction of the finding: it says the finding rests on a
+    proxy, so a large ``.h5ad`` rewritten in place with the same size inside one
+    filesystem timestamp tick could look untouched.
+    """
+    shared = sorted(before.paths & after.paths)
+    changed = [path for path in shared if before.files[path].digest != after.files[path].digest]
+    unproven = [
+        path
+        for path in shared
+        if not (before.files[path].is_proof and after.files[path].is_proof)
+    ]
+    return KeyDelta(
+        added=sorted(after.paths - before.paths),
+        removed=sorted(before.paths - after.paths),
+        changed=changed,
+        unproven=unproven,
+    )
+
+
 __all__ = [
     "CONTENT_DIGEST_MAX_BYTES",
     "IGNORED_DIRECTORIES",
     "DigestMethod",
     "FileFingerprint",
     "WorkspaceFingerprint",
+    "diff_workspaces",
     "fingerprint_file",
     "fingerprint_workspace",
 ]

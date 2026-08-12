@@ -15,6 +15,10 @@ from typing import Any, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_evals.core.artifact_rules import (
+    UnparseableValidationRule,
+    parse_validation_rule,
+)
 from agent_evals.metrics.models import MetricRole
 
 CURRENT_SCHEMA_VERSION = "1.0.0"
@@ -657,6 +661,18 @@ class BenchmarkSpecification(SpecificationModel):
             unknown = self._unknown(artifact.produced_by, action_ids)
             if unknown:
                 raise ValueError(f"artifact '{artifact.id}' has unknown producer(s): {', '.join(unknown)}")
+            for rule in artifact.validation:
+                # At load time rather than at evaluation time, because who is at
+                # fault differs: a rule the evaluator cannot read is the benchmark
+                # author's typo, and surfacing it during a run would charge the
+                # agent for an unchecked artifact it produced correctly.
+                try:
+                    parse_validation_rule(rule.rule)
+                except UnparseableValidationRule as error:
+                    raise ValueError(
+                        f"artifact '{artifact.id}' validation rule '{rule.name}' "
+                        f"cannot be evaluated: {error}"
+                    ) from error
 
         for reward in self.rewards:
             unknown = self._unknown([component.metric for component in reward.components], metric_ids)

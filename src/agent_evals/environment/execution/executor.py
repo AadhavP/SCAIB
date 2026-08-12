@@ -18,6 +18,12 @@ applied at the point where a claim first enters the system.
 evaluator owns as its own output. The local tier cannot *confine* writes and
 says so, but it can refuse to account for anything outside the workspace, and
 that refusal is what keeps the Stage 0 reference store outside the boundary.
+
+And one thing is observed rather than asked about: state is fingerprinted before
+and after the command runs, so what the step *did* is measured independently of
+what the agent said it would do. The resulting ``StateDelta`` is attached to
+every outcome, including failures -- a step killed by a timeout can still have
+left half-written files behind, and that is evidence, not noise.
 """
 
 from __future__ import annotations
@@ -41,16 +47,24 @@ from agent_evals.environment.execution.backend import (
     Language,
     WorkspaceBackend,
 )
+from agent_evals.environment.execution.dataset import DatasetFingerprint, dataset_delta
+from agent_evals.environment.execution.fingerprint import (
+    WorkspaceFingerprint,
+    diff_workspaces,
+)
 from agent_evals.environment.execution.isolation import IsolationRequest
 from agent_evals.environment.execution.local import resolve_within
+from agent_evals.environment.execution.observer import DatasetObserver
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
     ActionStatus,
     ArtifactRecord,
     ExecutionStatus,
+    KeyDelta,
     Observation,
     ResourceUsage,
+    StateDelta,
     utc_now,
 )
 from agent_evals.environment.ports import ExecutionContext
@@ -174,6 +188,42 @@ def _checksum(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def observed_delta(
+    *,
+    files_before: WorkspaceFingerprint | None,
+    files_after: WorkspaceFingerprint | None,
+    dataset_before: DatasetFingerprint | None,
+    dataset_after: DatasetFingerprint | None,
+) -> StateDelta:
+    """Combine the workspace and dataset observations into one delta.
+
+    Either observation can be missing, and a missing one is reported as an
+    unobserved namespace rather than as an empty result.  The dataset half of
+    that judgement is delegated to ``dataset_delta`` so the free tier and the
+    typed tier cannot end up describing the same absence differently.
+    """
+    limitations: list[str] = []
+    unobserved: list[str] = []
+    if files_before is None or files_after is None:
+        limitations.append("the workspace could not be fingerprinted")
+        unobserved.append("files")
+        files: KeyDelta | None = None
+    else:
+        files = diff_workspaces(files_before, files_after)
+        for side, fingerprint in (("before", files_before), ("after", files_after)):
+            for path, reason in sorted(fingerprint.unreadable.items()):
+                limitations.append(f"{side}: '{path}' unreadable ({reason})")
+    delta = dataset_delta(dataset_before, dataset_after, files=files)
+    if not limitations and not unobserved:
+        return delta
+    return delta.model_copy(
+        update={
+            "unobserved": sorted({*delta.unobserved, *unobserved}),
+            "limitations": [*delta.limitations, *limitations],
+        }
+    )
+
+
 class WorkspaceActionExecutor:
     """Run agent-authored code for one action intent and report what it did."""
 
@@ -182,9 +232,14 @@ class WorkspaceActionExecutor:
         backend: WorkspaceBackend,
         *,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
+        dataset_observer: DatasetObserver | None = None,
     ) -> None:
         self.backend = backend
         self.max_output_bytes = max_output_bytes
+        #: Optional, because a benchmark whose actions produce only tables and
+        #: figures has no dataset to watch. When absent the delta reports the
+        #: dataset as unobserved rather than as unchanged.
+        self.dataset_observer = dataset_observer
 
     async def execute(
         self,
@@ -206,8 +261,29 @@ class WorkspaceActionExecutor:
                 f"were refused: {', '.join(escapes)}",
                 started=started,
             )
+        files_before = await self._observe_files()
+        dataset_before = self._observe_dataset()
         outcome = await self.backend.run(request)
-        return self._result(intent, outcome, expected, started=started)
+        delta = observed_delta(
+            files_before=files_before,
+            files_after=await self._observe_files(),
+            dataset_before=dataset_before,
+            dataset_after=self._observe_dataset(),
+        )
+        return self._result(intent, outcome, expected, delta=delta, started=started)
+
+    async def _observe_files(self) -> WorkspaceFingerprint | None:
+        """Fingerprint the workspace, returning ``None`` if it cannot be read."""
+        try:
+            return await self.backend.fingerprint()
+        except OSError:
+            return None
+
+    def _observe_dataset(self) -> DatasetFingerprint | None:
+        """Fingerprint the dataset, if this executor was given a way to see it."""
+        if self.dataset_observer is None:
+            return None
+        return self.dataset_observer.snapshot()
 
     def _build_request(
         self,
@@ -245,6 +321,7 @@ class WorkspaceActionExecutor:
         outcome: CommandOutcome,
         expected: dict[str, str],
         *,
+        delta: StateDelta,
         started: datetime,
     ) -> ActionExecutionResult:
         """Build the typed result, verifying declared artifacts really exist."""
@@ -257,6 +334,7 @@ class WorkspaceActionExecutor:
                 execution_status=outcome.status,
                 observations=observations,
                 resource_usage=outcome.resource_usage,
+                observed_state_delta=delta,
                 error=outcome.error or f"execution failed: {outcome.status.value}",
                 started_at=started,
             )
@@ -271,6 +349,7 @@ class WorkspaceActionExecutor:
                 observations=observations,
                 artifacts=artifacts,
                 resource_usage=outcome.resource_usage,
+                observed_state_delta=delta,
                 error=(
                     "execution succeeded but declared artifact(s) were not "
                     f"produced: {', '.join(missing)}"
@@ -286,6 +365,7 @@ class WorkspaceActionExecutor:
             observations=observations,
             artifacts=artifacts,
             resource_usage=outcome.resource_usage,
+            observed_state_delta=delta,
             started_at=started,
         )
 
@@ -392,4 +472,5 @@ __all__ = [
     "declared_artifacts",
     "deterministic_environment",
     "isolation_from_constraints",
+    "observed_delta",
 ]

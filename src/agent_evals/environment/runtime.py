@@ -12,6 +12,7 @@ from agent_evals.environment.models import (
     ActionIntent,
     ActionStatus,
     ActionValidationResult,
+    ArtifactValidation,
     EnvironmentStep,
     EpisodeSnapshot,
     EpisodeStatus,
@@ -20,6 +21,7 @@ from agent_evals.environment.models import (
 )
 from agent_evals.environment.ports import (
     ActionExecutor,
+    ArtifactValidator,
     ConstraintMonitor,
     DeclarativeActionValidator,
     ExecutionContext,
@@ -49,6 +51,7 @@ class ScientificEnvironment:
         reward_evaluator: RewardEvaluator | None = None,
         validator: DeclarativeActionValidator | None = None,
         constraint_monitor: ConstraintMonitor | None = None,
+        artifact_validator: ArtifactValidator | None = None,
     ) -> None:
         self.specification = specification
         self.task = self._resolve_task(task_id)
@@ -57,6 +60,10 @@ class ScientificEnvironment:
         self.reward_evaluator = reward_evaluator
         self.validator = validator or DeclarativeActionValidator()
         self.constraint_monitor = constraint_monitor or ConstraintMonitor()
+        #: Optional, because the environment can run without checking artifact
+        #: contents.  When absent every artifact keeps ``validated=False``, which
+        #: reads as unvalidated rather than as invalid.
+        self.artifact_validator = artifact_validator
         self._episode: Episode | None = None
 
     async def reset(
@@ -138,7 +145,19 @@ class ScientificEnvironment:
             constraints,
             episode.snapshot().state.resource_usage,
         )
+        # Before ``record_action``, because the record is what scoring reads and
+        # an artifact recorded unvalidated stays that way. Applied to failed steps
+        # too: their artifacts are persisted either way, and ``artifact_validity``
+        # is computed over every recorded artifact rather than only committed ones.
+        result = await self._validate_artifacts(intent, result)
         episode.record_action(intent, result)
+        # After ``record_action``, so the event lands at the step it describes,
+        # and gated on a non-empty delta so a step that changed nothing does not
+        # add a change event claiming otherwise. An unobserved delta is not empty
+        # -- it carries the limitations saying why -- so it is still recorded.
+        delta = result.observed_state_delta
+        if delta is not None and not (delta.is_empty and not delta.unobserved):
+            episode.record_state_change(delta)
 
         reward: RewardRecord | None = None
         if result.status == ActionStatus.SUCCEEDED:
@@ -194,6 +213,44 @@ class ScientificEnvironment:
             )
         return self._episode
 
+    async def _validate_artifacts(
+        self,
+        intent: ActionIntent,
+        result: ActionExecutionResult,
+    ) -> ActionExecutionResult:
+        """Check every produced artifact against the rules its benchmark declared.
+
+        ``validated`` is set from the check rather than by whoever wrote the file.
+        That is the same principle applied to completion claims and to state
+        deltas: a producer's assertion about its own output is the thing under
+        evaluation, so it cannot also be the evidence.
+        """
+        if self.artifact_validator is None or not result.artifacts:
+            return result
+        rules = {item.id: item.validation for item in self.specification.artifacts}
+        validated = []
+        for artifact in result.artifacts:
+            try:
+                validation = await self.artifact_validator.validate(
+                    artifact,
+                    rules.get(artifact.artifact_id, []),
+                    intent.parameters,
+                )
+            except Exception as error:  # a check must not fail the science
+                # Recorded as a harness limitation with nothing established, which
+                # leaves ``validated`` false for the honest reason: no check ran.
+                validation = ArtifactValidation(
+                    limitations=[
+                        f"the artifact validator failed: {type(error).__name__}: {error}"
+                    ]
+                )
+            validated.append(
+                artifact.model_copy(
+                    update={"validation": validation, "validated": validation.is_valid}
+                )
+            )
+        return result.model_copy(update={"artifacts": validated})
+
     async def _refresh_observations(self) -> None:
         """Ask the observation port for values and commit them atomically."""
         if self.observation_builder is None:
@@ -246,6 +303,11 @@ class ScientificEnvironment:
             execution_status=self._contract_status(result, ExecutionStatus.PARTIAL),
             error=message,
             resource_usage=result.resource_usage,
+            # Carried across the rebuild deliberately. The contract check is a
+            # judgement about the result; the delta is a measurement of what the
+            # code did, and discarding it here would lose exactly the evidence
+            # that explains a step which ran but declared the wrong outputs.
+            observed_state_delta=result.observed_state_delta,
         )
 
     @staticmethod
@@ -282,6 +344,10 @@ class ScientificEnvironment:
             execution_status=self._contract_status(result, ExecutionStatus.TERMINATED),
             error="; ".join(violations),
             resource_usage=result.resource_usage,
+            # A step that overran its budget is the case where knowing what it
+            # already changed matters most: the outputs are not committed, so
+            # the delta is the only record of what the data now looks like.
+            observed_state_delta=result.observed_state_delta,
         )
 
 

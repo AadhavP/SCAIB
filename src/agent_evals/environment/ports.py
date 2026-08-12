@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import Any, Protocol, runtime_checkable
 
 from agent_evals.benchmarks.schema import (
     ActionSpecification,
     BenchmarkSpecification,
     ConstraintSpecification,
     TaskSpecification,
+    ValidationRule,
 )
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
     ActionValidationResult,
+    ArtifactRecord,
+    ArtifactValidation,
     EpisodeSnapshot,
     Observation,
     ResourceUsage,
@@ -53,6 +56,35 @@ class ObservationBuilder(Protocol):
         snapshot: EpisodeSnapshot,
     ) -> Sequence[Observation]:
         """Build observations without mutating the episode directly."""
+
+
+@runtime_checkable
+class ArtifactValidator(Protocol):
+    """Port that checks a produced artifact against its declared rules.
+
+    A port rather than a call inside an executor, because both execution tiers
+    have to reach the same verdict about the same file.  Under typed execution
+    the harness wrote the artifact and under free execution the agent's own code
+    did, and if each tier decided validity for itself the two would drift --
+    which matters because ``validated`` is scored, so a tier that judged itself
+    leniently would score better for reasons that are not scientific.
+
+    Asynchronous because an implementation has to read files, and an ``.h5ad``
+    read is slow enough to stall the event loop that feeds progress to the UI.
+    """
+
+    async def validate(
+        self,
+        artifact: ArtifactRecord,
+        rules: Sequence[ValidationRule],
+        parameters: Mapping[str, Any],
+    ) -> ArtifactValidation:
+        """Return what checking this artifact established, without raising.
+
+        ``parameters`` are the producing intent's parameters, which is where a
+        rule's referenced vocabulary is declared; a rule naming one that is not
+        there is unevaluated rather than failed.
+        """
 
 
 @runtime_checkable
@@ -184,6 +216,7 @@ class ConstraintMonitor:
 
 __all__ = [
     "ActionExecutor",
+    "ArtifactValidator",
     "ConstraintMonitor",
     "DeclarativeActionValidator",
     "ExecutionContext",
