@@ -16,7 +16,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
-from agent_evals.scientific.context import REFERENCE_LABEL_COLUMNS
+from agent_evals.core.reference_columns import REFERENCE_LABEL_COLUMNS
 
 #: Observation IDs that require a usable technical batch covariate.
 BATCH_OBSERVATION_IDS = frozenset({"batch-labels"})

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_evals.scientific.context import REFERENCE_LABEL_COLUMNS
+from agent_evals.core.reference_columns import REFERENCE_LABEL_COLUMNS
 
 
 @dataclass

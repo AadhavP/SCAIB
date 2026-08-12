@@ -37,7 +37,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from agent_evals.scientific.context import RESERVED_REFERENCE_COLUMNS
+from agent_evals.core.reference_columns import RESERVED_REFERENCE_COLUMNS
 
 #: Every observation column treated as held-out reference biology. Aliases the
 #: list that already governed which columns an agent may not write, so the data

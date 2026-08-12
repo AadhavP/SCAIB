@@ -15,6 +15,7 @@ from agent_evals.environment.models import (
     EnvironmentStep,
     EpisodeSnapshot,
     EpisodeStatus,
+    ExecutionStatus,
     RewardRecord,
 )
 from agent_evals.environment.ports import (
@@ -127,6 +128,7 @@ class ScientificEnvironment:
                 intent_id=intent.intent_id,
                 action_id=intent.action_id,
                 status=ActionStatus.FAILED,
+                execution_status=ExecutionStatus.ERROR,
                 error=f"executor error: {error}",
             )
 
@@ -238,9 +240,23 @@ class ScientificEnvironment:
             intent_id=intent.intent_id,
             action_id=intent.action_id,
             status=ActionStatus.FAILED,
+            # An execution that ran cleanly but did not produce everything it
+            # declared is partial, not an error; an execution that already
+            # failed keeps whatever reason it reported.
+            execution_status=self._contract_status(result, ExecutionStatus.PARTIAL),
             error=message,
             resource_usage=result.resource_usage,
         )
+
+    @staticmethod
+    def _contract_status(
+        result: ActionExecutionResult,
+        replacement: ExecutionStatus,
+    ) -> ExecutionStatus | None:
+        """Keep an executor's own failure reason instead of overwriting it."""
+        if result.execution_status in (None, ExecutionStatus.SUCCESS):
+            return replacement
+        return result.execution_status
 
     def _apply_resource_constraints(
         self,
@@ -262,6 +278,8 @@ class ScientificEnvironment:
             intent_id=result.intent_id,
             action_id=result.action_id,
             status=ActionStatus.FAILED,
+            # The work itself may have finished; the episode ran out of budget.
+            execution_status=self._contract_status(result, ExecutionStatus.TERMINATED),
             error="; ".join(violations),
             resource_usage=result.resource_usage,
         )

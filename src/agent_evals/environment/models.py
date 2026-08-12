@@ -43,6 +43,26 @@ class ActionStatus(StrEnum):
     FAILED = "failed"
 
 
+class ExecutionStatus(StrEnum):
+    """How an execution ended, at a finer grain than accepted/rejected.
+
+    ``ActionStatus`` is the coarse gate the environment branches on and stays
+    binary on purpose.  This enum records *why* an execution ended, which the
+    binary gate cannot express: an agent whose script was killed by a memory
+    limit made a different mistake from one whose script raised, and a run cut
+    short by a timeout is not evidence about the science at all.  Reported
+    alongside ``ActionStatus`` rather than replacing it, so persisted runs and
+    the environment's own control flow are unaffected.
+    """
+
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    ERROR = "error"
+    TIMEOUT = "timeout"
+    OOM = "oom"
+    TERMINATED = "terminated"
+
+
 class EventType(StrEnum):
     """Event categories stored in the append-only episode trace."""
 
@@ -127,6 +147,10 @@ class ActionExecutionResult(RuntimeModel):
     intent_id: str = Field(min_length=1)
     action_id: str = Field(min_length=1)
     status: ActionStatus
+    #: Finer-grained reason the execution ended. Optional because executors that
+    #: cannot distinguish a timeout from a crash must not claim they can; a
+    #: persisted run recorded before this field existed loads as ``None``.
+    execution_status: ExecutionStatus | None = None
     outputs: dict[str, Any] = Field(default_factory=dict)
     observations: list[Observation] = Field(default_factory=list)
     artifacts: list[ArtifactRecord] = Field(default_factory=list)
@@ -226,6 +250,7 @@ __all__ = [
     "EpisodeState",
     "EpisodeStatus",
     "EventType",
+    "ExecutionStatus",
     "Observation",
     "ResourceUsage",
     "RewardRecord",

@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent_evals.metrics.context import ScientificMetricContext
-from agent_evals.metrics.registry import MetricComputation
-from agent_evals.scientific.context import (
+from agent_evals.core.reference_columns import (
     AGENT_PREDICTION_COLUMNS,
     REFERENCE_LABEL_COLUMNS,
 )
+from agent_evals.metrics.context import ScientificMetricContext
+from agent_evals.metrics.registry import MetricComputation
 
 #: Observation columns that may carry an agent's own labelling, in preference
 #: order. A column here is only usable once the agent is known to have written

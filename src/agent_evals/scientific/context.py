@@ -8,6 +8,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from agent_evals.core.reference_columns import (
+    AGENT_PREDICTION_COLUMNS,
+    RESERVED_REFERENCE_COLUMNS,
+)
 from agent_evals.scientific.artifacts.models import OperationRecord, ScientificArtifact
 from agent_evals.scientific.artifacts.storage import ArtifactStore
 
@@ -24,27 +28,6 @@ class OperationOutput:
     adata: Any | None = None
     artifacts: list[ScientificArtifact] = field(default_factory=list)
     outputs: dict[str, Any] = field(default_factory=dict)
-
-
-#: Observation columns a dataset may ship its reference labels in, in the order
-#: the evaluator prefers them when a dataset carries more than one. This is the
-#: list to *read* reference biology from; the order is load-bearing, so it must
-#: stay a tuple rather than a set.
-REFERENCE_LABEL_COLUMNS = (
-    "cell_type",
-    "cell_type_ref",
-    "known_labels",
-    "bulk_labels",
-)
-
-#: Observation columns that carry reference biology. These are evaluator inputs
-#: and must never be read back as though the agent had predicted them. Broader
-#: than :data:`REFERENCE_LABEL_COLUMNS` because blocking a *write* should be
-#: more inclusive than choosing what to read.
-RESERVED_REFERENCE_COLUMNS = frozenset(REFERENCE_LABEL_COLUMNS) | {"reference_labels"}
-
-#: Observation columns an agent may write to record its own predictions.
-AGENT_PREDICTION_COLUMNS = ("predicted_labels", "predicted_cell_type")
 
 
 @dataclass
