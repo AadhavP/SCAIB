@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
 from agent_evals.agents.harness import build_agent_run
+from agent_evals.agents.runtime.manager import (
+    cutoff_termination,
+    decision_signature,
+    progress_delta,
+)
 from agent_evals.agents.trajectory import (
     AgentConfiguration,
     AgentFailure,
@@ -17,7 +23,13 @@ from agent_evals.agents.trajectory import (
     RunTerminationStatus,
     ScientificDecision,
 )
-from agent_evals.benchmarks.schema import TaskSpecification
+from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.environment.cutoff import (
+    CutoffBudget,
+    CutoffController,
+    StepObservation,
+    budget_from_specification,
+)
 from agent_evals.environment.models import ActionStatus, EpisodeStatus
 from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.scientific.action_mapper import (
@@ -39,6 +51,35 @@ PBMC_MARKER_PANEL: dict[str, tuple[str, ...]] = {
     "Dendritic": ("FCER1A", "CST3", "CLEC10A"),
     "Megakaryocyte": ("PPBP", "PF4", "ITGA2B"),
 }
+
+
+#: Step ceiling applied only when neither the benchmark nor the caller declares
+#: one. Preserves the bound this baseline has always had, so a benchmark with no
+#: ``cutoff`` block stops it exactly where it used to. It is a fallback rather
+#: than a caller limit on purpose: passed as one it would be *stricter* than a
+#: declared ceiling and would silently cap a benchmark asking for 40 steps at 8.
+BASELINE_MAX_STEPS = 8
+
+
+def baseline_budget(
+    specification: BenchmarkSpecification, *, caller_max_steps: int | None = None
+) -> CutoffBudget:
+    """Resolve this baseline's cutoff budget, including its own step fallback.
+
+    A module-level function rather than four lines inside ``run`` so the fallback
+    rule can be asserted on its own. Wired inline, the only way to reach it would
+    be an end-to-end run, and the one thing that has to hold -- that the fallback
+    never overrides a declared ceiling -- is exactly what an end-to-end run against
+    a benchmark that declares one cannot show.
+    """
+    budget = budget_from_specification(
+        specification.cutoff,
+        specification.constraints,
+        caller_max_steps=caller_max_steps,
+    )
+    if budget.max_steps is None:
+        return budget.model_copy(update={"max_steps": BASELINE_MAX_STEPS})
+    return budget
 
 
 def _event(sequence: int, event_type: str, payload: dict[str, Any]) -> RawTraceEvent:
@@ -91,8 +132,40 @@ class RuleBasedSingleCellAgent:
             )
         )
         mapper = ScientificActionMapper()
-        max_steps = configuration.max_steps or 8
-        for step in range(max_steps):
+        # This baseline drives its own episode loop, so it needs its own
+        # controller: without one, the benchmark's declared cutoff block governs
+        # every agent *except* the reference agent the paper reports against.
+        controller = CutoffController(
+            baseline_budget(
+                environment.specification,
+                caller_max_steps=configuration.max_steps,
+            )
+        )
+        run_origin = monotonic()
+        cutoff_status: RunTerminationStatus | None = None
+        cutoff_reason: str | None = None
+        step = -1
+        while True:
+            cutoff = controller.decide(elapsed_seconds=monotonic() - run_origin)
+            if cutoff.stop:
+                termination = cutoff_termination(cutoff, environment)
+                cutoff_status = termination.status
+                cutoff_reason = termination.reason
+                if termination.failure_kind is not None:
+                    failures.append(
+                        AgentFailure(
+                            kind=termination.failure_kind, message=termination.reason
+                        )
+                    )
+                raw_events.append(
+                    _event(
+                        len(raw_events),
+                        "run_cutoff",
+                        {"cutoff": cutoff.model_dump(mode="json"), "reason": termination.reason},
+                    )
+                )
+                break
+            step += 1
             scientific = self._scientific_observation(snapshot)
             decision = self.choose(scientific, task, snapshot.state.episode_id, step)
             if decision is None:
@@ -123,6 +196,19 @@ class RuleBasedSingleCellAgent:
             outcome = await environment.step(intent)
             snapshot = outcome.observation
             reward = outcome.reward
+            step_succeeded = (
+                outcome.accepted
+                and outcome.execution is not None
+                and outcome.execution.status == ActionStatus.SUCCEEDED
+            )
+            controller.observe(
+                StepObservation(
+                    step=step + 1,
+                    succeeded=step_succeeded,
+                    signature=decision_signature(intent.action_id, intent.parameters),
+                    progress_delta=progress_delta(outcome),
+                )
+            )
             self.decision_trace.append(
                 {
                     "observation": scientific.model_dump(mode="json"),
@@ -143,11 +229,7 @@ class RuleBasedSingleCellAgent:
                     },
                 )
             )
-            if (
-                not outcome.accepted
-                or outcome.execution is None
-                or outcome.execution.status != ActionStatus.SUCCEEDED
-            ):
+            if not step_succeeded:
                 message = (
                     "; ".join(outcome.validation.errors)
                     if not outcome.accepted
@@ -164,10 +246,26 @@ class RuleBasedSingleCellAgent:
                     )
                 )
                 break
-        status = RunTerminationStatus.FAILED if failures else RunTerminationStatus.COMPLETED
+        # A cutoff status wins over the failure default because it is the more
+        # specific reading of the same stop: the controller ended the run and
+        # already said whether the artifact contract was met. Collapsing that to
+        # ``FAILED`` would report a run cut off for looping as a crash, and one
+        # that finished its contract and then hit the step ceiling as a failure.
+        if cutoff_status is not None:
+            status = cutoff_status
+            reason = cutoff_reason or "the run was stopped by its cutoff budget"
+        elif failures:
+            status, reason = RunTerminationStatus.FAILED, failures[0].message
+        else:
+            status, reason = (
+                RunTerminationStatus.COMPLETED,
+                "rule-based trajectory complete",
+            )
         final_snapshot = environment.terminate(
-            status=EpisodeStatus.FAILED if failures else EpisodeStatus.COMPLETED,
-            reason=failures[0].message if failures else "rule-based trajectory complete",
+            status=EpisodeStatus.COMPLETED
+            if status is RunTerminationStatus.COMPLETED
+            else EpisodeStatus.FAILED,
+            reason=reason,
         )
         finished_at = datetime.now(UTC)
         return build_agent_run(
@@ -181,9 +279,15 @@ class RuleBasedSingleCellAgent:
             started_at=started_at,
             finished_at=finished_at,
             termination_status=status,
-            termination_reason=failures[0].message if failures else "rule-based trajectory complete",
+            termination_reason=reason,
             failures=failures,
-            metadata={"policy": "deterministic-rule-based"},
+            metadata={
+                "policy": "deterministic-rule-based",
+                # Archived for the same reason the universal loop archives it: a
+                # budget computed correctly every run and read by nobody cannot be
+                # audited, and this is the only conversion into the stored run.
+                "cutoff": controller.report().model_dump(mode="json"),
+            },
         )
 
     def choose(
@@ -287,4 +391,4 @@ class RuleBasedSingleCellAgent:
         return ScientificObservation.model_validate(value.value)
 
 
-__all__ = ["RuleBasedSingleCellAgent"]
+__all__ = ["BASELINE_MAX_STEPS", "RuleBasedSingleCellAgent", "baseline_budget"]

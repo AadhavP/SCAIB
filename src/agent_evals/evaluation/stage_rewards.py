@@ -23,6 +23,14 @@ from __future__ import annotations
 from typing import Any
 
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.core.progress_keys import (
+    PROGRESS_COMPARABLE_KEY,
+    PROGRESS_DELTA_KEY,
+    PROGRESS_LIMITATIONS_KEY,
+    PROGRESS_PREFIX,
+    PROGRESS_STAGE_KEY,
+    PROGRESS_STATE_KEY,
+)
 from agent_evals.environment.models import (
     ActionExecutionResult,
     EpisodeSnapshot,
@@ -42,11 +50,6 @@ from agent_evals.evaluation.progress import (
 from agent_evals.evaluation.scientific import ScientificMetricEngine
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.metrics.results import MetricStatus
-
-#: Prefix for the progress keys added to a reward record. Namespaced so a reader
-#: of persisted results can tell evaluator-side evidence from the observable
-#: quantities the delegate scored the step on.
-PROGRESS_PREFIX = "progress."
 
 
 class StageAwareRewardEvaluator:
@@ -102,13 +105,11 @@ class StageAwareRewardEvaluator:
                 },
                 "metadata": {
                     **reward.metadata,
-                    f"{PROGRESS_PREFIX}stage": (
+                    PROGRESS_STAGE_KEY: (
                         signal.stage.value if signal.stage is not None else None
                     ),
-                    f"{PROGRESS_PREFIX}comparable_metrics": list(
-                        signal.comparable_metrics
-                    ),
-                    f"{PROGRESS_PREFIX}limitations": list(signal.limitations),
+                    PROGRESS_COMPARABLE_KEY: list(signal.comparable_metrics),
+                    PROGRESS_LIMITATIONS_KEY: list(signal.limitations),
                 },
             }
         )
@@ -118,9 +119,9 @@ class StageAwareRewardEvaluator:
         """Expose only the numbers that exist, so absence stays distinguishable."""
         values: dict[str, float] = {}
         if signal.scientific_state is not None:
-            values[f"{PROGRESS_PREFIX}scientific_state"] = signal.scientific_state
+            values[PROGRESS_STATE_KEY] = signal.scientific_state
         if signal.delta is not None:
-            values[f"{PROGRESS_PREFIX}delta"] = signal.delta
+            values[PROGRESS_DELTA_KEY] = signal.delta
         return values
 
     def _record(self, step: int, result: ActionExecutionResult) -> ProgressSignal:

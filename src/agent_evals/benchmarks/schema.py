@@ -587,6 +587,63 @@ class ScoringSpecification(SpecificationModel):
         return self
 
 
+class CutoffSpecification(SpecificationModel):
+    """When this benchmark stops a run, independently of what the agent says.
+
+    Three mechanisms, deliberately separate. Hard budgets bound what a run may
+    consume. The stagnation window bounds how long a run may continue without
+    measurable scientific progress. The repetition and consecutive-failure
+    limits bound work that is being repeated or that cannot succeed.
+
+    Most fields default to undeclared, because a cutoff that fires on a correct
+    run is worse than one that never fires: it turns a benchmark result into a
+    statement about the harness. ``max_consecutive_failures`` is the exception --
+    it cannot fire on a run whose steps succeed.
+
+    Note ``max_wall_time_seconds`` is not a duplicate of
+    ``constraints.max_runtime_seconds``. The constraint is checked against
+    executor-reported time and fails an individual *step*; this bounds the whole
+    run's clock, including the time an agent spends deliberating, and *stops*
+    it. When undeclared it falls back to the constraint's value, which is at
+    least a ceiling the benchmark author already agreed to.
+    """
+
+    max_steps: int | None = Field(default=None, gt=0)
+    max_wall_time_seconds: float | None = Field(default=None, gt=0)
+    max_cost_usd: float | None = Field(default=None, gt=0)
+    max_total_tokens: int | None = Field(default=None, gt=0)
+    stagnation_window: int | None = Field(default=None, gt=0)
+    stagnation_epsilon: float = Field(default=0.01, ge=0)
+    patience_steps: int = Field(default=2, ge=0)
+    max_repeated_decisions: int | None = Field(default=None, gt=0)
+    max_consecutive_failures: int | None = Field(default=3, gt=0)
+
+    @model_validator(mode="after")
+    def _stagnation_is_fully_declared(self) -> Self:
+        """Reject an epsilon or patience declared without a window to use it.
+
+        Both are inert without a window, so accepting them would let a benchmark
+        author believe a stagnation cutoff was configured when none was armed --
+        the silent-no-op failure mode, caught at load time instead.
+        """
+        if self.stagnation_window is not None:
+            return self
+        declared = [
+            name
+            for name, value, default in (
+                ("stagnation_epsilon", self.stagnation_epsilon, 0.01),
+                ("patience_steps", self.patience_steps, 2),
+            )
+            if value != default
+        ]
+        if declared:
+            raise ValueError(
+                f"{', '.join(declared)} has no effect without stagnation_window; "
+                "declare the window to arm the stagnation cutoff"
+            )
+        return self
+
+
 class BenchmarkMetadata(SpecificationModel):
     """Human-facing identity, discovery, and citation metadata."""
 
@@ -631,6 +688,7 @@ class BenchmarkSpecification(SpecificationModel):
     artifacts: list[ArtifactSpecification] = Field(default_factory=list)
     constraints: ConstraintSpecification = Field(default_factory=ConstraintSpecification)
     scoring: ScoringSpecification = Field(default_factory=ScoringSpecification)
+    cutoff: CutoffSpecification = Field(default_factory=CutoffSpecification)
     tasks: list[TaskSpecification] = Field(default_factory=list)
 
     _schema_version = field_validator("schema_version")(
@@ -862,6 +920,7 @@ __all__ = [
     "ConstraintSpec",
     "ConstraintSpecification",
     "Contributor",
+    "CutoffSpecification",
     "DatasetSpec",
     "DatasetSpecification",
     "DecisionEvaluationSpecification",
@@ -886,6 +945,7 @@ __all__ = [
     "RewardComponent",
     "RewardSpec",
     "RewardSpecification",
+    "ScoringSpecification",
     "TaskSpec",
     "TaskSpecification",
     "TerminationCondition",

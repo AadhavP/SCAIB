@@ -96,6 +96,12 @@ class RunTerminationStatus(StrEnum):
     #: it was being flattened to ``FAILED`` on the way into the archive, so an
     #: agent that quit early was indistinguishable from one that crashed.
     INCOMPLETE = "incomplete"
+    #: The controller stopped the run because it was no longer making measurable
+    #: scientific progress, or was repeating work. Distinct from :attr:`TIMEOUT`,
+    #: which means a budget was consumed: a stagnated run still had budget and was
+    #: not using it productively, and reading the two as one would make an agent
+    #: that looped indistinguishable from one that ran out of room to finish.
+    STAGNATED = "stagnated"
 
 
 class FailureKind(StrEnum):
@@ -113,6 +119,9 @@ class FailureKind(StrEnum):
     #: required artifacts were not there. Nothing errored, so filing this under
     #: :attr:`AGENT_ERROR` misattributed a premature stop to a malfunction.
     INCOMPLETE_SUBMISSION = "incomplete_submission"
+    #: The run was stopped for making no measurable progress, or for repeating
+    #: itself. Not a :attr:`RESOURCE_LIMIT`: nothing was exhausted.
+    STAGNATION = "stagnation"
     UNKNOWN = "unknown"
 
 

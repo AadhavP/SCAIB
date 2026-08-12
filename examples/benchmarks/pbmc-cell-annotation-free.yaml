@@ -295,6 +295,30 @@ constraints:
   allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, scikit-learn]
   deterministic: true
   random_seed: 42
+# `max_repeated_decisions` is the one opt-in cutoff this tier declares, and
+# declaring it here is what keeps it from being inert everywhere. A decision
+# signature is the action plus its parameters, and on this tier the parameters are
+# the whole script. Re-running a byte-identical script is a loop, not a choice --
+# unlike the typed tier, where the same action name against a changed dataset is
+# legitimately different work.
+#
+# `stagnation_window` is left undeclared, and for the same measured reason as the
+# typed benchmark: `_load_metric_profile` resolves this benchmark to the
+# annotation profile too, whose biology domain is a geometric mean containing
+# `cell_annotation.rare_recall`. That metric currently normalizes to exactly 0.0
+# unless the agent's label spellings match the reference vocabulary, and a single
+# 0.0 annihilates the product -- so `S_t` is pinned at 0.0 and every `dS` is a
+# measured 0.0. Arming the window on a degenerate scale would cut off correct
+# runs. Arm it once the metric is fixed.
+#
+# `max_wall_time_seconds` exceeds `constraints.max_runtime_seconds` on purpose:
+# the constraint bounds time inside the executor, this bounds the whole run
+# including the agent's deliberation, which is the larger quantity.
+cutoff:
+  max_steps: 40
+  max_wall_time_seconds: 5400
+  max_repeated_decisions: 3
+  max_consecutive_failures: 4
 tasks:
   - id: cell-annotation-free
     name: PBMC cell-type annotation with an agent-authored workflow

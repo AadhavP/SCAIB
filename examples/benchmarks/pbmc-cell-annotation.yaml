@@ -454,6 +454,33 @@ constraints:
   allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy]
   deterministic: true
   random_seed: 42
+# Declared so the controller is enforcing a number this benchmark chose rather
+# than a harness fallback. The typed catalog is eight actions and a step may
+# legitimately be retried, so twenty leaves room for a retry per stage without
+# letting a loop spend an entire budget.
+#
+# `max_wall_time_seconds` deliberately exceeds `constraints.max_runtime_seconds`:
+# the constraint bounds time inside the executor, this bounds the whole run
+# including the agent's deliberation, which is the larger quantity.
+#
+# `max_repeated_decisions` is left undeclared. On this tier a decision signature
+# is an action name plus typed parameters, and re-running `cluster` at the same
+# resolution against a dataset a previous step changed is legitimately different
+# work.
+#
+# `stagnation_window` is left undeclared on purpose, and this is a blocker rather
+# than a preference. The biology domain is a geometric mean that includes
+# `cell_annotation.rare_recall`, which currently normalizes to exactly 0.0 for
+# every agent whose label spellings do not match the reference vocabulary. A
+# single 0.0 annihilates the product, so `S_t` is pinned at 0.0 for the whole run
+# and every `dS` is a measured 0.0 -- verified on a real run, where all five
+# measured deltas were 0.0 while `clustering.ari` was 0.81 and moving. The
+# controller cannot tell a degenerate scale from a genuinely flat one, so arming
+# the window here would cut off correct runs. Arm it once the metric is fixed.
+cutoff:
+  max_steps: 20
+  max_wall_time_seconds: 3600
+  max_consecutive_failures: 3
 tasks:
   - id: cell-annotation
     name: PBMC cell-type annotation
