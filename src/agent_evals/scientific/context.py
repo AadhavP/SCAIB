@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_evals.core.reference_columns import (
+    AGENT_CLUSTER_COLUMNS,
     AGENT_PREDICTION_COLUMNS,
     RESERVED_REFERENCE_COLUMNS,
 )
@@ -59,10 +60,30 @@ class ScientificContext:
 
     def agent_prediction_column(self) -> str | None:
         """Return the agent's prediction column, or None when it produced none."""
+        return self._agent_column(AGENT_PREDICTION_COLUMNS)
+
+    def agent_cluster_column(self) -> str | None:
+        """Return the agent's grouping column, or None when it produced none.
+
+        Resolved here rather than at the call site so the evaluator cannot look
+        for a name the operations never write. That mismatch is not hypothetical:
+        it silently disabled ``clustering.ari`` for the entire life of the typed
+        path before this method existed.
+        """
+        return self._agent_column(AGENT_CLUSTER_COLUMNS)
+
+    def _agent_column(self, candidates: Iterable[str]) -> str | None:
+        """Return the first candidate this run's agent both wrote and left behind.
+
+        Both halves are required. ``agent_produced_columns`` alone would accept a
+        column an agent wrote and a later step dropped, and membership in ``obs``
+        alone would accept a column the dataset shipped -- which for a grouping
+        column means scoring reference biology as the agent's own work.
+        """
         return next(
             (
                 column
-                for column in AGENT_PREDICTION_COLUMNS
+                for column in candidates
                 if column in self.agent_produced_columns and column in self.adata.obs
             ),
             None,

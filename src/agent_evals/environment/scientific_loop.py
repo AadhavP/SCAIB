@@ -51,14 +51,6 @@ from agent_evals.evaluation import (
     compute_global_agent_score,
 )
 from agent_evals.evaluation.methods import method_score
-from agent_evals.evaluation.metrics import (
-    ArtifactBundle,
-    EvaluationContext,
-    ReferenceBundle,
-)
-from agent_evals.evaluation.metrics import (
-    ScientificMetricEngine as GenericScientificMetricEngine,
-)
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
 from agent_evals.evaluation.models import MethodScore
 from agent_evals.evaluation.profiles import load_metric_profile, pbmc_annotation_profile
@@ -72,6 +64,7 @@ from agent_evals.evaluators.models import MetricResult
 from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
 from agent_evals.metrics import MetricGroup, MetricWeight
 from agent_evals.metrics.context import ScientificMetricContext
+from agent_evals.metrics.results import MetricStatus
 from agent_evals.scientific.artifacts.storage import LocalArtifactStore
 from agent_evals.scientific.artifacts.validation import ArtifactRuleValidator
 from agent_evals.scientific.context import ScientificContext
@@ -646,14 +639,7 @@ class ScientificLoop:
             },
         )
         candidate_artifacts: dict[str, Any] = {"prediction": prediction}
-        cluster_column = next(
-            (
-                column
-                for column in ("leiden", "louvain")
-                if column in context.agent_produced_columns and column in adata.obs
-            ),
-            None,
-        )
+        cluster_column = context.agent_cluster_column()
         if cluster_column is not None:
             candidate_artifacts["cluster_labels"] = (
                 adata.obs[cluster_column].astype(str).to_numpy()
@@ -714,17 +700,6 @@ class ScientificLoop:
             metric_context,
             groups=groups,
         )
-        generic_results = GenericScientificMetricEngine().evaluate(
-            metric_ids,
-            ArtifactBundle(values=candidate_artifacts),
-            ReferenceBundle(values=reference_artifacts),
-            EvaluationContext(
-                metadata=metric_context.metadata,
-                available_artifacts=set(candidate_artifacts),
-                available_metadata=set(metric_context.metadata),
-                payload=metric_context,
-            ),
-        )
         for result in results:
             result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
         robustness = RobustnessEvaluator().evaluate(
@@ -739,13 +714,18 @@ class ScientificLoop:
         )
         metric_inputs = [
             MetricScoreInput(
-                name=result.metric_name,
+                # ``metric_id`` is the dotted registry id the profiles key on;
+                # ``metric_name`` on this model is the human-readable title, and
+                # feeding it here would make every profile lookup miss silently.
+                name=result.metric_id,
                 value=result.normalized_value,
-                applicable=result.applicable,
-                structurally_ineligible=result.status.value == "structurally_ineligible",
+                applicable=result.eligible,
+                structurally_ineligible=(
+                    result.status is MetricStatus.STRUCTURALLY_INELIGIBLE
+                ),
                 status=result.status.value,
             )
-            for result in generic_results
+            for result in results
         ]
         domain_scores = []
         for domain_name, group in metric_profile.metric_groups.items():

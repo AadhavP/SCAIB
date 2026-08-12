@@ -35,7 +35,23 @@ RESERVED_REFERENCE_COLUMNS = frozenset(REFERENCE_LABEL_COLUMNS) | {"reference_la
 #: Observation columns an agent may write to record its own predictions.
 AGENT_PREDICTION_COLUMNS = ("predicted_labels", "predicted_cell_type")
 
+#: Observation columns an agent may write its own unsupervised grouping to, in
+#: the order the evaluator prefers them. ``predicted_clusters`` is what the typed
+#: clustering operation writes; ``leiden`` and ``louvain`` are what an agent
+#: running its own Scanpy under free execution gets by default, and they are
+#: admissible *only* because they are checked against
+#: ``agent_produced_columns`` -- a dataset that ships its own ``louvain`` is
+#: reference biology, not a prediction.
+#:
+#: This list is the one that proved why the vocabulary has to be shared. The
+#: evaluator looked for ``("leiden", "louvain")`` while the operation wrote
+#: ``predicted_clusters``, so ``clustering.ari`` never found its input, failed to
+#: a score of 0.0, and zeroed the biology domain -- and therefore the whole
+#: benchmark score -- on every typed run since the first commit. Nothing raised.
+AGENT_CLUSTER_COLUMNS = ("predicted_clusters", "leiden", "louvain")
+
 __all__ = [
+    "AGENT_CLUSTER_COLUMNS",
     "AGENT_PREDICTION_COLUMNS",
     "REFERENCE_LABEL_COLUMNS",
     "RESERVED_REFERENCE_COLUMNS",
