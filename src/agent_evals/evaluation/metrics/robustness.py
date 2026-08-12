@@ -17,7 +17,13 @@ class RobustnessReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     seeds: list[int]
-    seed_stability: float = Field(ge=0, le=1)
+    #: ``None`` when no two replicates could be compared. This was ``1.0``, which
+    #: is a perfect stability score awarded for never having been tested: the live
+    #: loop passes a single replicate, so every pairwise dimension below is empty
+    #: and the old fallback handed out the robustness domain's full weight for
+    #: free. Measuring it needs replicates, not a better default, so until they
+    #: are run the honest report is that nothing was measured.
+    seed_stability: float | None = Field(default=None, ge=0, le=1)
     clustering_pairwise_ari: float | None = Field(default=None, ge=0, le=1)
     embedding_neighbor_overlap: float | None = Field(default=None, ge=0, le=1)
     annotation_prediction_agreement: float | None = Field(default=None, ge=0, le=1)
@@ -36,7 +42,7 @@ class RobustnessEvaluator:
         labels = self._pairwise_label_agreement(replicates)
         artifacts = self._pairwise_artifact_similarity(replicates)
         values = [value for value in (aris, neighbors, labels, artifacts) if value is not None]
-        stability = sum(values) / len(values) if values else 1.0
+        stability = sum(values) / len(values) if values else None
         return RobustnessReport(
             seeds=seeds,
             seed_stability=stability,
@@ -44,7 +50,11 @@ class RobustnessEvaluator:
             embedding_neighbor_overlap=neighbors,
             annotation_prediction_agreement=labels,
             artifact_similarity=artifacts,
-            formula="mean(available_pairwise_stability_metrics)",
+            formula=(
+                "mean(available_pairwise_stability_metrics)"
+                if values
+                else "unmeasured: fewer than two comparable replicates"
+            ),
         )
 
     @staticmethod

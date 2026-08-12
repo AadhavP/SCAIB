@@ -78,9 +78,19 @@ class MethodSelectionEvaluator:
         if profile is None and self.ontology is not None:
             profile = self.ontology.get(decision.decision_category)
         allowed = profile.allowed_methods if profile is not None else []
-        if not allowed or decision.chosen_method is None:
-            appropriateness = 0.5
-            evidence = ["no benchmark method restriction was declared"]
+        appropriateness: float | None
+        if not allowed:
+            appropriateness = None
+            evidence = [
+                "no benchmark method restriction was declared, so method "
+                "appropriateness is unmeasured rather than neutral"
+            ]
+        elif decision.chosen_method is None:
+            appropriateness = None
+            evidence = [
+                "the decision named no method, so appropriateness against the "
+                "declared list is unmeasured"
+            ]
         elif decision.chosen_method in allowed:
             appropriateness = 1.0
             evidence = [f"method '{decision.chosen_method}' is declared for the decision category"]
@@ -88,15 +98,27 @@ class MethodSelectionEvaluator:
             appropriateness = 0.0
             evidence = [f"method '{decision.chosen_method}' is outside the declared allowed methods"]
         parameter_quality = self._parameter_quality(decision, profile, evidence)
-        execution_quality = self._execution_quality(decision, final_results)
-        overall = (appropriateness + parameter_quality + execution_quality) / 3
+        execution_quality = self._execution_quality(decision, final_results, evidence)
+        components = {
+            "appropriateness": appropriateness,
+            "parameter_quality": parameter_quality,
+            "execution_quality": execution_quality,
+        }
+        measured = [value for value in components.values() if value is not None]
         return MethodScore(
             decision_id=decision.decision_id,
             method=decision.chosen_method,
             appropriateness=appropriateness,
             parameter_quality=parameter_quality,
             execution_quality=execution_quality,
-            overall=overall,
+            # The mean of what was measured, not of three slots two of which may
+            # hold placeholders. An unanswerable component is dropped and the rest
+            # re-weighted, the same rule the trajectory and local-reward
+            # evaluators follow.
+            overall=sum(measured) / len(measured) if measured else None,
+            unmeasured_components=[
+                name for name, value in components.items() if value is None
+            ],
             evidence=evidence,
         )
 
@@ -105,9 +127,20 @@ class MethodSelectionEvaluator:
         decision: ScientificDecision,
         profile: DecisionProfile | None,
         evidence: list[str],
-    ) -> float:
+    ) -> float | None:
+        """Score declared parameters, or report that none were declared.
+
+        Returning 1.0 for a category with no declared ranges was the worst of the
+        substitutions: it paid a full third of the selection score for a question
+        the benchmark never asked, and it paid it to every agent equally, so the
+        component carried no signal while still carrying weight.
+        """
         if profile is None or not profile.parameter_ranges:
-            return 1.0
+            evidence.append(
+                "no parameter ranges were declared for this category, so "
+                "parameter quality is unmeasured"
+            )
+            return None
         scores: list[float] = []
         for name, bounds in profile.parameter_ranges.items():
             value = decision.chosen_parameters.get(name)
@@ -128,13 +161,21 @@ class MethodSelectionEvaluator:
                 and (maximum is None or value <= maximum)
             )
             scores.append(1.0 if valid else 0.0)
-        return sum(scores) / len(scores) if scores else 1.0
+        return sum(scores) / len(scores) if scores else None
 
     @staticmethod
     def _execution_quality(
         decision: ScientificDecision,
         final_results: Sequence[MetricResult] | Mapping[str, float] | None,
-    ) -> float:
+        evidence: list[str],
+    ) -> float | None:
+        """Score the observed consequence, or report that nothing was scoreable.
+
+        Empty metric results used to yield ``0.0`` -- the mirror of the other two
+        substitutions, and just as wrong. A step taken before any metric could be
+        answered was recorded as having executed badly rather than as not yet
+        having been assessed.
+        """
         if final_results is None:
             return 1.0 if decision.execution_status == ActionStatus.SUCCEEDED else 0.0
         if isinstance(final_results, Mapping):
@@ -145,7 +186,13 @@ class MethodSelectionEvaluator:
                 for result in final_results
                 if result.normalized_value is not None
             ]
-        return sum(values) / len(values) if values else 0.0
+        if not values:
+            evidence.append(
+                "no metric produced a value against this run, so execution "
+                "quality is unmeasured"
+            )
+            return None
+        return sum(values) / len(values)
 
 
 __all__ = ["MethodEvaluator", "MethodSelectionEvaluator", "method_score"]

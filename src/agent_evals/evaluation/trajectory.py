@@ -31,16 +31,28 @@ _QUALITY_WEIGHTS: tuple[tuple[str, float], ...] = (
 )
 
 
-def _weighted_quality(terms: Mapping[str, float | None]) -> tuple[float, str]:
-    """Combine the measured terms and describe the combination that was used."""
+def _weighted_quality(terms: Mapping[str, float | None]) -> tuple[float, str, float]:
+    """Combine the measured terms, describe the combination, and report the gap.
+
+    The third element is the share of declared weight that could not be measured.
+    It is reported rather than merely absorbed by renormalization, because a
+    quality of 0.84 computed from every term and the same 0.84 computed from two
+    of seven are not equally trustworthy claims, and only the reported gap tells
+    a reader which one they are looking at. It becomes ``ineligible_fraction_T``
+    in the run's score confidence.
+    """
     measured = {
         name: (weight, terms[name])
         for name, weight in _QUALITY_WEIGHTS
         if terms.get(name) is not None
     }
     total_weight = sum(weight for weight, _ in measured.values())
+    declared_weight = sum(weight for _, weight in _QUALITY_WEIGHTS)
     if not measured or total_weight <= 0:
-        return 0.0, "no trajectory term was measurable"
+        return 0.0, "no trajectory term was measurable", 1.0
+    unmeasured = (
+        0.0 if declared_weight <= 0 else 1.0 - (total_weight / declared_weight)
+    )
     quality = sum(
         (weight / total_weight) * float(value)
         for weight, value in measured.values()
@@ -49,7 +61,7 @@ def _weighted_quality(terms: Mapping[str, float | None]) -> tuple[float, str]:
     formula = " + ".join(
         f"{weight / total_weight:.2f}*{name}" for name, (weight, _) in measured.items()
     )
-    return max(0.0, min(1.0, quality)), formula
+    return max(0.0, min(1.0, quality)), formula, max(0.0, min(1.0, unmeasured))
 
 
 class TrajectoryEvaluator:
@@ -122,7 +134,7 @@ class TrajectoryEvaluator:
         alignment = max(0.0, min(1.0, outcome if outcome is not None else 0.0))
         short_term_gain, long_term_damage = self._counterproductive_signal(local_rewards, outcome)
         counterproductive_score = 1.0 - long_term_damage
-        quality, formula = _weighted_quality(
+        quality, formula, unmeasured_weight = _weighted_quality(
             {
                 "protocol": protocol,
                 "consistency": consistency_score,
@@ -210,6 +222,7 @@ class TrajectoryEvaluator:
             decision_regret=regret,
             alternative_comparisons=comparisons,
             trajectory_quality=quality,
+            unmeasured_weight=unmeasured_weight,
             step_table=step_table,
             formula=formula,
         )

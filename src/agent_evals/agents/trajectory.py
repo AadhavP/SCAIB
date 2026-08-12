@@ -89,6 +89,13 @@ class RunTerminationStatus(StrEnum):
     CANCELLED = "cancelled"
     UNAVAILABLE = "unavailable"
     INVALID_CONFIGURATION = "invalid_configuration"
+    #: The agent stopped of its own accord and the declared artifact contract was
+    #: not met. Distinct from :attr:`FAILED`, which is for a run that broke: an
+    #: incomplete run executed cleanly and simply stopped too early, and the two
+    #: call for different reading. The runtime already produced this verdict and
+    #: it was being flattened to ``FAILED`` on the way into the archive, so an
+    #: agent that quit early was indistinguishable from one that crashed.
+    INCOMPLETE = "incomplete"
 
 
 class FailureKind(StrEnum):
@@ -102,6 +109,10 @@ class FailureKind(StrEnum):
     WORKSPACE_ERROR = "workspace_error"
     RESOURCE_LIMIT = "resource_limit"
     TIMEOUT = "timeout"
+    #: A verified-false completion claim: the agent said it was done and the
+    #: required artifacts were not there. Nothing errored, so filing this under
+    #: :attr:`AGENT_ERROR` misattributed a premature stop to a malfunction.
+    INCOMPLETE_SUBMISSION = "incomplete_submission"
     UNKNOWN = "unknown"
 
 

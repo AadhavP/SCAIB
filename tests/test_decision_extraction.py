@@ -60,7 +60,10 @@ from agent_evals.environment.models import utc_now
 from agent_evals.environment.ports import ExecutionContext
 from agent_evals.environment.scientific_loop import _score_formula, _unmeasured_or
 from agent_evals.evaluation.decisions import DecisionEvaluator
-from agent_evals.evaluation.global_score import compute_global_agent_score
+from agent_evals.evaluation.global_score import (
+    ScoreWeights,
+    compute_global_agent_score,
+)
 
 EXAMPLES = Path(__file__).parents[1] / "examples" / "benchmarks"
 FREE_SPECIFICATION = load_benchmark(EXAMPLES / "pbmc-cell-annotation-free.yaml")
@@ -491,13 +494,18 @@ def test_no_decisions_yields_no_global_score_rather_than_a_free_one() -> None:
 
     scored = compute_global_agent_score(0.8, 0.5, 1.0)
     assert scored is not None
-    assert scored.value == pytest.approx(0.4)
+    assert scored.value == pytest.approx((0.8 * 0.5 * 1.0) ** (1 / 3))
 
 
 def test_the_persisted_formula_names_the_dimension_it_could_not_measure() -> None:
     """A reader of the result JSON must not have to guess why there is no score."""
-    complete = _score_formula(scientific_outcome=0.8, decision=0.5, selection=0.9)
-    partial = _score_formula(scientific_outcome=0.8, decision=None, selection=None)
+    weights = ScoreWeights.neutral()
+    complete = _score_formula(
+        weights, scientific_outcome=0.8, decision=0.5, selection=0.9
+    )
+    partial = _score_formula(
+        weights, scientific_outcome=0.8, decision=None, selection=None
+    )
 
     assert "not computed" not in complete
     assert "not computed: decision_score, method_selection_score unmeasured" in partial

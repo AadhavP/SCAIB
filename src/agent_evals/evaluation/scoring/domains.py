@@ -32,11 +32,16 @@ def aggregate_domains(domains: list[DomainScore]) -> ScientificScore:
                 sum(weight * math.log(max(score or 0.0, 1e-12)) for weight, score in included)
                 / denominator
             )
-    return ScientificScore(
-        value=value,
-        domains=domains,
-        formula="weighted_geometric_mean(" + ", ".join(domain.domain for domain in domains) + ")",
-    )
+    combined = [domain.domain for domain in domains if domain.value is not None]
+    dropped = [domain.domain for domain in domains if domain.value is None]
+    # Named the full domain list regardless of which ones were combined, so a run
+    # whose robustness domain went unmeasured published a formula claiming it had
+    # been weighed. The weights are renormalized over ``included`` above, so the
+    # string was describing a computation that did not happen.
+    formula = "weighted_geometric_mean(" + ", ".join(combined) + ")"
+    if dropped:
+        formula += " excluding_unmeasured(" + ", ".join(dropped) + ")"
+    return ScientificScore(value=value, domains=domains, formula=formula)
 
 
 __all__ = ["ScientificScore", "aggregate_domains"]

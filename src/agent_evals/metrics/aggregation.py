@@ -68,7 +68,7 @@ def aggregate_group(
     excluded: list[str] = []
     for metric in group.metrics:
         result = by_id.get(metric.metric_id)
-        if result is None or result.status == MetricStatus.STRUCTURALLY_INELIGIBLE:
+        if result is None or result.status == MetricStatus.INELIGIBLE:
             excluded.append(metric.metric_id)
             continue
         score = result.normalized_value

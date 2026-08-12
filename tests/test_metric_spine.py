@@ -211,7 +211,10 @@ def test_without_a_grouping_clustering_ari_fails_rather_than_computing(
         ["clustering.ari"], metric_context
     )
 
-    assert results[0].status is MetricStatus.FAILED
+    # ``MISSING`` rather than the old undifferentiated ``FAILED``: the input the
+    # metric needed was never produced, which is a different finding from a
+    # backend that crashed on an input that was there.
+    assert results[0].status is MetricStatus.MISSING
     assert results[0].missing_artifacts == ["cluster_labels"]
     assert results[0].normalized_value == 0.0
 

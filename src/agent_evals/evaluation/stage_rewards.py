@@ -189,7 +189,7 @@ class StageAwareRewardEvaluator:
         return {
             item.metric_id: float(item.normalized_value)
             for item in results
-            if item.status is MetricStatus.COMPUTED and item.normalized_value is not None
+            if item.status is MetricStatus.SCORED and item.normalized_value is not None
         }
 
     def _agent_columns(self) -> frozenset[str]:

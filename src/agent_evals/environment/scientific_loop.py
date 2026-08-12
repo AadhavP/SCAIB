@@ -50,8 +50,11 @@ from agent_evals.evaluation import (
     MethodSelectionEvaluator,
     ScientificEvaluation,
     ScientificMetricEngine,
+    ScoreWeights,
     TrajectoryEvaluator,
     compute_global_agent_score,
+    compute_score_confidence,
+    describe_score,
 )
 from agent_evals.evaluation.candidates import (
     build_candidate_artifacts,
@@ -78,7 +81,6 @@ from agent_evals.evaluators.models import MetricResult
 from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
 from agent_evals.metrics import MetricGroup, MetricWeight
 from agent_evals.metrics.context import ScientificMetricContext
-from agent_evals.metrics.results import MetricStatus
 from agent_evals.scientific.artifacts.storage import LocalArtifactStore
 from agent_evals.scientific.artifacts.validation import ArtifactRuleValidator
 from agent_evals.scientific.context import ScientificContext
@@ -184,9 +186,13 @@ class AgentScientificRun(BaseModel):
                     "",
                     f"- Scientific outcome score: {_unmeasured_or(evaluation.scientific_outcome_score)}",
                     *[
-                        f"- {domain.domain.title()} score: {domain.value}"
+                        # ``unmeasured`` rather than the bare ``None`` this used to
+                        # print, which reads as a crash rather than as a gap.
+                        f"- {domain.domain.title()} score: "
+                        f"{_unmeasured_or(domain.value)}"
                         for domain in evaluation.domain_scores
                     ],
+                    f"- Outcome formula: `{evaluation.scientific_outcome_formula}`",
                     f"- Decision score: {_unmeasured_or(evaluation.decision_score)}",
                     f"- Method score: {evaluation.method_score}",
                     f"- Decision quality multiplier: "
@@ -232,8 +238,11 @@ class AgentScientificRun(BaseModel):
                 ]
             )
             lines.extend(
-                f"| {item.decision_id} | {item.method or '-'} | {item.appropriateness:.3f} | "
-                f"{item.parameter_quality:.3f} | {item.execution_quality:.3f} | {item.overall:.3f} |"
+                f"| {item.decision_id} | {item.method or '-'} | "
+                f"{_score_cell(item.appropriateness)} | "
+                f"{_score_cell(item.parameter_quality)} | "
+                f"{_score_cell(item.execution_quality)} | "
+                f"{_score_cell(item.overall)} |"
                 for item in evaluation.method_selection_evaluations
             )
             lines.extend(
@@ -292,9 +301,12 @@ class AgentScientificRun(BaseModel):
                         "### Robustness",
                         "",
                         f"- Seeds: {', '.join(str(seed) for seed in evaluation.robustness.seeds)}",
-                        f"- Seed stability: {evaluation.robustness.seed_stability}",
-                        f"- Clustering pairwise ARI: {evaluation.robustness.clustering_pairwise_ari}",
-                        f"- Prediction agreement: {evaluation.robustness.annotation_prediction_agreement}",
+                        "- Seed stability: "
+                        f"{_unmeasured_or(evaluation.robustness.seed_stability)}",
+                        "- Clustering pairwise ARI: "
+                        f"{_unmeasured_or(evaluation.robustness.clustering_pairwise_ari)}",
+                        "- Prediction agreement: "
+                        f"{_unmeasured_or(evaluation.robustness.annotation_prediction_agreement)}",
                     ]
                 )
         return "\n".join(lines) + "\n"
@@ -724,34 +736,22 @@ class ScientificLoop:
             ]
         )
         metric_inputs = [
-            MetricScoreInput(
-                # ``metric_id`` is the dotted registry id the profiles key on;
-                # ``metric_name`` on this model is the human-readable title, and
-                # feeding it here would make every profile lookup miss silently.
-                name=result.metric_id,
-                value=result.normalized_value,
-                applicable=result.eligible,
-                structurally_ineligible=(
-                    result.status is MetricStatus.STRUCTURALLY_INELIGIBLE
-                ),
-                status=result.status.value,
-            )
-            for result in results
+            MetricScoreInput.from_metric_result(result) for result in results
         ]
         domain_scores = []
         for domain_name, group in metric_profile.metric_groups.items():
             inputs = list(metric_inputs)
             if group.external_score == "robustness.seed_stability":
                 inputs.append(
-                    MetricScoreInput(
-                        name=group.external_score,
-                        value=robustness.seed_stability,
+                    MetricScoreInput.from_external_score(
+                        group.external_score, robustness.seed_stability
                     )
                 )
             domain_scores.append(
                 WeightedGeometricAggregator().aggregate(domain_name, group, inputs)
             )
-        scientific_score = aggregate_domains(domain_scores).value
+        scientific = aggregate_domains(domain_scores)
+        scientific_score = scientific.value
         decisions = DecisionEvaluator().evaluate(agent_run, task)
         methods = MethodEvaluator().evaluate(agent_run, task, metric_ids, scientific_score)
         local_reward_values = [reward.value for reward in agent_run.final_environment_state.state.rewards]
@@ -822,9 +822,15 @@ class ScientificLoop:
                     mode="json"
                 )
             )
+        # Only the selections that produced a number. A decision whose every
+        # component was unanswerable contributes nothing rather than dragging the
+        # mean toward a value the harness never observed.
+        scored_selections = [
+            item.overall for item in selection_scores if item.overall is not None
+        ]
         selection_value = (
-            sum(item.overall for item in selection_scores) / len(selection_scores)
-            if selection_scores
+            sum(scored_selections) / len(scored_selections)
+            if scored_selections
             else None
         )
         decision_quality = (
@@ -832,10 +838,24 @@ class ScientificLoop:
             if decision_value is None or selection_value is None
             else decision_value * selection_value
         )
+        weights = ScoreWeights(
+            outcome=specification.scoring.outcome_weight,
+            decision=specification.scoring.decision_weight,
+            trajectory=specification.scoring.trajectory_weight,
+        )
         global_score = compute_global_agent_score(
             scientific_score,
             decision_quality,
             trajectory.trajectory_quality,
+            weights=weights,
+            confidence=compute_score_confidence(
+                ineligible_fraction_decision=_ineligible_fraction_decision(
+                    selection_scores
+                ),
+                ineligible_fraction_trajectory=trajectory.unmeasured_weight,
+                decision_penalty=specification.scoring.decision_confidence_penalty,
+                trajectory_penalty=specification.scoring.trajectory_confidence_penalty,
+            ),
         )
         benchmark_score = global_score.value if global_score is not None else None
         return ScientificEvaluation(
@@ -850,6 +870,7 @@ class ScientificLoop:
             local_decision_rewards=local_decision_rewards,
             trajectory=trajectory,
             scientific_outcome_score=scientific_score,
+            scientific_outcome_formula=scientific.formula,
             decision_score=decision_value,
             method_score=method_value,
             decision_quality_score=decision_quality,
@@ -857,10 +878,12 @@ class ScientificLoop:
             global_agent_score=benchmark_score,
             benchmark_score=benchmark_score,
             score_formula=_score_formula(
+                weights,
                 scientific_outcome=scientific_score,
                 decision=decision_value,
                 selection=selection_value,
             ),
+            score_detail=global_score,
         )
 
     @staticmethod
@@ -965,7 +988,33 @@ class ScientificLoop:
         return benchmark_spec_registry.get(str(reference))
 
 
+def _ineligible_fraction_decision(selections: Sequence[MethodScore]) -> float:
+    """Share of the decision dimension's components that were unmeasurable.
+
+    Counted over components rather than over decisions because that is where the
+    gaps actually are: a decision whose category declares no parameter ranges
+    still yields real evidence about method appropriateness and execution, and
+    calling the whole decision ineligible would understate the run as badly as
+    the old substituted numbers overstated it.
+
+    The other half of the dimension -- ``decision_score`` -- needs no term here.
+    It is built from whether the action was allowed and whether it succeeded,
+    both of which the harness always observes.
+    """
+    if not selections:
+        return 0.0
+    total = 0
+    unmeasured = 0
+    for item in selections:
+        # Three declared components per selection, whatever their values; the
+        # denominator has to be what could have been measured, not what was.
+        total += 3
+        unmeasured += len(item.unmeasured_components)
+    return 0.0 if total == 0 else unmeasured / total
+
+
 def _score_formula(
+    weights: ScoreWeights,
     *,
     scientific_outcome: float | None,
     decision: float | None,
@@ -973,12 +1022,11 @@ def _score_formula(
 ) -> str:
     """Describe the score, naming any dimension that could not be measured.
 
-    The formula string is persisted into result JSON and read by people
-    comparing runs. A run with an unmeasured dimension has no global score, and
-    the recorded formula has to say which dimension is missing -- otherwise the
-    absent number looks like a crash rather than an honest gap.
+    Names the two halves of the decision dimension separately rather than just
+    reporting ``decision_quality`` as absent, because which half went missing is
+    the difference between an agent that recorded no decisions and a benchmark
+    that declared nothing to score them against.
     """
-    formula = "scientific_outcome * decision_score * method_selection_score * trajectory_score"
     unmeasured = [
         name
         for name, value in (
@@ -988,14 +1036,23 @@ def _score_formula(
         )
         if value is None
     ]
-    if not unmeasured:
-        return formula
-    return f"{formula} (not computed: {', '.join(unmeasured)} unmeasured)"
+    return describe_score(weights, unmeasured)
 
 
 def _unmeasured_or(value: float | None) -> str:
     """Render an optional score so a gap cannot be mistaken for a failure."""
     return "unmeasured" if value is None else str(value)
+
+
+def _score_cell(value: float | None) -> str:
+    """Render an optional score into a report table cell.
+
+    Spelled out rather than shown as a dash, which the metric table above uses
+    for a metric that was attempted and produced nothing. These components were
+    never attempted, and a reader comparing two runs needs to be able to tell
+    those apart.
+    """
+    return "unmeasured" if value is None else f"{value:.3f}"
 
 
 def _create_scientific_adapter(

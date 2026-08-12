@@ -8,6 +8,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_evals.metrics.results import MetricStatus
+
 
 class MetricRole(StrEnum):
     """Role used by benchmark profiles when aggregating metrics."""
@@ -18,12 +20,11 @@ class MetricRole(StrEnum):
     DIAGNOSTIC = "diagnostic"
 
 
-class MetricStatus(StrEnum):
-    """Lifecycle state of one generic metric result."""
-
-    COMPUTED = "computed"
-    FAILED = "failed"
-    STRUCTURALLY_INELIGIBLE = "structurally_ineligible"
+# ``MetricStatus`` is re-exported from ``agent_evals.metrics.results`` rather than
+# redeclared here. This module used to define its own three-member copy with the
+# same spellings, so the two enums compared unequal while printing identically --
+# a disagreement that fails silently, which is what makes a shared vocabulary
+# belong in exactly one module.
 
 
 class ArtifactBundle(BaseModel):

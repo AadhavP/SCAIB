@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
@@ -21,9 +22,36 @@ from agent_evals.agents.runtime.protocol import (
     FinalSubmission,
 )
 from agent_evals.agents.tools import ToolExecutor
+
+# The rest of ``agents.trajectory`` is imported inside the conversion method to
+# avoid the cycle through ``agents.harness``. These two are enums with no onward
+# dependencies, and the status tables below have to be module-level constants to
+# read as the mapping they are.
+from agent_evals.agents.trajectory import FailureKind, RunTerminationStatus
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
 from agent_evals.environment.models import ActionStatus, EpisodeSnapshot, EpisodeStatus
 from agent_evals.environment.runtime import ScientificEnvironment
+
+
+class RuntimeVerdict(StrEnum):
+    """How the universal runtime loop decided a run ended.
+
+    A vocabulary rather than four bare literals because the loop writes these and
+    the adapter below reads them as lookup keys, and a spelling that only one side
+    knows fails *silently*: the lookup falls back to ``FAILED`` and the verdict
+    disappears without anything raising. That is how ``INCOMPLETE`` was being lost
+    before it ever reached a result file.
+    """
+
+    #: The run met its declared artifact contract.
+    COMPLETED = "completed"
+    #: The step budget ran out with the contract unmet.
+    TIMEOUT = "timeout"
+    #: Something raised, in the harness or in the agent.
+    FAILED = "failed"
+    #: The agent claimed completion and the contract was not met. A clean run
+    #: that stopped early, which is not the same finding as a broken one.
+    INCOMPLETE = "incomplete"
 
 
 class RuntimeRun(BaseModel):
@@ -37,7 +65,7 @@ class RuntimeRun(BaseModel):
     task_id: str
     started_at: datetime
     finished_at: datetime
-    termination_status: str
+    termination_status: RuntimeVerdict
     termination_reason: str | None = None
     step_count: int = Field(default=0, ge=0)
     trajectory: AgentTrajectory
@@ -139,7 +167,7 @@ class AgentRuntimeManager:
             }
         )
         trajectory.record(AgentEventType.PLAN, plan.model_dump(mode="json"))
-        status = "completed"
+        status = RuntimeVerdict.COMPLETED
         reason = "agent runtime completed"
         submission: FinalSubmission | None = None
         steps = 0
@@ -233,7 +261,7 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                     if missing:
-                        status = "incomplete"
+                        status = RuntimeVerdict.INCOMPLETE
                         reason = (
                             "agent submitted a terminal action while required "
                             f"benchmark artifacts were missing: {sorted(missing)}"
@@ -285,10 +313,10 @@ class AgentRuntimeManager:
                 produced_artifacts = set(environment.episode.snapshot().state.artifacts) if environment.episode else set()
                 required_artifacts = set(environment.task.artifacts)
                 if required_artifacts and required_artifacts.issubset(produced_artifacts):
-                    status = "completed"
+                    status = RuntimeVerdict.COMPLETED
                     reason = "required benchmark artifacts were produced within the step budget"
                 else:
-                    status = "timeout"
+                    status = RuntimeVerdict.TIMEOUT
                     reason = "maximum runtime steps reached before the benchmark goal was satisfied"
             if submission is None:
                 submission = await runtime.terminate(session, observation)
@@ -298,7 +326,7 @@ class AgentRuntimeManager:
                     submission.model_dump(mode="json"),
                 )
         except Exception as error:
-            status = "failed"
+            status = RuntimeVerdict.FAILED
             reason = str(error)
             trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
             try:
@@ -312,7 +340,9 @@ class AgentRuntimeManager:
             EpisodeStatus.CANCELLED,
         }:
             environment.terminate(
-                status=EpisodeStatus.COMPLETED if status == "completed" else EpisodeStatus.FAILED,
+                status=EpisodeStatus.COMPLETED
+                if status is RuntimeVerdict.COMPLETED
+                else EpisodeStatus.FAILED,
                 reason=reason,
             )
         final_snapshot = await environment.observe()
@@ -330,6 +360,29 @@ class AgentRuntimeManager:
             final_submission=submission,
             final_snapshot=final_snapshot,
         )
+
+
+#: Each runtime verdict mapped to the status archived in the run record. Every
+#: member of :class:`RuntimeVerdict` needs an entry: an unmapped one falls back to
+#: ``FAILED``, which is lossy rather than wrong, so the omission would not raise
+#: and would surface only as a status that never appears in any result file.
+_TERMINATION_STATUSES: dict[RuntimeVerdict, RunTerminationStatus] = {
+    RuntimeVerdict.COMPLETED: RunTerminationStatus.COMPLETED,
+    RuntimeVerdict.TIMEOUT: RunTerminationStatus.TIMEOUT,
+    RuntimeVerdict.FAILED: RunTerminationStatus.FAILED,
+    RuntimeVerdict.INCOMPLETE: RunTerminationStatus.INCOMPLETE,
+}
+
+#: How a non-completed status is described in the retained failure. A failure is
+#: still recorded in every case -- the run genuinely did not meet its contract --
+#: but the kind now says which contract, instead of reporting a clean early stop
+#: and a timeout as the same agent malfunction.
+_FAILURE_KINDS: dict[RunTerminationStatus, FailureKind] = {
+    RunTerminationStatus.TIMEOUT: FailureKind.TIMEOUT,
+    RunTerminationStatus.INCOMPLETE: FailureKind.INCOMPLETE_SUBMISSION,
+    RunTerminationStatus.UNAVAILABLE: FailureKind.ADAPTER_UNAVAILABLE,
+    RunTerminationStatus.INVALID_CONFIGURATION: FailureKind.INVALID_ACTION,
+}
 
 
 class RuntimeAgentAdapter:
@@ -354,12 +407,7 @@ class RuntimeAgentAdapter:
     ) -> Any:
         """Run and convert a universal result into the normalized AgentRun model."""
         from agent_evals.agents.harness import build_agent_run
-        from agent_evals.agents.trajectory import (
-            AgentFailure,
-            FailureKind,
-            RawTraceEvent,
-            RunTerminationStatus,
-        )
+        from agent_evals.agents.trajectory import AgentFailure, RawTraceEvent
         from agent_evals.agents.trajectory import (
             AgentManifest as LegacyAgentManifest,
         )
@@ -399,13 +447,16 @@ class RuntimeAgentAdapter:
             )
             for event in universal.trajectory.events
         ]
-        status = {
-            "completed": RunTerminationStatus.COMPLETED,
-            "timeout": RunTerminationStatus.TIMEOUT,
-            "failed": RunTerminationStatus.FAILED,
-        }.get(universal.termination_status, RunTerminationStatus.FAILED)
+        status = _TERMINATION_STATUSES.get(
+            universal.termination_status, RunTerminationStatus.FAILED
+        )
         failures = (
-            [AgentFailure(kind=FailureKind.AGENT_ERROR, message=universal.termination_reason or "runtime failed")]
+            [
+                AgentFailure(
+                    kind=_FAILURE_KINDS.get(status, FailureKind.AGENT_ERROR),
+                    message=universal.termination_reason or "runtime failed",
+                )
+            ]
             if status != RunTerminationStatus.COMPLETED
             else []
         )

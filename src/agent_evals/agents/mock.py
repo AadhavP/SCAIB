@@ -123,7 +123,13 @@ class MockActionExecutor:
                     artifact_id=artifact_id,
                     kind=kind,
                     format=file_format,
-                    validated=True,
+                    # False because nothing checked it. These records carry no
+                    # ``uri``, so there is no file for the Stage 3 validator to
+                    # read, and ``validated`` now means "a check passed" rather
+                    # than "the producer says so". Claiming it here made the mock
+                    # demo score 0.15 of ``trajectory_quality`` on an assertion
+                    # about itself that nothing could contradict.
+                    validated=False,
                     metadata=metadata,
                 )
             )

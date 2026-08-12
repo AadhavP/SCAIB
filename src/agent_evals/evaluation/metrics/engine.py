@@ -40,7 +40,7 @@ class ScientificMetricEngine:
                         category=metric.category,
                         applicable=False,
                         role=metric.role,
-                        status=MetricStatus.STRUCTURALLY_INELIGIBLE,
+                        status=MetricStatus.INELIGIBLE,
                         implementation_version=metric.implementation_version,
                         metadata={"reason": applicability.reason},
                     )
@@ -49,7 +49,27 @@ class ScientificMetricEngine:
             try:
                 raw = metric.compute(prediction, reference, context)
                 if raw.value is None:
-                    raise ValueError(raw.metadata.get("failure_reason", "backend returned no value"))
+                    # Raising here and catching below would file a backend that
+                    # read no number under the same status as a backend that
+                    # crashed, which is the conflation this vocabulary exists to
+                    # undo.
+                    results.append(
+                        ScientificMetricResult(
+                            metric_name=metric.name,
+                            category=metric.category,
+                            applicable=applicability.applicable,
+                            role=metric.role,
+                            status=MetricStatus.MALFORMED,
+                            implementation_version=metric.implementation_version,
+                            metadata={
+                                "reason": raw.metadata.get(
+                                    "failure_reason", "backend returned no value"
+                                ),
+                                "applicability": applicability.reason,
+                            },
+                        )
+                    )
+                    continue
                 numeric = float(raw.value)
                 normalized = metric.normalize(numeric, ScoreAnchors())
                 results.append(
@@ -60,7 +80,7 @@ class ScientificMetricEngine:
                         normalized_value=normalized,
                         applicable=applicability.applicable,
                         role=metric.role,
-                        status=MetricStatus.COMPUTED,
+                        status=MetricStatus.SCORED,
                         implementation_version=metric.implementation_version,
                         metadata={"applicability": applicability.reason, **raw.metadata},
                     )
@@ -72,7 +92,7 @@ class ScientificMetricEngine:
                         category=metric.category,
                         applicable=True,
                         role=metric.role,
-                        status=MetricStatus.FAILED,
+                        status=MetricStatus.EVALUATOR_ERROR,
                         implementation_version=metric.implementation_version,
                         metadata={
                             "reason": f"{type(error).__name__}: {error}",

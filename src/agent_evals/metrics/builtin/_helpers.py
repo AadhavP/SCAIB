@@ -73,6 +73,20 @@ def failed(reason: str) -> MetricComputation:
     return MetricComputation(raw_value=None, metadata={"failure_reason": reason})
 
 
+def unavailable(reason: str) -> MetricComputation:
+    """Return "this deployment cannot compute this metric at all".
+
+    Distinct from :func:`failed`, which means an implementation ran on the
+    agent's inputs and got nothing out of them. This one is a statement about
+    SCAIB, so the metric is dropped from scoring rather than scored zero.
+    """
+    return MetricComputation(
+        raw_value=None,
+        metadata={"unavailable_reason": reason},
+        unavailable=True,
+    )
+
+
 def de_ranked(context: ScientificMetricContext) -> tuple[list[str], set[str]] | None:
     """Extract ranked genes and evaluator-owned reference markers."""
     table = context.candidate_artifacts.get("de_table")
@@ -91,4 +105,4 @@ def de_ranked(context: ScientificMetricContext) -> tuple[list[str], set[str]] | 
     return ranked, {str(value) for value in reference}
 
 
-__all__ = ["de_ranked", "embedding", "failed", "labels"]
+__all__ = ["de_ranked", "embedding", "failed", "labels", "unavailable"]

@@ -18,6 +18,13 @@ class MetricComputation:
     raw_value: Any
     metadata: dict[str, Any] | None = None
     evidence: tuple[str, ...] = ()
+    #: Set when no implementation of this metric exists in this deployment, as
+    #: opposed to an implementation that ran and read no number. The difference
+    #: decides who is accountable: a missing backend is a gap in SCAIB, and
+    #: charging the agent a zero for it would score the agent on the harness's
+    #: unfinished work. Kept separate from ``raw_value is None`` because both
+    #: look identical at the call site and only one of them is the agent's doing.
+    unavailable: bool = False
 
 
 MetricComputer = Callable[[Any], MetricComputation]

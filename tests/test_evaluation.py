@@ -62,7 +62,13 @@ async def test_good_policy_produces_hierarchical_decisions_and_report() -> None:
     assert any(item.decision_type == "parameter_selection" for item in report.decisions.decisions)
     assert all(item.status == MetricStatus.SUCCEEDED for item in report.metric_results)
     assert report.summary.successful_actions == 4
-    assert report.summary.valid_artifacts == 4
+    # Zero, not four. The mock produces artifact *records* and no files, so there
+    # is nothing for the validator to read and no check can pass. This asserted 4
+    # while the mock set ``validated=True`` on its own output -- a producer
+    # certifying itself, which is the claim Stage 3 exists to stop trusting. Do
+    # not restore the 4 by re-asserting the flag; it would have to be earned by
+    # giving the mock real files.
+    assert report.summary.valid_artifacts == 0
     restored = report.from_json(report.to_json())
     assert restored.metric_results == report.metric_results
 

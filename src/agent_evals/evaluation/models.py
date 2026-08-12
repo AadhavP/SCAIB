@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_evals.evaluation.global_score import GlobalAgentScore
 from agent_evals.evaluation.metrics.robustness import RobustnessReport
 from agent_evals.evaluation.scoring.aggregation import DomainScore
 from agent_evals.metrics.aggregation import AggregationResult
@@ -59,14 +60,26 @@ class MethodEvaluation(BaseModel):
 
 
 class MethodScore(BaseModel):
-    """Breakdown of one method choice into observable quality dimensions."""
+    """Breakdown of one method choice into observable quality dimensions.
+
+    Every component is optional because each can be genuinely unanswerable, and
+    each used to be answered anyway with a substituted number. A benchmark that
+    declared no allowed methods scored ``appropriateness = 0.5``; one that
+    declared no parameter ranges scored ``parameter_quality = 1.0``, handing every
+    agent a free third of this score for a question nobody asked. ``overall`` is
+    now the mean of whatever was measured, and ``None`` when nothing was.
+    """
 
     decision_id: str
     method: str | None
-    appropriateness: float = Field(ge=0, le=1)
-    parameter_quality: float = Field(ge=0, le=1)
-    execution_quality: float = Field(ge=0, le=1)
-    overall: float = Field(ge=0, le=1)
+    appropriateness: float | None = Field(default=None, ge=0, le=1)
+    parameter_quality: float | None = Field(default=None, ge=0, le=1)
+    execution_quality: float | None = Field(default=None, ge=0, le=1)
+    overall: float | None = Field(default=None, ge=0, le=1)
+    #: Component names excluded from ``overall``, so the gap is auditable rather
+    #: than merely absent. Feeds ``ineligible_fraction_D`` in the reported
+    #: score confidence.
+    unmeasured_components: list[str] = Field(default_factory=list)
     evidence: list[str] = Field(default_factory=list)
 
 
@@ -119,6 +132,11 @@ class TrajectoryEvaluation(BaseModel):
     decision_regret: float = Field(default=0.0, ge=0, le=1)
     alternative_comparisons: list[dict[str, Any]] = Field(default_factory=list)
     trajectory_quality: float = Field(ge=0, le=1)
+    #: Share of the declared quality weight that could not be measured, so a
+    #: reader can tell a score computed from every term from the same number
+    #: computed from two of seven. Feeds ``ineligible_fraction_T`` in the run's
+    #: score confidence.
+    unmeasured_weight: float = Field(default=0.0, ge=0, le=1)
     step_table: list[dict[str, Any]] = Field(default_factory=list)
     formula: str
 
@@ -139,6 +157,13 @@ class ScientificEvaluation(BaseModel):
     local_decision_rewards: list[dict[str, Any]] = Field(default_factory=list)
     trajectory: TrajectoryEvaluation
     scientific_outcome_score: float | None = Field(default=None, ge=0, le=1)
+    #: How the domains above were combined into :attr:`scientific_outcome_score`,
+    #: including which ones were dropped for going unmeasured. Persisted because
+    #: the weights are renormalized over the measured domains: a run whose
+    #: robustness and technical domains were never measured publishes an outcome
+    #: computed from biology alone, and without this string nothing in the archive
+    #: says so.
+    scientific_outcome_formula: str | None = None
     #: ``None`` when the run produced no decisions to score. A run that never
     #: told the benchmark what it was doing has an *unmeasured* decision
     #: dimension, not a perfect one; scoring it 1.0 rewarded an agent for being
@@ -151,6 +176,11 @@ class ScientificEvaluation(BaseModel):
     global_agent_score: float | None = Field(default=None, ge=0, le=1)
     benchmark_score: float | None = Field(default=None, ge=0, le=1)
     score_formula: str
+    #: The full derivation of :attr:`benchmark_score`: version, resolved weights,
+    #: and the confidence that qualifies it. Present so an archived score can be
+    #: recomputed and audited rather than merely read, which is what makes a
+    #: scoring-version bump safe to publish.
+    score_detail: GlobalAgentScore | None = None
 
 
 __all__ = [

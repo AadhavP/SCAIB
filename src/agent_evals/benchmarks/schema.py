@@ -22,6 +22,14 @@ from agent_evals.core.artifact_rules import (
 from agent_evals.metrics.models import MetricRole
 
 CURRENT_SCHEMA_VERSION = "1.0.0"
+
+#: Tolerance for the scoring-weights sum check. Three exact thirds are not
+#: representable in binary floating point, so an exact comparison would reject
+#: the neutral default. Deliberately a local literal rather than an import from
+#: ``evaluation.global_score``: the dependency runs the other way (``evaluation``
+#: consumes this schema), and both layers guard the same invariant *loudly*, so a
+#: drift here surfaces as a rejected benchmark rather than as a wrong score.
+_WEIGHT_SUM_TOLERANCE = 1e-6
 """Newest benchmark specification schema version understood by this package."""
 
 
@@ -543,6 +551,42 @@ class TaskSpecification(SpecificationModel):
     _identifier = field_validator("id")(_validate_identifier)
 
 
+class ScoringSpecification(SpecificationModel):
+    """How this benchmark weighs outcome, decisions, and trajectory.
+
+    The three weights are exponents in a weighted geometric mean and must sum to
+    one, so a benchmark cannot quietly inflate or depress its own scores relative
+    to another's -- it can only redistribute emphasis. The defaults are equal
+    thirds, which asserts nothing; a benchmark that cares more about the result
+    than the route says so here.
+
+    The two penalty coefficients are ``kD`` and ``kT`` in the reported
+    confidence. They scale how much unmeasurable evidence costs *confidence*, and
+    can never move the score itself.
+    """
+
+    outcome_weight: float = Field(default=1.0 / 3.0, ge=0, le=1)
+    decision_weight: float = Field(default=1.0 / 3.0, ge=0, le=1)
+    trajectory_weight: float = Field(default=1.0 - 2.0 / 3.0, ge=0, le=1)
+    decision_confidence_penalty: float = Field(default=0.5, ge=0, le=1)
+    trajectory_confidence_penalty: float = Field(default=0.5, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _weights_sum_to_one(self) -> ScoringSpecification:
+        """Reject a weighting that would not be a mean, at load time.
+
+        Caught here rather than at scoring time so a mis-declared benchmark fails
+        when someone reads it, not after a paid run has finished.
+        """
+        total = self.outcome_weight + self.decision_weight + self.trajectory_weight
+        if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+            raise ValueError(
+                "scoring weights must sum to 1.0 so the benchmark score is a "
+                f"weighted mean comparable with other benchmarks; got {total!r}"
+            )
+        return self
+
+
 class BenchmarkMetadata(SpecificationModel):
     """Human-facing identity, discovery, and citation metadata."""
 
@@ -586,6 +630,7 @@ class BenchmarkSpecification(SpecificationModel):
     rewards: list[RewardSpecification] = Field(default_factory=list)
     artifacts: list[ArtifactSpecification] = Field(default_factory=list)
     constraints: ConstraintSpecification = Field(default_factory=ConstraintSpecification)
+    scoring: ScoringSpecification = Field(default_factory=ScoringSpecification)
     tasks: list[TaskSpecification] = Field(default_factory=list)
 
     _schema_version = field_validator("schema_version")(
