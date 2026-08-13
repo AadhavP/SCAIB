@@ -16,14 +16,18 @@ from agent_evals.agents import (
     AgentRun,
     MockActionExecutor,
     MockObservationBuilder,
-    RuntimeAgentAdapter,
     agent_adapter_registry,
     agent_runtime_registry,
 )
+from agent_evals.agents.selection import build_agent_adapter, is_universal_runtime
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.registry import benchmark_registry, benchmark_spec_registry
+from agent_evals.benchmarks.schema import BenchmarkSpecification
+from agent_evals.cli.environments import env_app
+from agent_evals.cli.references import resolve_benchmark_path
 from agent_evals.core.config import get_settings
 from agent_evals.core.logging import configure_logging, get_logger
+from agent_evals.environment.execution import free_execution_action_ids
 from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.evaluators import EvaluationEngine, EvaluationReport
 
@@ -44,6 +48,7 @@ agent_app = typer.Typer(
     add_completion=False,
 )
 app.add_typer(agent_app, name="agent")
+app.add_typer(env_app, name="env")
 console = Console()
 logger = get_logger("agent_evals.cli")
 
@@ -160,7 +165,9 @@ def run_command(
     ),
     agent: str = typer.Option("mock", "--agent", "-a", help="Harness adapter type."),
     model: str | None = typer.Option(
-        None, "--model", help="OpenHands/Litellm model identifier, e.g. anthropic/claude-sonnet-4-5-20250929."
+        None,
+        "--model",
+        help="Model identifier for the selected --agent runtime; see 'agent-evals agent list'.",
     ),
     provider: str | None = typer.Option(
         None, "--provider", help="Optional model provider prefix when --model has no provider."
@@ -198,6 +205,15 @@ def run_command(
         min=1,
         help="Maximum agent-environment interaction steps.",
     ),
+    environment: str | None = typer.Option(
+        None,
+        "--environment",
+        "-e",
+        help=(
+            "Declared environment ID to run the agent's own code in; defaults to "
+            "the task's own choice. See 'agent-evals env inspect'."
+        ),
+    ),
 ) -> None:
     """Execute one benchmark task through a framework-neutral harness."""
     benchmark_reference = benchmark or "examples/benchmarks/pbmc-cell-annotation.yaml"
@@ -208,7 +224,7 @@ def run_command(
         benchmark=benchmark_reference,
         agent=agent,
     )
-    if agent == "rule-based" or agent in agent_runtime_registry.list():
+    if agent == "rule-based" or is_universal_runtime(agent):
         from agent_evals.environment.scientific_loop import (
             DEFAULT_RUNTIME_MAX_STEPS,
             ScientificLoop,
@@ -216,7 +232,7 @@ def run_command(
 
         runtime_max_steps = (
             DEFAULT_RUNTIME_MAX_STEPS
-            if max_steps is None and agent in agent_runtime_registry.list()
+            if max_steps is None and is_universal_runtime(agent)
             else max_steps
         )
 
@@ -230,6 +246,7 @@ def run_command(
                 max_steps=runtime_max_steps,
                 model=model,
                 provider=provider,
+                environment=environment,
             )
         )
         console.print(
@@ -239,6 +256,18 @@ def run_command(
             f"report={scientific_run.report_path}"
         )
         return
+    if environment is not None:
+        # Refused rather than ignored. This path executes through
+        # ``MockActionExecutor``, which touches no workspace at all, so accepting
+        # the flag would report a run against an environment that was never
+        # provisioned -- and a free-execution benchmark would come back with the
+        # mock's synthetic artifacts as though the agent had produced them.
+        console.print(
+            f"[red]--environment is not supported by the '{agent}' adapter[/red]; "
+            "it runs against a mock executor and provisions no workspace. Use "
+            "--agent rule-based or a universal runtime ('agent-evals agent list')."
+        )
+        raise typer.Exit(code=2)
     output_format = output if output in {"json", "markdown"} else "json"
     run_output = None if output in {"json", "markdown"} else Path(output) if output else None
     run = asyncio.run(
@@ -256,7 +285,7 @@ def run_command(
             mock_policy=mock_policy,
         )
     )
-    specification = load_benchmark(_resolve_benchmark_path(benchmark_reference))
+    specification = load_benchmark(resolve_benchmark_path(benchmark_reference))
     evaluation = EvaluationEngine().evaluate(specification, run)
     report_target = report or Path("runs") / f"{run.run_id}.evaluation.{output_format}"
     _write_report(evaluation, report_target, output_format)
@@ -282,17 +311,10 @@ async def _run_benchmark(
     mock_policy: str | None,
 ) -> AgentRun:
     """Resolve a benchmark, execute an adapter, and persist its AgentRun."""
-    path = _resolve_benchmark_path(benchmark_reference)
+    path = resolve_benchmark_path(benchmark_reference)
     specification = load_benchmark(path)
     resolved_task = task_id or specification.tasks[0].id
-    adapter: AgentAdapter
-    if agent_type in agent_runtime_registry.list():
-        runtime_config: dict[str, object] = {}
-        if model is not None and agent_type not in {"gpt-5", "claude-sonnet"}:
-            runtime_config["model"] = model
-        adapter = RuntimeAgentAdapter(agent_runtime_registry.create(agent_type, **runtime_config))
-    else:
-        adapter = agent_adapter_registry.create(agent_type)
+    adapter: AgentAdapter = build_agent_adapter(agent_type, model=model)
     environment = ScientificEnvironment(
         specification,
         task_id=resolved_task,
@@ -336,7 +358,7 @@ def evaluate_command(
     if not run_path.exists():
         run_path = Path("runs") / f"{run_id}.json"
     run = AgentRun.from_json(run_path.read_text(encoding="utf-8"))
-    specification = load_benchmark(_resolve_benchmark_path(benchmark))
+    specification = load_benchmark(resolve_benchmark_path(benchmark))
     evaluation = EvaluationEngine().evaluate(specification, run)
     output_format = output.lower()
     if output_format not in {"json", "markdown"}:
@@ -346,11 +368,78 @@ def evaluate_command(
     console.print(f"[bold green]Evaluation report:[/bold green] {target}")
 
 
-def _resolve_benchmark_path(reference: str) -> Path:
-    path = Path(reference)
-    if path.exists():
-        return path
-    return Path("examples/benchmarks") / f"{reference}.yaml"
+@app.command("validate-benchmark")
+def validate_benchmark_command(
+    benchmark: str = typer.Option(
+        ..., "--benchmark", "-b", help="Benchmark YAML path or registered ID."
+    ),
+) -> None:
+    """Check a benchmark YAML without running it, and summarize what it declares.
+
+    ``load_benchmark`` already runs the full integrity check -- cross-references,
+    artifact contracts, environment/task consistency, scoring weights, cutoff
+    coherence -- so this command adds no validation of its own. What it adds is a
+    way to *reach* that check, which until now required starting a run.
+    """
+    path = resolve_benchmark_path(benchmark)
+    if not path.exists():
+        console.print(f"[red]Benchmark not found:[/red] {benchmark}")
+        raise typer.Exit(code=2)
+    try:
+        specification = load_benchmark(path)
+    except Exception as error:
+        console.print(f"[red]INVALID[/red] {path}")
+        console.print(f"  {error}")
+        raise typer.Exit(code=1) from error
+    console.print(f"[bold green]VALID[/bold green] {path}")
+    table = Table(show_header=False, box=None, padding=(0, 2))
+    table.add_column("Field", style="dim")
+    table.add_column("Value")
+    table.add_row("id", specification.metadata.id)
+    table.add_row("version", specification.metadata.version)
+    table.add_row("tasks", ", ".join(task.id for task in specification.tasks))
+    table.add_row("actions", str(len(specification.actions)))
+    table.add_row("metrics", str(len(specification.metrics)))
+    table.add_row("artifacts", str(len(specification.artifacts)))
+    table.add_row(
+        "environments",
+        ", ".join(spec.id for spec in specification.environments) or "(none)",
+    )
+    free_actions = sorted(free_execution_action_ids(specification))
+    table.add_row("free-execution actions", ", ".join(free_actions) or "(none)")
+    weights = specification.scoring
+    table.add_row(
+        "score weights",
+        f"outcome={weights.outcome_weight:.3f} decision={weights.decision_weight:.3f} "
+        f"trajectory={weights.trajectory_weight:.3f}",
+    )
+    table.add_row("cutoff", _cutoff_summary(specification))
+    console.print(table)
+
+
+def _cutoff_summary(specification: BenchmarkSpecification) -> str:
+    """Render the declared live budget, naming what is left unbounded.
+
+    An undeclared budget is reported rather than omitted: a cutoff that never
+    fires is the failure mode this project treats as worse than one never
+    declared, so the CLI has to be able to show its absence.
+    """
+    cutoff = specification.cutoff
+    declared = {
+        "max_steps": cutoff.max_steps,
+        "wall_time_s": cutoff.max_wall_time_seconds,
+        "tokens": cutoff.max_total_tokens,
+        "cost_usd": cutoff.max_cost_usd,
+        "consecutive_failures": cutoff.max_consecutive_failures,
+        "repeated_decisions": cutoff.max_repeated_decisions,
+        "stagnation_window": cutoff.stagnation_window,
+    }
+    present = [f"{name}={value}" for name, value in declared.items() if value is not None]
+    absent = [name for name, value in declared.items() if value is None]
+    summary = ", ".join(present) or "(nothing declared)"
+    if absent:
+        summary += f" | unbounded: {', '.join(absent)}"
+    return summary
 
 
 def _write_report(report: EvaluationReport, target: Path, output_format: str) -> None:

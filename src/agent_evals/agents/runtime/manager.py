@@ -45,6 +45,8 @@ from agent_evals.environment.models import (
     EnvironmentStep,
     EpisodeSnapshot,
     EpisodeStatus,
+    agent_visible_observations,
+    agent_visible_state,
 )
 from agent_evals.environment.runtime import ScientificEnvironment
 
@@ -167,7 +169,9 @@ class AgentRuntimeManager:
         # The budget goes on before the planning call, not after it: choosing how
         # many steps a plan should span is exactly when an agent needs to know how
         # many it has.
-        opening = _observation_from_snapshot(initial, environment.task)
+        opening = _observation_from_snapshot(
+            initial, environment.task, environment.specification
+        )
         observation = opening.model_copy(
             update={"metadata": {**opening.metadata, "budget": visible_budget()}}
         )
@@ -395,7 +399,9 @@ class AgentRuntimeManager:
                         progress_delta=progress_delta(result),
                     )
                 )
-                next_observation = _observation_from_snapshot(result.observation, environment.task)
+                next_observation = _observation_from_snapshot(
+                    result.observation, environment.task, environment.specification
+                )
                 observation = next_observation.model_copy(
                     update={
                         "metadata": {
@@ -504,13 +510,21 @@ def cutoff_termination(
     ``while``/``else`` clause performed, kept here so exhausting the budget means
     the same thing it always did, and extended to the reasons that did not exist
     before.
+
+    A benchmark that requires no artifacts is *not* credited with completing --
+    the ``required and`` guard is load-bearing, because an empty required set
+    makes the subset test vacuously true and would file every cut-off run as
+    finished. With nothing to check against, a run the controller stopped is
+    recorded as stopped. This became reachable once requiredness started coming
+    from ``required_task_artifacts``, which is empty for a free-execution
+    benchmark whose artifacts are all optional by design.
     """
     produced = (
         set(environment.episode.snapshot().state.artifacts)
         if environment.episode
         else set()
     )
-    required = set(environment.task.artifacts)
+    required = environment.specification.required_task_artifacts(environment.task)
     detail = cutoff.detail or "a run cutoff fired"
     if required and required.issubset(produced):
         verdict, reason = (
@@ -706,37 +720,112 @@ class RuntimeAgentAdapter:
         )
 
 
-def _observation_from_snapshot(snapshot: EpisodeSnapshot, task: TaskSpecification) -> AgentObservation:
-    """Project an environment snapshot and scientific goal into agent-visible context."""
-    termination = [
-        {
-            "name": condition.name,
-            "description": condition.description,
-            "condition": condition.condition,
-        }
-        for condition in task.termination
-    ]
+def _observation_from_snapshot(
+    snapshot: EpisodeSnapshot,
+    task: TaskSpecification,
+    specification: BenchmarkSpecification | None = None,
+) -> AgentObservation:
+    """Project an environment snapshot and scientific goal into agent-visible context.
+
+    This is the only place an agent is handed the episode state wholesale, so it
+    is the one place the ``visible_to_agent`` boundary has to hold. Both channels
+    that carry observations -- the state itself and the convenience copy under
+    ``metadata`` -- are filtered through :func:`agent_visible_state` and
+    :func:`agent_visible_observations`; filtering one and not the other filters
+    nothing, since the executor's isolation report would still reach the agent
+    through whichever was left.
+
+    ``declared_artifacts`` and ``required_artifacts`` are separate keys because
+    they answer different questions and the task's reference list only answers the
+    first. An agent needs every declared id to label its outputs with -- on the
+    free tier an artifact is only recorded if the agent names it -- but publishing
+    that list as *required* told the free benchmark's agent to produce four files
+    when the benchmark demands none, which is a false contract that costs real
+    steps. Requiredness is resolvable only with the specification, so without one
+    the key is omitted rather than guessed: an absent key reads as unknown, and an
+    empty list would assert that nothing is required.
+    """
+    visible = {
+        key: value.model_dump(mode="json")
+        for key, value in agent_visible_observations(snapshot.state.observations).items()
+    }
     return AgentObservation(
-        state=snapshot.state.model_dump(mode="json"),
+        state=agent_visible_state(snapshot.state).model_dump(mode="json"),
         available_actions=list(task.allowed_actions),
         artifacts=[artifact.model_dump(mode="json") for artifact in snapshot.state.artifacts.values()],
         metadata={
             "episode_id": snapshot.state.episode_id,
             "step": snapshot.state.current_step,
-            "scenario": {
-                "name": task.name,
-                "objective": task.objective,
-                "description": task.description,
-                "success_criteria": termination,
-                "required_artifacts": list(task.artifacts),
-                "required_metrics": list(task.metrics),
-            },
+            "scenario": _scenario(task, specification),
             "goal": task.objective,
-            "observations": {
-                key: value.model_dump(mode="json") for key, value in snapshot.state.observations.items()
-            },
+            "observations": visible,
         },
     )
+
+
+def _scenario(
+    task: TaskSpecification,
+    specification: BenchmarkSpecification | None,
+) -> dict[str, Any]:
+    """Describe what the task asks for, without prescribing how to do it.
+
+    ``artifact_contracts`` is the discoverable half of the output contract. The
+    benchmark validates a produced artifact against declared
+    :class:`ValidationRule` s and scores the verdict -- ``artifact_validity``
+    carries weight inside ``trajectory_quality`` -- and until now the rules were
+    published nowhere, so an agent could satisfy "columns include
+    barcode,predicted_label" only by guessing the column name. A rule the agent
+    cannot read is one it can only pass by luck, and luck is not what the
+    benchmark means to measure.
+
+    Publishing them leaks nothing: a rule names the shape of the agent's *own*
+    output and the vocabulary of its own intent parameters, never reference
+    biology, and the benchmark YAML that declares it is public anyway. This is the
+    line the environment documentation is meant to hold -- specify the
+    environment and the contract, never the method.
+    """
+    scenario: dict[str, Any] = {
+        "name": task.name,
+        "objective": task.objective,
+        "description": task.description,
+        "success_criteria": [
+            {
+                "name": condition.name,
+                "description": condition.description,
+                "condition": condition.condition,
+            }
+            for condition in task.termination
+        ],
+        "declared_artifacts": list(task.artifacts),
+        "required_metrics": list(task.metrics),
+    }
+    if specification is None:
+        return scenario
+    required = specification.required_task_artifacts(task)
+    declared = {artifact.id: artifact for artifact in specification.artifacts}
+    scenario["required_artifacts"] = [
+        artifact_id for artifact_id in task.artifacts if artifact_id in required
+    ]
+    scenario["artifact_contracts"] = [
+        {
+            "artifact_id": artifact.id,
+            "name": artifact.name,
+            "description": artifact.description,
+            "kind": artifact.kind.value,
+            "format": artifact.format,
+            "required": artifact.id in required,
+            "validation": [
+                {
+                    "name": rule.name,
+                    "description": rule.description,
+                    "rule": rule.rule,
+                }
+                for rule in artifact.validation
+            ],
+        }
+        for artifact in (declared[key] for key in task.artifacts if key in declared)
+    ]
+    return scenario
 
 
 def _action_to_intent(
@@ -796,8 +885,16 @@ def _model_dump(value: Any) -> dict[str, Any]:
 
 
 def _missing_required_artifacts(environment: ScientificEnvironment) -> set[str]:
-    """Return the task's required artifact IDs that have not been produced."""
-    required = set(environment.task.artifacts)
+    """Return the required artifact IDs this run has not produced.
+
+    Requiredness comes from ``BenchmarkSpecification.required_task_artifacts``
+    rather than from the task's reference list, because a benchmark whose
+    artifacts are deliberately optional must be finishable. A free-execution
+    benchmark cannot demand a fixed set of files without dictating the pipeline
+    shape it exists to measure, so per-invocation enforcement happens through the
+    action's ``produces`` parameter instead.
+    """
+    required = environment.specification.required_task_artifacts(environment.task)
     if not required:
         return set()
     produced = (

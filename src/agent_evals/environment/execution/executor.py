@@ -74,6 +74,17 @@ from agent_evals.environment.ports import ExecutionContext
 #: or one runaway step leaves the agent no chance to recover from it.
 _COMMAND_TIMEOUT_FRACTION = 0.5
 
+#: Ids of the observations one execution emits. Named constants because
+#: :mod:`agent_evals.environment.execution.observations` reads the first three
+#: back out of a recorded result to build the benchmark's declared
+#: ``execution-output``, and a rename on one side would leave the other quietly
+#: reading nothing -- the same silent-disagreement rule that put
+#: :mod:`agent_evals.core.intent_parameters` where it is.
+EXECUTION_STDOUT_OBSERVATION = "execution-stdout"
+EXECUTION_STDERR_OBSERVATION = "execution-stderr"
+EXECUTION_STATUS_OBSERVATION = "execution-status"
+EXECUTION_ISOLATION_OBSERVATION = "execution-isolation"
+
 _FORMAT_KINDS = {
     "h5ad": "dataset",
     "csv": "table",
@@ -417,25 +428,25 @@ class WorkspaceActionExecutor:
         source = f"execution:{intent.action_id}"
         return [
             Observation(
-                observation_id="execution-stdout",
+                observation_id=EXECUTION_STDOUT_OBSERVATION,
                 value=outcome.stdout,
                 source=source,
                 metadata={"truncated": outcome.stdout_truncated},
             ),
             Observation(
-                observation_id="execution-stderr",
+                observation_id=EXECUTION_STDERR_OBSERVATION,
                 value=outcome.stderr,
                 source=source,
                 metadata={"truncated": outcome.stderr_truncated},
             ),
             Observation(
-                observation_id="execution-status",
+                observation_id=EXECUTION_STATUS_OBSERVATION,
                 value=outcome.status.value,
                 source=source,
                 metadata={"exit_code": outcome.exit_code},
             ),
             Observation(
-                observation_id="execution-isolation",
+                observation_id=EXECUTION_ISOLATION_OBSERVATION,
                 value=outcome.isolation.model_dump(mode="json"),
                 source=source,
                 visible_to_agent=False,
@@ -463,7 +474,11 @@ class WorkspaceActionExecutor:
 
 __all__ = [
     "CODE_PARAMETER",
+    "EXECUTION_ISOLATION_OBSERVATION",
     "EXECUTION_PARAMETERS",
+    "EXECUTION_STATUS_OBSERVATION",
+    "EXECUTION_STDERR_OBSERVATION",
+    "EXECUTION_STDOUT_OBSERVATION",
     "LANGUAGE_PARAMETER",
     "PRODUCES_PARAMETER",
     "WorkspaceActionExecutor",

@@ -58,6 +58,84 @@ class ObservationBuilder(Protocol):
         """Build observations without mutating the episode directly."""
 
 
+class DeclaredObservationBuilder:
+    """Serve the observation values a benchmark declares for itself.
+
+    ``ObservationSpecification.schema_definition`` (spelled ``schema:`` in YAML) is
+    where a benchmark states a value it *owns* rather than one the harness
+    measures.  The differential-expression benchmark uses it to declare
+    ``comparison-definition: {group_a: ..., group_b: ...}`` -- the contrast the
+    agent is supposed to test.  Nothing read that field, so the contrast arrived
+    as ``{}`` and the task was unrunnable as written: an agent was asked to test a
+    comparison it was never told.
+
+    Deliberately lowest precedence in :class:`CompositeObservationBuilder`. A
+    declaration is what the benchmark intends; a measurement is what is true, and
+    where both exist the measurement is the observation.
+    """
+
+    async def build(
+        self,
+        specification: BenchmarkSpecification,
+        task: TaskSpecification,
+        snapshot: EpisodeSnapshot,
+    ) -> list[Observation]:
+        """Build one observation per declared value the task asks for."""
+        declared = {item.id: item for item in specification.observations}
+        built: list[Observation] = []
+        for observation_id in dict.fromkeys(task.observations):
+            definition = declared.get(observation_id)
+            if definition is None or not definition.schema_definition:
+                continue
+            built.append(
+                Observation(
+                    observation_id=observation_id,
+                    value=dict(definition.schema_definition),
+                    source="benchmark-declaration",
+                    step=snapshot.state.current_step,
+                    metadata={
+                        "declared_type": definition.type,
+                        "declared_source": definition.source,
+                    },
+                )
+            )
+        return built
+
+
+class CompositeObservationBuilder:
+    """Run several observation builders and merge what each of them serves.
+
+    ``ScientificEnvironment`` holds exactly one builder, so a benchmark whose
+    observations come from more than one place -- its own declaration, the
+    scientific state, the workspace on disk -- needs something in that slot to
+    combine them.  This is itself an :class:`ObservationBuilder`, so nothing above
+    the port learns that several coexist; the same shape ``ActionKindRouter`` uses
+    to let typed and free execution share one ``ActionExecutor``.
+
+    Later builders win on a shared id, which makes the argument order the
+    precedence order.  It has to be explicit because the alternative was implicit
+    and wrong: observations are stored by id, and a builder that emitted a
+    placeholder for an id it did not serve overwrote the real value a moment after
+    the executor committed it.
+    """
+
+    def __init__(self, *builders: ObservationBuilder) -> None:
+        self.builders = builders
+
+    async def build(
+        self,
+        specification: BenchmarkSpecification,
+        task: TaskSpecification,
+        snapshot: EpisodeSnapshot,
+    ) -> list[Observation]:
+        """Merge every builder's output, last writer winning per observation id."""
+        merged: dict[str, Observation] = {}
+        for builder in self.builders:
+            for observation in await builder.build(specification, task, snapshot):
+                merged[observation.observation_id] = observation
+        return list(merged.values())
+
+
 @runtime_checkable
 class ArtifactValidator(Protocol):
     """Port that checks a produced artifact against its declared rules.
@@ -217,8 +295,10 @@ class ConstraintMonitor:
 __all__ = [
     "ActionExecutor",
     "ArtifactValidator",
+    "CompositeObservationBuilder",
     "ConstraintMonitor",
     "DeclarativeActionValidator",
+    "DeclaredObservationBuilder",
     "ExecutionContext",
     "ObservationBuilder",
     "RewardEvaluator",

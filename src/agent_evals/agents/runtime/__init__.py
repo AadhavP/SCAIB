@@ -1,9 +1,11 @@
 """Universal agent runtime layer."""
 
 from agent_evals.agents.backends import (
+    DEFAULT_RUNTIMES,
     AnthropicRuntime,
     CustomPythonRuntime,
     ExternalProcessRuntime,
+    HttpStepRuntime,
     OpenAICompatibleRuntime,
     OpenAIRuntime,
 )
@@ -35,20 +37,20 @@ from agent_evals.agents.runtime.registry import (
 
 
 def _register_defaults() -> None:
-    """Register provider-neutral names without importing provider SDKs."""
+    """Register the adapter layer's table without importing provider SDKs.
+
+    The table itself lives in :mod:`agent_evals.agents.backends.aliases`, because
+    an alias name and its default model are provider knowledge. This function
+    reads it and learns nothing about who is behind each name.
+    """
     if agent_runtime_registry.list():
         return
-    agent_runtime_registry.register("openai", OpenAIRuntime, capabilities=["tool_use"])
-    agent_runtime_registry.register("gpt-5", lambda **config: OpenAIRuntime(model="gpt-5", **config), capabilities=["tool_use"])
-    agent_runtime_registry.register("anthropic", AnthropicRuntime, capabilities=["tool_use"])
-    agent_runtime_registry.register(
-        "claude-sonnet",
-        lambda **config: AnthropicRuntime(model="claude-sonnet", **config),
-        capabilities=["tool_use"],
-    )
-    agent_runtime_registry.register("openai-compatible", OpenAICompatibleRuntime, capabilities=["tool_use"])
-    agent_runtime_registry.register("external-process", ExternalProcessRuntime, capabilities=["external_process"])
-    agent_runtime_registry.register("custom", CustomPythonRuntime, capabilities=["custom_protocol"])
+    for registration in DEFAULT_RUNTIMES:
+        agent_runtime_registry.register(
+            registration.name,
+            registration.factory,
+            capabilities=list(registration.capabilities),
+        )
 
 
 _register_defaults()
@@ -71,6 +73,7 @@ __all__ = [
     "CustomPythonRuntime",
     "ExternalProcessRuntime",
     "FinalSubmission",
+    "HttpStepRuntime",
     "OpenAICompatibleRuntime",
     "OpenAIRuntime",
     "RuntimeAgentAdapter",

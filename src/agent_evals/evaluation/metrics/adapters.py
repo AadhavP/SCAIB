@@ -83,12 +83,23 @@ def _scientific_context(context: EvaluationContext) -> ScientificMetricContext:
         return context.payload
     if isinstance(context.payload, dict):
         payload = context.payload
+        # Every field is carried across, including the two that gate scoring:
+        # dropping ``agent_produced_columns`` would let a dataset's own ``louvain``
+        # be read back as this agent's clustering, and dropping
+        # ``reference_join_gap`` would present a reference the evaluator cannot
+        # join and score the run against a candidate it never had. Both failures
+        # are silent, and both are in the direction of a wrong number rather than
+        # a missing one.
         return ScientificMetricContext(
             adata=payload.get("adata"),
             candidate_artifacts=payload.get("candidate_artifacts", {}),
             reference_artifacts=payload.get("reference_artifacts", {}),
             metadata=payload.get("metadata", {}),
             trajectory=payload.get("trajectory"),
+            agent_produced_columns=frozenset(
+                payload.get("agent_produced_columns") or ()
+            ),
+            reference_join_gap=payload.get("reference_join_gap"),
         )
     raise TypeError("generic metric context payload must contain ScientificMetricContext")
 
@@ -107,6 +118,7 @@ def _legacy_applicability_context(context: EvaluationContext) -> LegacyApplicabi
         observation_columns=columns,
         representations=representations,
         reference_labels_available=scientific.has_reference_labels,
+        reference_gap_reason=scientific.reference_join_gap,
         predictions_available="prediction" in scientific.candidate_artifacts
         or "cluster_labels" in scientific.candidate_artifacts,
         payload=scientific,

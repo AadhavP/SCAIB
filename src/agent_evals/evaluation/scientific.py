@@ -208,6 +208,7 @@ class ScientificMetricEngine:
             observation_columns=observation_columns,
             representations=representations,
             reference_labels_available=context.has_reference_labels,
+            reference_gap_reason=context.reference_join_gap,
             predictions_available="prediction" in context.candidate_artifacts
             or "cluster_labels" in context.candidate_artifacts,
             payload=context,

@@ -22,6 +22,12 @@ class ApplicabilityContext(BaseModel):
     representations: set[str] = Field(default_factory=set)
     reference_labels_available: bool = False
     predictions_available: bool = False
+    #: What to record when ``reference_labels_available`` is False. The default
+    #: message blames the benchmark task for not providing a reference, which is
+    #: only one of the two ways this happens -- the other is a tier that holds a
+    #: reference it cannot join onto the candidate. Both exclude the metric, and
+    #: a persisted exclusion that names the wrong cause is worse than a vague one.
+    reference_gap_reason: str | None = None
     payload: Any | None = None
 
 
@@ -85,7 +91,10 @@ class MetricApplicabilityEngine:
                 version=definition.version,
                 eligible=False,
                 structurally_ineligible=True,
-                reason="reference labels are not provided by the benchmark task",
+                reason=(
+                    context.reference_gap_reason
+                    or "reference labels are not provided by the benchmark task"
+                ),
             )
         if requirements.requires_predictions and not context.predictions_available:
             missing_artifacts.append("prediction_artifact")

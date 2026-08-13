@@ -859,6 +859,57 @@ class BenchmarkSpecification(SpecificationModel):
         self._validate_task_dependencies()
         return self
 
+    def required_task_artifacts(self, task: TaskSpecification) -> set[str]:
+        """Return the artifacts this task must produce for its goal to be met.
+
+        ``TaskSpecification.artifacts`` is a *reference* list: it names every
+        artifact the task recognises, which is what an agent needs in order to
+        label its outputs at all.  Requiredness lives one level up, on
+        :attr:`ArtifactSpecification.required`, and the two are not the same
+        question.  Reading the task list as the required set is what made the
+        free-execution benchmark unfinishable: it declares four artifacts
+        ``required: false`` precisely so the agent's workflow decides which files
+        exist, and every run was nonetheless filed ``incomplete`` for not
+        producing all four.
+
+        The intersection is defensive.  ``validate_integrity`` already forces a
+        ``required=True`` artifact into every task, so for any loadable benchmark
+        the required set is a subset of the task's list; a directly constructed
+        specification could still demand an artifact its task never mentions, and
+        an unmeetable demand is not something to inherit silently.
+        """
+        required = {artifact.id for artifact in self.artifacts if artifact.required}
+        return required.intersection(task.artifacts)
+
+    def evaluator_executes_task_actions(self, task: TaskSpecification) -> bool:
+        """Whether SCAIB itself runs any action this task allows.
+
+        True for the typed catalog, where the benchmark performs the science and
+        every result therefore lands in the object the evaluator scores. False when
+        every allowed action is :attr:`ActionKind.FREE_EXECUTION`: the agent runs
+        its own code against its own copy in a workspace, so the evaluator's copy
+        is untouched by construction and finds nothing there no matter how good the
+        agent was.
+
+        This is what tells an *agent's* omission apart from the *harness's*
+        blindness, which is the same absent-versus-unobserved distinction the state
+        observer draws one layer down. A mixed task counts as executed by the
+        evaluator: at least one operation did reach its copy, so a gap there is a
+        claim it can defend.
+
+        A task naming no action this benchmark declares also counts as executed,
+        and the asymmetry is deliberate. Answering False excuses every
+        reference-consuming metric from scoring, so if that were the answer to "no
+        evidence either way", the cheapest route to an unpunished bad run would be
+        a benchmark whose action list does not line up -- and a scoring gap that
+        opens on a typo is exactly the kind this project keeps finding late.
+        """
+        allowed = set(task.allowed_actions)
+        declared = [action for action in self.actions if action.id in allowed]
+        if not declared:
+            return True
+        return any(action.kind is not ActionKind.FREE_EXECUTION for action in declared)
+
     def _validate_task_dependencies(self) -> None:
         """Reject circular task dependencies with a useful cycle path."""
         graph = {task.id: task.depends_on for task in self.tasks}

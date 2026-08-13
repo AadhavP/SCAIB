@@ -39,8 +39,7 @@ from agent_evals.environment.models import (
 from agent_evals.environment.ports import RewardEvaluator
 from agent_evals.evaluation.candidates import (
     ScientificStateProvider,
-    build_candidate_artifacts,
-    build_reference_artifacts,
+    build_metric_inputs,
 )
 from agent_evals.evaluation.progress import (
     ProgressSignal,
@@ -93,7 +92,7 @@ class StageAwareRewardEvaluator:
         """Return the delegate's reward, annotated with this step's progress."""
         reward = await self._delegate.evaluate(specification, task, snapshot, result)
         step = snapshot.state.current_step
-        signal = self._record(step, result)
+        signal = self._record(step, result, specification, task)
         self._signals.append(signal)
         if reward is None:
             return None
@@ -124,7 +123,13 @@ class StageAwareRewardEvaluator:
             values[PROGRESS_DELTA_KEY] = signal.delta
         return values
 
-    def _record(self, step: int, result: ActionExecutionResult) -> ProgressSignal:
+    def _record(
+        self,
+        step: int,
+        result: ActionExecutionResult,
+        specification: BenchmarkSpecification,
+        task: TaskSpecification,
+    ) -> ProgressSignal:
         """Score the current scientific state, degrading to a limitation on error."""
         delta = result.observed_state_delta
         artifact_ids = [record.artifact_id for record in result.artifacts]
@@ -141,7 +146,7 @@ class StageAwareRewardEvaluator:
                 "contributes no stage attribution"
             )
         try:
-            values = self._metric_values()
+            values, gaps = self._metric_values(specification, task)
         # Deliberately broad. Scoring a step is observation, and any exception a
         # metric backend raises must become a recorded limitation rather than a
         # failed episode -- the alternative fails an agent for the harness's
@@ -160,28 +165,46 @@ class StageAwareRewardEvaluator:
             step=step,
             stage=stage,
             metric_values=values,
-            limitations=limitations,
+            limitations=[*limitations, *gaps],
         )
 
-    def _metric_values(self) -> dict[str, float]:
+    def _metric_values(
+        self,
+        specification: BenchmarkSpecification,
+        task: TaskSpecification,
+    ) -> tuple[dict[str, float], tuple[str, ...]]:
         """Compute the metrics that can be answered against the state right now.
 
-        Only ``COMPUTED`` results are returned. A metric that failed because its
+        Only ``SCORED`` results are returned. A metric that failed because its
         stage has not run yet carries a failure score, and admitting those would
         make every early step look catastrophic and every later one a recovery.
+
+        Inputs come from :func:`build_metric_inputs` for the same reason the final
+        outcome does: ``S_t`` and ``S_final`` have to be assembled by one piece of
+        code or ``dS_t`` measures the difference between two assemblies rather than
+        the agent's progress. It matters most on the tier this call passes
+        ``evaluator_observes_predictions=False`` for -- were the placeholder
+        prediction still built here, every step would score the same manufactured
+        zero, ``dS`` would be a flat measured 0.0, and an armed stagnation window
+        would end a working run on it.
         """
         adata = self._state.adata
         if adata is None:
-            return {}
+            return {}, ()
+        inputs = build_metric_inputs(
+            adata,
+            prediction_column=self._state.agent_prediction_column(),
+            cluster_column=self._state.agent_cluster_column(),
+            evaluator_observes_predictions=(
+                specification.evaluator_executes_task_actions(task)
+            ),
+        )
         context = ScientificMetricContext(
             adata=adata,
-            candidate_artifacts=build_candidate_artifacts(
-                adata,
-                prediction_column=self._state.agent_prediction_column(),
-                cluster_column=self._state.agent_cluster_column(),
-            ),
-            reference_artifacts=build_reference_artifacts(adata),
+            candidate_artifacts=inputs.candidate_artifacts,
+            reference_artifacts=inputs.reference_artifacts,
             agent_produced_columns=self._agent_columns(),
+            reference_join_gap=inputs.reference_join_gap,
         )
         results, _applicability, _groups, _score = self._engine.evaluate(
             self._metric_ids,
@@ -191,7 +214,7 @@ class StageAwareRewardEvaluator:
             item.metric_id: float(item.normalized_value)
             for item in results
             if item.status is MetricStatus.SCORED and item.normalized_value is not None
-        }
+        }, inputs.limitations
 
     def _agent_columns(self) -> frozenset[str]:
         """Read agent-written column provenance when the state exposes it."""

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import os
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -17,15 +16,12 @@ from agent_evals.agents import (
     AgentConfiguration,
     AgentHarness,
     AgentRun,
-    RuntimeAgentAdapter,
-    agent_adapter_registry,
-    agent_runtime_registry,
 )
+from agent_evals.agents.selection import build_agent_adapter, is_universal_runtime
 from agent_evals.agents.trajectory import DecisionCategory
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
-from agent_evals.core.config import get_settings
 from agent_evals.core.decision_components import (
     OBSERVED_CELL_COUNT,
     OBSERVED_GENE_COUNT,
@@ -35,13 +31,26 @@ from agent_evals.datasets.preflight import (
     describe_readiness,
     validate_dataset_contract,
 )
+from agent_evals.environment.execution import (
+    ActionKindRouter,
+    WorkspaceObservationBuilder,
+)
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
     ArtifactRecord,
     RewardRecord,
 )
-from agent_evals.environment.ports import ExecutionContext
+from agent_evals.environment.ports import (
+    CompositeObservationBuilder,
+    DeclaredObservationBuilder,
+    ExecutionContext,
+    ObservationBuilder,
+)
+from agent_evals.environment.provisioning import (
+    provision_environment,
+    select_environment,
+)
 from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.evaluation import (
     DecisionEvaluator,
@@ -57,9 +66,7 @@ from agent_evals.evaluation import (
     describe_score,
 )
 from agent_evals.evaluation.candidates import (
-    build_candidate_artifacts,
-    build_prediction_frame,
-    build_reference_artifacts,
+    build_metric_inputs,
 )
 from agent_evals.evaluation.methods import method_score
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
@@ -124,6 +131,12 @@ class AgentScientificRun(BaseModel):
     final_metrics: list[MetricResult] = Field(default_factory=list)
     evaluation: ScientificEvaluation | None = None
     report_path: str | None = None
+    #: What the free-execution workspace was and what it failed to guarantee.
+    #: ``None`` on the typed tier, where SCAIB runs the science in-process and
+    #: there is no workspace to describe. A new optional field rather than a
+    #: widened one, so every ``report.json`` written before this existed still
+    #: loads against ``extra="forbid"``.
+    environment: dict[str, Any] | None = None
 
     def to_json(self) -> str:
         """Serialize the agent-scientific run."""
@@ -146,11 +159,39 @@ class AgentScientificRun(BaseModel):
             f"- Agent type: {self.agent_run.manifest.type if self.agent_run.manifest else self.agent_run.adapter_name}",
             f"- Model: {self.agent_run.manifest.model.name if self.agent_run.manifest else self.agent_run.model or 'unspecified'}",
             "",
-            "## Decision summary",
-            "",
-            "| Step | Decision | Method | Execution | Local reward |",
-            "| ---: | --- | --- | --- | ---: |",
         ]
+        # Printed before the scores, because an unconfined workspace or an
+        # unmeasurable outcome dimension changes how every number below should be
+        # read, and a reader who reaches the scores first has already formed a
+        # view by the time the caveat arrives.
+        if self.environment is not None:
+            lines.extend(
+                [
+                    "## Execution environment",
+                    "",
+                    f"- Environment: `{self.environment.get('environment_id')}` "
+                    f"({self.environment.get('backend')})",
+                    f"- Agent dataset: `{self.environment.get('agent_dataset')}`",
+                    f"- Withheld obs columns: "
+                    f"{', '.join(self.environment.get('withheld_obs_columns', [])) or '(none)'}",
+                    "",
+                    "Not guaranteed by this run:",
+                    "",
+                    *[
+                        f"- {limitation}"
+                        for limitation in self.environment.get("limitations", [])
+                    ],
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Decision summary",
+                "",
+                "| Step | Decision | Method | Execution | Local reward |",
+                "| ---: | --- | --- | --- | ---: |",
+            ]
+        )
         for index, step in enumerate(self.trajectory, start=1):
             decision = step.get("decision", {})
             result = step.get("result") or {}
@@ -413,6 +454,7 @@ class ScientificLoop:
         max_steps: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        environment: str | None = None,
         test_mode: bool = False,
         event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> AgentScientificRun:
@@ -456,7 +498,6 @@ class ScientificLoop:
             artifact_store=store,
             workspace=pending_root,
         )
-        observation_builder = ScientificObservationBuilder(context)
         # Wraps rather than replaces the reward evaluator, so the reward scalar the
         # environment records is unchanged and ``S_t`` rides alongside it as
         # evaluator-side evidence. Reference-derived quality must not become the
@@ -467,16 +508,67 @@ class ScientificLoop:
             context,
             self._progress_metric_ids(specification),
         )
-        environment = ScientificEnvironment(
+        # Provisioning follows the benchmark's own declaration; ``environment``
+        # only selects among what it declares. An opt-in flag would make omitting
+        # it a silent misconfiguration, and the router below turns that same
+        # mistake into a refusal at construction rather than a run in which every
+        # free-execution action failed for the harness's reason.
+        selected_environment = select_environment(specification, task, environment)
+        provisioned = (
+            None
+            if selected_environment is None
+            else await provision_environment(
+                specification,
+                selected_environment,
+                adata,
+                run_root=pending_root,
+            )
+        )
+        if provisioned is not None:
+            await _emit_event(
+                event_callback,
+                {
+                    "type": "environment_provisioned",
+                    "environment_id": provisioned.environment.id,
+                    "workspace_root": str(provisioned.workspace_root),
+                    "limitations": provisioned.limitations(),
+                },
+            )
+        # Observation values come from three places and only one of them is the
+        # scientific state: a benchmark can declare a value it owns (the DE
+        # contrast), the scientific builder measures the dataset, and the
+        # workspace builder measures what is on disk and what the last command
+        # printed -- neither of which the scientific builder can see, since it
+        # holds an in-memory ``AnnData`` and an operation history only the typed
+        # executor writes. Argument order is precedence order: a measurement
+        # overrides a declaration, never the reverse.
+        observation_builder: ObservationBuilder = CompositeObservationBuilder(
+            DeclaredObservationBuilder(),
+            ScientificObservationBuilder(context),
+            *(
+                ()
+                if provisioned is None
+                else (WorkspaceObservationBuilder(provisioned.backend),)
+            ),
+        )
+        episode_environment = ScientificEnvironment(
             specification,
             task_id=task.id,
-            executor=ScientificActionExecutor(
-                context,
-                event_callback=event_callback,
-                expected_outputs={
-                    action.id: list(action.expected_outputs)
-                    for action in specification.actions
-                },
+            # Always routed, even with nothing provisioned: the router is a
+            # pass-through when a benchmark declares no free-execution actions,
+            # and it refuses at construction when it declares some and has
+            # nowhere to run them.
+            executor=ActionKindRouter.from_specification(
+                specification,
+                typed=ScientificActionExecutor(
+                    context,
+                    event_callback=event_callback,
+                    expected_outputs={
+                        action.id: list(action.expected_outputs)
+                        for action in specification.actions
+                    },
+                ),
+                free=None if provisioned is None else provisioned.executor,
             ),
             observation_builder=observation_builder,
             reward_evaluator=reward_evaluator,
@@ -485,18 +577,17 @@ class ScientificLoop:
             # without the science extra installed.
             artifact_validator=ArtifactRuleValidator(),
         )
-        adapter = _create_scientific_adapter(
+        adapter = build_agent_adapter(
             agent_type,
             model=model,
-            provider=provider,
-            test_mode=test_mode,
             event_callback=event_callback,
+            test_mode=test_mode,
         )
         # Test mode replaces the selected legacy agent with the universal GLM
         # runtime, so it must receive the same finite default step cap.
         effective_max_steps = (
             DEFAULT_RUNTIME_MAX_STEPS
-            if max_steps is None and (test_mode or agent_type in agent_runtime_registry.list())
+            if max_steps is None and (test_mode or is_universal_runtime(agent_type))
             else max_steps
         )
         configuration = AgentConfiguration(
@@ -512,7 +603,13 @@ class ScientificLoop:
                 "run_id": requested_run_id,
             },
         )
-        agent_run = await AgentHarness().run(adapter, environment, configuration)
+        agent_run = await AgentHarness().run(adapter, episode_environment, configuration)
+        if provisioned is not None:
+            # Before the run directory is renamed below: the backend holds the
+            # workspace root by path, and a Windows directory rename fails while
+            # anything under it is still open. Nothing is deleted -- the workspace
+            # and its artifacts are evidence and outlive the run.
+            await provisioned.backend.close()
         pipeline_parameters: dict[str, Any] = {}
         metrics = await asyncio.to_thread(
             compute_objective_metrics,
@@ -576,6 +673,7 @@ class ScientificLoop:
             final_metrics=metrics,
             evaluation=evaluation,
             report_path=str(final_root / "report.md"),
+            environment=None if provisioned is None else provisioned.describe(),
         )
         (final_root / "trajectory.json").write_text(
             json.dumps(
@@ -661,23 +759,34 @@ class ScientificLoop:
         # outcome and the per-step ``S_t`` see the same artifacts. Assembled
         # separately they could disagree for reasons that are the harness's, not
         # the agent's, and the progress signal would measure that disagreement.
-        prediction = build_prediction_frame(adata, prediction_column)
-        prediction_artifact = store.save_table(
-            "evaluation-prediction",
-            prediction,
-            metadata={
-                "hidden_from_agent": True,
-                "source_column": prediction_column,
-                "agent_produced_prediction": prediction_column is not None,
-            },
-        )
-        candidate_artifacts = build_candidate_artifacts(
+        candidate_inputs = build_metric_inputs(
             adata,
             prediction_column=prediction_column,
             cluster_column=context.agent_cluster_column(),
-            prediction=prediction,
+            evaluator_observes_predictions=(
+                specification.evaluator_executes_task_actions(task)
+            ),
         )
-        reference_artifacts = build_reference_artifacts(adata)
+        prediction = candidate_inputs.prediction
+        candidate_artifacts = candidate_inputs.candidate_artifacts
+        reference_artifacts = candidate_inputs.reference_artifacts
+        # No placeholder table is archived when there was no candidate to build one
+        # from. A CSV of ``__unassigned__`` rows looks exactly like a run that
+        # annotated every cell wrongly, and it is the file someone opens to find
+        # out why the outcome came back unmeasured.
+        prediction_artifact = (
+            store.save_table(
+                "evaluation-prediction",
+                prediction,
+                metadata={
+                    "hidden_from_agent": True,
+                    "source_column": prediction_column,
+                    "agent_produced_prediction": prediction_column is not None,
+                },
+            )
+            if prediction is not None
+            else None
+        )
         metric_ids = [
             item.metric_id
             for group in specification.metric_groups
@@ -713,9 +822,17 @@ class ScientificLoop:
             adata=adata,
             candidate_artifacts=candidate_artifacts,
             reference_artifacts=reference_artifacts,
-            metadata={**context.metadata, "prediction_artifact_uri": str(prediction_artifact.path)},
+            metadata={
+                **context.metadata,
+                **(
+                    {"prediction_artifact_uri": str(prediction_artifact.path)}
+                    if prediction_artifact is not None
+                    else {}
+                ),
+            },
             trajectory=agent_run.trajectory.model_dump(mode="json"),
             agent_produced_columns=frozenset(context.agent_produced_columns),
+            reference_join_gap=candidate_inputs.reference_join_gap,
         )
         engine = ScientificMetricEngine()
         results, applicability, group_results, _legacy_scientific_score = engine.evaluate(
@@ -723,15 +840,24 @@ class ScientificLoop:
             metric_context,
             groups=groups,
         )
-        for result in results:
-            result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
+        if prediction_artifact is not None:
+            for result in results:
+                result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
         robustness = RobustnessEvaluator().evaluate(
             [
                 {
                     "seed": agent_run.configuration.seed,
                     "cluster_labels": candidate_artifacts.get("cluster_labels"),
-                    "predicted_labels": prediction["predicted_label"].tolist(),
-                    "artifact_checksums": [prediction_artifact.checksum],
+                    "predicted_labels": (
+                        prediction["predicted_label"].tolist()
+                        if prediction is not None
+                        else None
+                    ),
+                    "artifact_checksums": (
+                        [prediction_artifact.checksum]
+                        if prediction_artifact is not None
+                        else []
+                    ),
                 }
             ]
         )
@@ -871,6 +997,7 @@ class ScientificLoop:
             trajectory=trajectory,
             scientific_outcome_score=scientific_score,
             scientific_outcome_formula=scientific.formula,
+            outcome_limitations=list(candidate_inputs.limitations),
             decision_score=decision_value,
             method_score=method_value,
             decision_quality_score=decision_quality,
@@ -1053,67 +1180,6 @@ def _score_cell(value: float | None) -> str:
     those apart.
     """
     return "unmeasured" if value is None else f"{value:.3f}"
-
-
-def _create_scientific_adapter(
-    agent_type: str,
-    *,
-    model: str | None = None,
-    provider: str | None = None,
-    test_mode: bool = False,
-    event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
-) -> Any:
-    """Create a legacy adapter or wrap a universal runtime for scientific episodes."""
-    if test_mode:
-        settings = get_settings()
-        test_model = (
-            settings.llm_model
-            or settings.glm_model
-            or os.getenv("LLM_MODEL")
-            or os.getenv("GLM_MODEL")
-            or model
-            or "z-ai/glm-5.2"
-        )
-        test_base_url = (
-            settings.llm_base_url
-            or settings.glm_base_url
-            or settings.openrouter_base_url
-            or os.getenv("LLM_BASE_URL")
-            or os.getenv("GLM_BASE_URL")
-            or os.getenv("OPENROUTER_BASE_URL")
-            or "https://openrouter.ai/api/v1"
-        )
-        test_api_key = (
-            settings.llm_api_key
-            or settings.glm_api_key
-            or settings.openrouter_api_key
-            or settings.openai_api_key
-            or os.getenv("LLM_API_KEY")
-            or os.getenv("GLM_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
-        if not test_api_key:
-            raise RuntimeError(
-                "GLM test mode requires LLM_API_KEY, GLM_API_KEY, "
-                "OPENROUTER_API_KEY, or OPENAI_API_KEY in the backend environment"
-            )
-        runtime = agent_runtime_registry.create(
-            "openai-compatible",
-            model=test_model,
-            base_url=test_base_url,
-            api_key=test_api_key,
-        )
-        return RuntimeAgentAdapter(runtime, event_callback=event_callback)
-    if agent_type in agent_runtime_registry.list():
-        runtime_config: dict[str, object] = {}
-        if model is not None and agent_type not in {"gpt-5", "claude-sonnet"}:
-            runtime_config["model"] = model
-        return RuntimeAgentAdapter(
-            agent_runtime_registry.create(agent_type, **runtime_config),
-            event_callback=event_callback,
-        )
-    return agent_adapter_registry.create(agent_type)
 
 
 __all__ = [

@@ -164,6 +164,13 @@ class ScientificEvaluation(BaseModel):
     #: computed from biology alone, and without this string nothing in the archive
     #: says so.
     scientific_outcome_formula: str | None = None
+    #: What stopped the outcome from being measured, when something did. An
+    #: unmeasured ``O`` with no stated cause is the absent-versus-unobserved
+    #: ambiguity this project removes everywhere else: the formula names the
+    #: domains that were dropped but not why any of them was droppable, so without
+    #: this a run whose harness could not see the agent's work reads the same as a
+    #: run whose metrics simply did not apply.
+    outcome_limitations: list[str] = Field(default_factory=list)
     #: ``None`` when the run produced no decisions to score. A run that never
     #: told the benchmark what it was doing has an *unmeasured* decision
     #: dimension, not a perfect one; scoring it 1.0 rewarded an agent for being

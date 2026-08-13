@@ -263,16 +263,62 @@ def _align(
     )
 
 
-def _reference_uns_keys(adata: Any, columns: Iterable[str]) -> list[str]:
-    """Find ``uns`` entries that describe a reference column.
+def _grouped_by_columns(entry: Any) -> set[str]:
+    """Read which observation columns an ``uns`` entry says it was computed from.
 
-    Scanpy writes ``{column}_colors`` alongside a categorical, which discloses
-    the reference class names and their cardinality even after the column
-    itself is dropped.
+    ``params.groupby`` is scanpy's own convention for recording the grouping
+    behind a derived result: ``rank_genes_groups`` and ``dendrogram_*`` both set
+    it.  It is the only link back to the reference for an entry whose *name*
+    discloses nothing.
     """
+    params = entry.get("params") if isinstance(entry, Mapping) else None
+    if not isinstance(params, Mapping):
+        return set()
+    grouping = params.get("groupby")
+    if grouping is None:
+        return set()
+    if isinstance(grouping, str):
+        return {grouping}
+    listed = grouping.tolist() if hasattr(grouping, "tolist") else grouping
+    if isinstance(listed, str):
+        return {listed}
+    if isinstance(listed, list | tuple | set):
+        return {str(value) for value in listed}
+    return {str(listed)}
+
+
+def _reference_uns_keys(adata: Any, columns: Iterable[str]) -> list[str]:
+    """Find ``uns`` entries that disclose a reference column.
+
+    Three routes, because a reference column reaches ``uns`` three ways and only
+    the first is visible in a key name.
+
+    Scanpy writes ``{column}_colors`` alongside every categorical, which
+    discloses the reference class names and their cardinality even after the
+    column itself is dropped.  A key that merely *contains* a reference column
+    name goes too; that is deliberately broad, because over-removing costs the
+    agent information it was never entitled to while under-removing publishes
+    the answer key, and the manifest records exactly what went.
+
+    The third route is the one a name-based rule cannot see.
+    ``uns["rank_genes_groups"]`` names no column at all, yet on the pbmc68k
+    fixture it is computed with ``groupby="bulk_labels"`` -- so its field names
+    *are* the withheld label vocabulary and its values are the genes that best
+    separate the withheld classes.  Shipping it hands the agent both the exact
+    spellings it is scored against and a near-perfect marker panel, while the
+    ``obs`` check that is supposed to prove redaction worked passes cleanly.
+    """
+    wanted = {str(column) for column in columns}
     suffixes = ("_colors", "_categories", "_order", "_sizes")
-    candidates = {f"{column}{suffix}" for column in columns for suffix in suffixes}
-    return sorted(key for key in getattr(adata, "uns", {}) if key in candidates)
+    named = {f"{column}{suffix}" for column in wanted for suffix in suffixes}
+    uns = getattr(adata, "uns", {}) or {}
+    return sorted(
+        str(key)
+        for key in uns
+        if str(key) in named
+        or any(column in str(key) for column in wanted)
+        or _grouped_by_columns(uns[key]) & wanted
+    )
 
 
 def partition_reference_columns(

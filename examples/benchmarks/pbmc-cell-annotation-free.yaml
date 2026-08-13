@@ -64,9 +64,16 @@ environments:
       Source is passed to the interpreter on stdin and runs with the working
       directory pinned to the workspace root; anything written outside it is not
       accounted for. scanpy, anndata, numpy, pandas, scipy and scikit-learn are
-      importable. Network access is not available. stdout, stderr and the exit
-      status of every execution are returned so failures can be debugged and
-      retried.
+      importable. This environment is declared offline: do not rely on network
+      access. stdout, stderr and the exit status of every execution are returned
+      so failures can be debugged and retried.
+    # "declared offline" rather than "the network is unavailable", because the
+    # local tier cannot actually deny a subprocess the network -- `agent-evals
+    # env inspect` reports that control as unenforceable on every host. Stating
+    # the enforcement as a fact would make the benchmark's own documentation the
+    # dishonest claim the isolation report exists to prevent, and would let a
+    # leakage attempt via an external fetch look like a harness fault rather
+    # than a violation.
     backend: local
     languages: [python, shell]
 observations:
@@ -263,7 +270,11 @@ artifacts:
     required: false
     produced_by: [analyze]
     validation:
-      - {name: barcode-keyed, description: Table is keyed by cell barcode, rule: "columns include barcode,cell_type"}
+      # 'predicted_label', not 'cell_type': the latter is a reserved reference
+      # column the agent is refused permission to write, so a rule naming it can
+      # only ever be satisfied by the answer key. Same retarget the typed
+      # benchmark's 'complete-labels' rule needed.
+      - {name: barcode-keyed, description: Table is keyed by cell barcode, rule: "columns include barcode,predicted_label"}
   - id: cluster-assignments
     name: Cluster assignment table
     description: Unsupervised cluster assignment per retained cell.

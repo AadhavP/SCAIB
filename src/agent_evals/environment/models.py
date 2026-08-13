@@ -7,6 +7,7 @@ implementing any scientific tool or sandbox backend.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -118,15 +119,38 @@ class ActionIntent(RuntimeModel):
 
 
 class Observation(RuntimeModel):
-    """One agent-visible value produced by the environment."""
+    """One value produced by the environment, agent-visible unless marked otherwise."""
 
     observation_id: str = Field(min_length=1)
     value: Any
     source: str = Field(min_length=1)
     step: int = Field(default=0, ge=0)
+    #: Whether an agent may read this. Evaluator-only observations are recorded in
+    #: the episode -- they are evidence -- but must be projected out of anything
+    #: handed to a policy. Enforce it with :func:`agent_visible_observations`
+    #: rather than by hand: a producer that sets this flag has no way to check
+    #: that the consumer honoured it, and for six stages nothing did.
     visible_to_agent: bool = True
     produced_at: datetime = Field(default_factory=utc_now)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+def agent_visible_observations(
+    observations: Mapping[str, Observation],
+) -> dict[str, Observation]:
+    """Drop every observation its producer marked evaluator-only.
+
+    The single chokepoint for :attr:`Observation.visible_to_agent`. It exists as a
+    function rather than as a filter written at each call site because the flag
+    was inert for six stages: the workspace executor set it on the isolation
+    report -- the per-control map of what this host failed to enforce, which is
+    exactly a map of what an agent can get away with -- and every agent-facing
+    projection then serialized the episode's observations wholesale. Nothing
+    raised, because a leaked observation blocks nothing.
+    """
+    return {
+        key: value for key, value in observations.items() if value.visible_to_agent
+    }
 
 
 class RuleOutcome(StrEnum):
@@ -434,6 +458,45 @@ class EpisodeSnapshot(RuntimeModel):
     events: list[EpisodeEvent] = Field(default_factory=list)
 
 
+def agent_visible_state(state: EpisodeState) -> EpisodeState:
+    """Return the episode state with every evaluator-only observation removed.
+
+    Observations reach an agent through *two* paths in this model, and redacting
+    one is worth nothing while the other stands. The obvious one is
+    :attr:`EpisodeState.observations`. The second is the action history: every
+    :class:`ActionRecord` embeds its executor's :class:`ActionExecutionResult`,
+    which carries the observations that execution produced -- so the workspace
+    executor's isolation report, naming each sandbox control this host failed to
+    enforce, is reachable at ``actions[i].result.observations`` even after the
+    top-level map is filtered.
+
+    Redaction happens on the typed model rather than on a serialized dict so that
+    adding an observation-bearing field to any of these models is a type error
+    here instead of a silent leak wherever it is dumped.
+    """
+    return state.model_copy(
+        update={
+            "observations": agent_visible_observations(state.observations),
+            "actions": [
+                record.model_copy(
+                    update={
+                        "result": record.result.model_copy(
+                            update={
+                                "observations": [
+                                    observation
+                                    for observation in record.result.observations
+                                    if observation.visible_to_agent
+                                ]
+                            }
+                        )
+                    }
+                )
+                for record in state.actions
+            ],
+        }
+    )
+
+
 class ActionValidationResult(RuntimeModel):
     """Structured result of validating an action intent."""
 
@@ -475,4 +538,6 @@ __all__ = [
     "RuleEvaluation",
     "RuleOutcome",
     "StateDelta",
+    "agent_visible_observations",
+    "agent_visible_state",
 ]

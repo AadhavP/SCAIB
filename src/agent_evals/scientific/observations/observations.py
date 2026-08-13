@@ -7,9 +7,30 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.core.reference_columns import RESERVED_REFERENCE_COLUMNS
 from agent_evals.environment.models import EpisodeSnapshot, Observation
 from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.executor.scanpy import ScanpyExecutor
+
+
+def visible_metadata_columns(obs: Any) -> list[str]:
+    """List the observation columns an agent is allowed to know exist.
+
+    A reference column is withheld by *name*, not merely by value. The column
+    name is itself a disclosure: ``bulk_labels`` tells an agent which key holds
+    the answer, and under free execution it names something the sanitized
+    workspace copy does not contain -- so publishing it would be both a leak and
+    a false statement about the dataset the agent actually has.
+
+    This is the observation-builder half of the boundary. The filesystem half
+    physically strips the columns; neither is a prompt instruction, because an
+    instruction is not a boundary.
+    """
+    return [
+        str(column)
+        for column in obs.columns
+        if str(column) not in RESERVED_REFERENCE_COLUMNS
+    ]
 
 
 class ScientificObservation(BaseModel):
@@ -58,17 +79,32 @@ class ScientificObservationBuilder:
                 operation.model_dump(mode="json") for operation in self.context.operations
             ],
             "available-tools": scientific.available_actions,
+            # Accurate on the free tier too, even though ``context.adata`` is the
+            # evaluator's unredacted object there: ``visible_metadata_columns``
+            # withholds exactly the set ``datasets.redaction`` strips, both
+            # deriving from ``core.reference_columns``, and redaction drops
+            # columns rather than cells so the shape is identical either way.
+            "dataset-summary": scientific.dataset_summary,
         }
-        observation_ids = list(dict.fromkeys([*task.observations, "scientific-observation"]))
         return [
             Observation(
                 observation_id=observation_id,
-                value=values.get(observation_id, {}),
+                value=values[observation_id],
                 source="scientific-observation-builder",
                 step=snapshot.state.current_step,
                 metadata={"ann_data_hidden": True},
             )
-            for observation_id in observation_ids
+            # Serve what this builder has, and nothing for what it does not.
+            # A ``values.get(observation_id, {})`` default published an empty
+            # payload under every id a task declared, which is worse than absence
+            # in two distinct ways: the agent worked blind while the harness
+            # recorded the observation as delivered, and -- because observations
+            # are stored by id -- the placeholder *overwrote* the real value
+            # whenever another producer had already served it.
+            for observation_id in dict.fromkeys(
+                [*task.observations, "scientific-observation"]
+            )
+            if observation_id in values
         ]
 
     def build_scientific(
@@ -88,7 +124,7 @@ class ScientificObservationBuilder:
             "technology": dataset_metadata.get("technology", "unknown"),
             "assay": dataset_metadata.get("assay", "scRNA-seq"),
             "source": dataset_metadata.get("source", "unknown"),
-            "metadata_columns": [str(column) for column in obs.columns],
+            "metadata_columns": visible_metadata_columns(obs),
         }
         quality_metrics = self._quality_metrics(obs)
         batch_information = self._categorical_information(

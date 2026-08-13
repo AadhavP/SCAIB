@@ -1,0 +1,325 @@
+"""Commands for inspecting the execution environments a benchmark asks for.
+
+These read a benchmark and report what it declares; they run nothing. The point
+is to answer, before a paid run starts, two questions a YAML file cannot answer
+by itself:
+
+- Which execution tiers can this host actually provide right now?
+- Of the isolation a benchmark asks for, how much would this host really impose?
+
+The second is the one that matters. A benchmark declaring ``internet_access:
+false`` and ``max_memory_mb: 16384`` looks equally confident on every platform,
+and on Windows neither is enforceable through the local tier. Reporting that
+ahead of time is the difference between knowing a run was unconfined and
+discovering it in the run record afterwards -- or not at all.
+"""
+
+from __future__ import annotations
+
+import shutil
+import sys
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from agent_evals.benchmarks.io import load_benchmark
+from agent_evals.benchmarks.schema import (
+    BenchmarkSpecification,
+    ConstraintSpecification,
+    EnvironmentBackend,
+    EnvironmentSpecification,
+)
+from agent_evals.cli.references import resolve_benchmark_path
+from agent_evals.environment.execution import (
+    IsolationControl,
+    IsolationOutcome,
+    describe_process_limits,
+    free_execution_action_ids,
+    isolation_from_constraints,
+)
+
+console = Console()
+
+env_app = typer.Typer(
+    name="env",
+    help="Inspect and validate the execution environments a benchmark declares.",
+    add_completion=False,
+)
+
+#: The container tier drives this binary over ``subprocess``; without it on
+#: PATH a benchmark asking for that tier cannot be honoured on this host.
+CONTAINER_BINARY = "docker"
+
+
+def _container_available() -> bool:
+    """Whether the container tier could be provided on this host."""
+    return shutil.which(CONTAINER_BINARY) is not None
+
+
+def backend_availability() -> dict[EnvironmentBackend, str]:
+    """Report, per backend, whether this host can provide it and why not."""
+    return {
+        EnvironmentBackend.LOCAL: "available",
+        EnvironmentBackend.CONTAINER: (
+            "available"
+            if _container_available()
+            else f"unavailable ('{CONTAINER_BINARY}' not on PATH)"
+        ),
+    }
+
+
+@env_app.command("list")
+def env_list_command() -> None:
+    """List the execution tiers SCAIB implements and their host availability."""
+    table = Table(title="Execution Backends")
+    table.add_column("Backend", style="cyan")
+    table.add_column("Host status")
+    table.add_column("Isolation this host can impose")
+    availability = backend_availability()
+    for backend, status in availability.items():
+        table.add_row(backend.value, status, _backend_isolation_summary(backend))
+    console.print(table)
+    console.print(f"Platform: [bold]{sys.platform}[/bold]")
+
+
+def _backend_isolation_summary(backend: EnvironmentBackend) -> str:
+    """Summarize which controls a backend can impose on this host.
+
+    Phrased as what is *missing* rather than what is present, because the
+    absence is the fact a reader needs and the one a configuration file hides.
+    """
+    if backend is EnvironmentBackend.CONTAINER:
+        if not _container_available():
+            return "-"
+        return "network, resident memory, cpu time, filesystem scope, environment"
+    probe = describe_process_limits(
+        isolation_from_constraints(
+            ConstraintSpecification(max_memory_mb=1024, max_runtime_seconds=60)
+        )
+    )
+    enforced = [
+        report.control.value
+        for report in probe
+        if report.outcome is IsolationOutcome.ENFORCED
+    ]
+    # The network is listed as unenforceable unconditionally: a bare subprocess
+    # cannot be denied one without privileges no benchmark runner should hold,
+    # so this is a property of the tier rather than of the host.
+    missing = [
+        report.control.value
+        for report in probe
+        if report.outcome is IsolationOutcome.UNENFORCEABLE
+    ] + [IsolationControl.NETWORK.value]
+    present = ", ".join(
+        [*enforced, IsolationControl.FILESYSTEM_SCOPE.value, IsolationControl.ENVIRONMENT.value]
+    )
+    return f"{present} (no {', '.join(missing)})"
+
+
+@env_app.command("inspect")
+def env_inspect_command(
+    benchmark: str = typer.Option(
+        ...,
+        "--benchmark",
+        "-b",
+        help="Benchmark ID or path to a benchmark YAML specification.",
+    ),
+    environment: str | None = typer.Option(
+        None,
+        "--environment",
+        "-e",
+        help="Restrict output to one declared environment ID.",
+    ),
+) -> None:
+    """Show a benchmark's declared environments and their real isolation."""
+    specification = _load(benchmark)
+    selected = _select_environments(specification, environment)
+    if not selected:
+        console.print(
+            f"[yellow]Benchmark '{specification.metadata.id}' declares no "
+            "execution environments; it runs on the typed action tier only.[/yellow]"
+        )
+        return
+    for spec in selected:
+        _print_environment(specification, spec)
+
+
+def _print_environment(
+    specification: BenchmarkSpecification,
+    environment: EnvironmentSpecification,
+) -> None:
+    """Render one environment: what it declares, then what is really enforced."""
+    console.print(f"\n[bold cyan]{environment.id}[/bold cyan] — {environment.name}")
+    console.print(f"  {environment.description}")
+    detail = Table(show_header=False, box=None, padding=(0, 2))
+    detail.add_column("Field", style="dim")
+    detail.add_column("Value")
+    detail.add_row("backend", environment.backend.value)
+    detail.add_row("image", environment.image or "-")
+    detail.add_row("languages", ", ".join(environment.languages))
+    detail.add_row("host status", backend_availability()[environment.backend])
+    tasks = sorted(
+        task.id for task in specification.tasks if task.environment == environment.id
+    )
+    detail.add_row("used by tasks", ", ".join(tasks) or "(none)")
+    free_actions = sorted(free_execution_action_ids(specification))
+    detail.add_row("free-execution actions", ", ".join(free_actions) or "(none)")
+    console.print(detail)
+    _print_isolation(specification.constraints, environment.backend)
+
+
+def _print_isolation(
+    constraints: ConstraintSpecification,
+    backend: EnvironmentBackend,
+) -> None:
+    """Report per control what the benchmark asked for and what it would get.
+
+    The container tier's answers depend on a daemon this command deliberately
+    does not talk to, so they are reported as undetermined rather than assumed:
+    predicting enforcement without checking would be exactly the claim this
+    whole layer exists to stop.
+    """
+    request = isolation_from_constraints(constraints)
+    table = Table(title="Isolation on this host", title_style="bold")
+    table.add_column("Control", style="cyan")
+    table.add_column("Requested")
+    table.add_column("Outcome")
+    table.add_column("Mechanism")
+    if backend is EnvironmentBackend.CONTAINER:
+        table.add_row(
+            "(all)",
+            "see constraints",
+            "undetermined",
+            "resolved against the container runtime at run time",
+        )
+        console.print(table)
+        return
+    rows = list(describe_process_limits(request))
+    for report in rows:
+        table.add_row(
+            report.control.value,
+            report.requested or "-",
+            _outcome_style(report.outcome),
+            report.mechanism or "-",
+        )
+    if not request.network_access:
+        table.add_row(
+            IsolationControl.NETWORK.value,
+            "denied",
+            _outcome_style(IsolationOutcome.UNENFORCEABLE),
+            "the local tier cannot deny a subprocess the network",
+        )
+    if not rows and request.network_access:
+        table.add_row("(none requested)", "-", "-", "-")
+    console.print(table)
+
+
+def _outcome_style(outcome: IsolationOutcome) -> str:
+    """Colour an outcome so an absent guarantee is not read as a present one."""
+    if outcome is IsolationOutcome.ENFORCED:
+        return f"[green]{outcome.value}[/green]"
+    if outcome is IsolationOutcome.NOT_REQUESTED:
+        return outcome.value
+    return f"[yellow]{outcome.value}[/yellow]"
+
+
+@env_app.command("validate")
+def env_validate_command(
+    benchmark: str = typer.Option(
+        ...,
+        "--benchmark",
+        "-b",
+        help="Benchmark ID or path to a benchmark YAML specification.",
+    ),
+) -> None:
+    """Check that this host can provide every environment a benchmark declares.
+
+    Exits non-zero when it cannot. A benchmark whose container image is
+    unavailable here is not a benchmark this host can run, and finding that out
+    from an exit code before a run is better than from a failed action during
+    one.
+    """
+    specification = _load(benchmark)
+    availability = backend_availability()
+    problems = [
+        f"environment '{spec.id}' requests the "
+        f"'{spec.backend.value}' backend: {availability[spec.backend]}"
+        for spec in specification.environments
+        if availability[spec.backend] != "available"
+    ]
+    unenforced = _unenforceable_controls(specification)
+    for spec in specification.environments:
+        console.print(
+            f"[green]OK[/green] environment '{spec.id}' "
+            f"({spec.backend.value}) — {availability[spec.backend]}"
+        )
+    if not specification.environments:
+        console.print(
+            f"[yellow]Benchmark '{specification.metadata.id}' declares no "
+            "execution environments.[/yellow]"
+        )
+    if unenforced:
+        # A warning, not a failure: an unconfined run is still a run, and
+        # refusing to start would make the honest report useless. What must not
+        # happen is the gap going unmentioned.
+        console.print(
+            "[yellow]WARNING[/yellow] this host cannot enforce "
+            f"{', '.join(unenforced)} through the local tier; the run record "
+            "will report those controls as unenforceable."
+        )
+    for problem in problems:
+        console.print(f"[red]FAIL[/red] {problem}")
+    if problems:
+        raise typer.Exit(code=1)
+
+
+def _unenforceable_controls(specification: BenchmarkSpecification) -> list[str]:
+    """Name the requested controls the local tier cannot impose on this host."""
+    if not any(
+        spec.backend is EnvironmentBackend.LOCAL for spec in specification.environments
+    ):
+        return []
+    request = isolation_from_constraints(specification.constraints)
+    controls = [
+        report.control.value
+        for report in describe_process_limits(request)
+        if report.outcome is IsolationOutcome.UNENFORCEABLE
+    ]
+    if not request.network_access:
+        controls.append(IsolationControl.NETWORK.value)
+    return controls
+
+
+def _load(reference: str) -> BenchmarkSpecification:
+    """Load a benchmark, turning a bad reference into a CLI error."""
+    path = resolve_benchmark_path(reference)
+    if not path.exists():
+        console.print(f"[red]Benchmark not found:[/red] {reference}")
+        raise typer.Exit(code=2)
+    try:
+        return load_benchmark(path)
+    except Exception as error:
+        console.print(f"[red]Invalid benchmark[/red] {path}: {error}")
+        raise typer.Exit(code=2) from error
+
+
+def _select_environments(
+    specification: BenchmarkSpecification,
+    environment_id: str | None,
+) -> list[EnvironmentSpecification]:
+    """Return the requested environment, or all of them, erroring on unknown."""
+    if environment_id is None:
+        return list(specification.environments)
+    matches = [spec for spec in specification.environments if spec.id == environment_id]
+    if not matches:
+        declared = ", ".join(spec.id for spec in specification.environments) or "(none)"
+        console.print(
+            f"[red]Unknown environment[/red] '{environment_id}'; "
+            f"benchmark declares: {declared}"
+        )
+        raise typer.Exit(code=2)
+    return matches
+
+
+__all__ = ["CONTAINER_BINARY", "backend_availability", "env_app"]
