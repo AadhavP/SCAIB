@@ -14,6 +14,6 @@ services:
       # nginx attaches this as `Authorization: Bearer ...` on proxied /v1
       # requests. It is read at container start and never reaches the browser.
       AGENT_EVALS_API__API_KEY: "${AGENT_EVALS_API__API_KEY:-}"
-    ports:
+    ports: !override
       - "${FRONTEND_PORT:-8080}:80"
-    volumes: []
+    volumes: !reset []
