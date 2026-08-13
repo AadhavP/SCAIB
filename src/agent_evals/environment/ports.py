@@ -64,10 +64,18 @@ class DeclaredObservationBuilder:
     ``ObservationSpecification.schema_definition`` (spelled ``schema:`` in YAML) is
     where a benchmark states a value it *owns* rather than one the harness
     measures.  The differential-expression benchmark uses it to declare
-    ``comparison-definition: {group_a: ..., group_b: ...}`` -- the contrast the
-    agent is supposed to test.  Nothing read that field, so the contrast arrived
-    as ``{}`` and the task was unrunnable as written: an agent was asked to test a
-    comparison it was never told.
+    ``comparison-definition`` -- the shape of the contrast the agent is supposed to
+    test.  Nothing read that field, so the contrast arrived as ``{}`` and the task
+    was unrunnable as written: an agent was asked to test a comparison it was never
+    told.
+
+    Whatever a benchmark puts here is published to the agent **verbatim**, which is
+    the constraint on what may be put here at all.  That benchmark's declaration
+    originally named the two reference populations to contrast, and this builder is
+    what turned it from an inert YAML field into a live disclosure of two withheld
+    class names; it now declares only ``{grouping: agent_defined, contrast:
+    one_versus_rest, direction: up_in_group}``, which states the contrast's shape
+    without naming anything the evaluator holds back.
 
     Deliberately lowest precedence in :class:`CompositeObservationBuilder`. A
     declaration is what the benchmark intends; a measurement is what is true, and

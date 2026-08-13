@@ -26,6 +26,16 @@ class ArtifactStore(Protocol):
     def save_table(self, artifact_id: str, table: Any, *, metadata: dict[str, Any] | None = None) -> ScientificArtifact:
         """Persist a tabular object."""
 
+    def save_text(
+        self,
+        artifact_id: str,
+        text: str,
+        *,
+        file_format: str = "txt",
+        metadata: dict[str, Any] | None = None,
+    ) -> ScientificArtifact:
+        """Persist a rendered document, taking its extension from the format."""
+
 
 class LocalArtifactStore:
     """Filesystem-backed store with checksums for every materialized file."""
@@ -48,6 +58,24 @@ class LocalArtifactStore:
         path = self.root / f"{artifact_id}.csv"
         table.to_csv(path, index=False)
         return self._artifact(artifact_id, path, "table", "csv", metadata)
+
+    def save_text(
+        self,
+        artifact_id: str,
+        text: str,
+        *,
+        file_format: str = "txt",
+        metadata: dict[str, Any] | None = None,
+    ) -> ScientificArtifact:
+        # The extension comes from the caller's declared format rather than being
+        # fixed, because Stage 3's validator dispatches on the *file* and not on
+        # the benchmark's declaration -- a report written as ``.txt`` while the
+        # benchmark declares ``html`` would leave its rules unevaluable against a
+        # file sitting right there.
+        suffix = file_format.strip().lstrip(".") or "txt"
+        path = self.root / f"{artifact_id}.{suffix}"
+        path.write_text(text, encoding="utf-8")
+        return self._artifact(artifact_id, path, "report", suffix, metadata)
 
     def _artifact(
         self,

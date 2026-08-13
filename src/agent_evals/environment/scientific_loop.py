@@ -67,6 +67,8 @@ from agent_evals.evaluation import (
 )
 from agent_evals.evaluation.candidates import (
     build_metric_inputs,
+    build_reference_artifacts,
+    load_de_table,
 )
 from agent_evals.evaluation.methods import method_score
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
@@ -81,6 +83,10 @@ from agent_evals.evaluation.progress import (
     ProgressSignal,
     ScientificProgressTracker,
     summarize_progress,
+)
+from agent_evals.evaluation.reference_de import (
+    reference_de_metadata,
+    scored_group_metadata,
 )
 from agent_evals.evaluation.scoring import (
     MetricScoreInput,
@@ -504,6 +510,26 @@ class ScientificLoop:
             artifact_store=store,
             workspace=pending_root,
         )
+        # The reference differential-expression evidence, computed once here on the
+        # dataset as issued rather than per step. ``context.metadata`` is read by
+        # exactly one thing -- the metric context assembled after the run -- so it
+        # is an evaluator channel; the reference marker list must never reach an
+        # observation, and a test asserts that.
+        reference_de, reference_de_gap = await asyncio.to_thread(
+            reference_de_metadata,
+            specification.metadata.id,
+            adata,
+            build_reference_artifacts(adata),
+        )
+        context.metadata.update(reference_de)
+        if reference_de_gap is not None:
+            # Emitted as a dataset limitation rather than swallowed, so an
+            # exclusion downstream is attributable to its real cause instead of
+            # looking like a benchmark that never asked for marker recovery.
+            await _emit_event(
+                event_callback,
+                {"type": "dataset_warning", "message": reference_de_gap},
+            )
         # Wraps rather than replaces the reward evaluator, so the reward scalar the
         # environment records is unchanged and ``S_t`` rides alongside it as
         # evaluator-side evidence. Reference-derived quality must not become the
@@ -772,6 +798,10 @@ class ScientificLoop:
             evaluator_observes_predictions=(
                 specification.evaluator_executes_task_actions(task)
             ),
+            # Read off the artifact the agent archived itself, never from
+            # ``adata.uns`` -- pbmc68k ships ``rank_genes_groups`` precomputed over
+            # the reference labels, so the shortcut reads the answer key.
+            de_table=load_de_table(context.artifacts),
         )
         prediction = candidate_inputs.prediction
         candidate_artifacts = candidate_inputs.candidate_artifacts
@@ -829,6 +859,14 @@ class ScientificLoop:
             reference_artifacts=reference_artifacts,
             metadata={
                 **context.metadata,
+                # Which of the agent's own groups the DE ranking is read from.
+                # Resolved by overlap with the hidden reference population rather
+                # than by name, because the agent chose its own class names.
+                **scored_group_metadata(
+                    candidate_artifacts,
+                    reference_artifacts,
+                    context.metadata,
+                ),
                 **(
                     {"prediction_artifact_uri": str(prediction_artifact.path)}
                     if prediction_artifact is not None

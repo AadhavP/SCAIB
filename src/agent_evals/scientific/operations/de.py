@@ -4,6 +4,13 @@ from typing import Any
 
 from agent_evals.scientific.context import OperationOutput, ScientificContext
 
+#: Artifact id this operation archives its ranked table under. Named here because
+#: :mod:`agent_evals.scientific.operations.report` reads the table back by this id
+#: and a disagreement would look like a report of an analysis that never ran. The
+#: benchmark's own declared id is applied downstream by ``ScientificActionExecutor``
+#: and is deliberately not this one.
+DE_ARTIFACT_ID = "differential_expression"
+
 
 def differential_expression(context: ScientificContext, parameters: dict[str, Any]) -> OperationOutput:
     """Rank genes for a declared observation-group contrast."""
@@ -57,7 +64,7 @@ def differential_expression(context: ScientificContext, parameters: dict[str, An
     )
     excluded = [str(name) for name in counts.index if str(name) not in selected]
     artifact = context.artifact_store.save_table(
-        "differential_expression",
+        DE_ARTIFACT_ID,
         table,
         metadata={
             "groupby": groupby,

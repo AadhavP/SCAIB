@@ -40,12 +40,14 @@ from agent_evals.environment.ports import RewardEvaluator
 from agent_evals.evaluation.candidates import (
     ScientificStateProvider,
     build_metric_inputs,
+    load_de_table,
 )
 from agent_evals.evaluation.progress import (
     ProgressSignal,
     ScientificProgressTracker,
     infer_stage,
 )
+from agent_evals.evaluation.reference_de import scored_group_metadata
 from agent_evals.evaluation.scientific import ScientificMetricEngine
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.metrics.results import MetricStatus
@@ -198,11 +200,25 @@ class StageAwareRewardEvaluator:
             evaluator_observes_predictions=(
                 specification.evaluator_executes_task_actions(task)
             ),
+            de_table=load_de_table(self._state_mapping("artifacts")),
         )
+        # Same evidence the final outcome is scored against, for the same reason the
+        # inputs are: a metric family the per-step context cannot see is silently
+        # absent from every ``S_t``, so ``dS`` would be measured over a narrower set
+        # of metrics than ``S_final`` and the two would not be comparable.
+        evidence = self._state_mapping("metadata")
         context = ScientificMetricContext(
             adata=adata,
             candidate_artifacts=inputs.candidate_artifacts,
             reference_artifacts=inputs.reference_artifacts,
+            metadata={
+                **evidence,
+                **scored_group_metadata(
+                    inputs.candidate_artifacts,
+                    inputs.reference_artifacts,
+                    evidence,
+                ),
+            },
             agent_produced_columns=self._agent_columns(),
             reference_join_gap=inputs.reference_join_gap,
         )
@@ -222,6 +238,20 @@ class StageAwareRewardEvaluator:
         if columns is None:
             return frozenset()
         return frozenset(str(column) for column in columns)
+
+    def _state_mapping(self, name: str) -> dict[str, Any]:
+        """Read an optional mapping off the live state, defaulting to empty.
+
+        Structural rather than declared on :class:`ScientificStateProvider`, which
+        names only the three members every tier must answer. A state that carries no
+        evidence yet is the ordinary case at step one, and requiring the member would
+        make the free tier's own provider -- a view over files on disk -- have to
+        invent both.
+        """
+        value: Any = getattr(self._state, name, None)
+        if not isinstance(value, dict):
+            return {}
+        return dict(value)
 
 
 __all__ = ["PROGRESS_PREFIX", "StageAwareRewardEvaluator"]

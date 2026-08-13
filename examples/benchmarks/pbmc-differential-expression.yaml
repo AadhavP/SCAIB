@@ -2,7 +2,7 @@ schema_version: 1.0.0
 metadata:
   id: pbmc-differential-expression
   title: PBMC Differential Expression and Marker Recovery
-  description: Evaluate whether an agent can define and execute a statistically defensible differential-expression analysis between biologically specified cell populations.
+  description: Evaluate whether an agent can resolve cell populations and execute a statistically defensible differential-expression analysis over the populations it defines.
   version: 1.0.0
   authors: [{name: Agent Evals Single-Cell Working Group, institution: Open Research Infrastructure Consortium, role: benchmark authors}]
   license: CC-BY-4.0
@@ -16,22 +16,45 @@ references:
 datasets:
   - id: pbmc68k-de
     name: PBMC 68k differential-expression split
-    description: PBMC 68k expression data with a prespecified comparison between CD14 monocytes and FCGR3A monocytes.
+    description: PBMC 68k expression data for an open-ended population-characterization contrast; the reference populations and their markers are held out.
     source: 10x Genomics public datasets
     organism: Homo sapiens
     modality: scRNA-seq
     format: h5ad
     citation: [pbmc68k-paper]
     license: public research use
-    expected_observations: {cells: 68579, genes: 32738, comparison_groups: [CD14_Monocytes, FCGR3A_Monocytes]}
+    expected_observations: {cells: 68579, genes: 32738}
     recommended_tasks: [differential-expression]
 observations:
   - {id: current-anndata, name: Current AnnData object, description: Expression matrix after accepted preprocessing actions., type: anndata, source: task workspace, required: true}
-  - {id: comparison-definition, name: Prespecified comparison, description: The two cell populations and contrast direction are provided without reference marker rankings., type: contrast, source: benchmark definition, required: true, schema: {group_a: CD14_Monocytes, group_b: FCGR3A_Monocytes}}
+  # This observation's `schema` is published to the agent verbatim by
+  # DeclaredObservationBuilder, so it names no population -- a population name is
+  # a withheld reference class, and handing one over would disclose part of the
+  # answer key through the observation channel Stage 0 exists to keep clean.
+  #
+  # It named `group_a: CD14_Monocytes` against `group_b: FCGR3A_Monocytes` until
+  # measurement showed neither group exists: pbmc68k_reduced's populations are
+  # Dendritic (240 cells), CD14+ Monocyte (129), CD19+ B (95), CD4+/CD25 T Reg
+  # (68), CD8+ Cytotoxic T (54), CD8+/CD45RA+ Naive Cytotoxic (43), CD56+ NK (31),
+  # CD4+/CD45RO+ Memory (19), CD34+ (13), CD4+/CD45RA+/CD25- Naive T (8). There is
+  # no FCGR3A population at all and the CD14 one is spelled differently, so the
+  # declared contrast was unrunnable however it was scored. The task asks for
+  # characterization instead, which an agent answers without being told which
+  # population the evaluator grades.
+  - {id: comparison-definition, name: Analysis directive, description: "The contrast to compute, stated without naming any population: resolve the cell groups yourself, then test each group you define against the remaining cells. Reference populations and their marker rankings are held out.", type: contrast, source: benchmark definition, required: true, schema: {grouping: agent_defined, contrast: one_versus_rest, direction: up_in_group}}
   - {id: pipeline-history, name: Pipeline history, description: Ordered record of analysis decisions and parameters., type: event_log, source: environment, required: true}
 actions:
-  - {id: normalize, name: Normalize expression, purpose: "Normalize counts with a declared method suitable for between-cell comparison.", parameters: [{name: method, description: Normalization method., type: enum, required: true, choices: [scran, library_size_log1p]}], required_inputs: [current-anndata], expected_outputs: [normalized-anndata]}
-  - {id: differential-expression, name: Differential expression, purpose: "Estimate effect sizes and statistical evidence for the prespecified contrast.", parameters: [{name: method, description: Statistical testing method., type: enum, required: true, choices: [wilcoxon, t_test, pseudobulk_nb]}, {name: covariates, description: Covariates included in the model., type: "list[string]", required: false, default: []}], required_inputs: [normalized-anndata, comparison-definition], expected_outputs: [de-table]}
+  # `scran` was offered here and is not: no executor implements it, and scanpy has
+  # no equivalent, so an agent making that defensible choice would have been failed
+  # for a harness gap. The two remaining choices are both real and both
+  # implemented -- a fixed library-size target against scanpy's median-of-counts
+  # default -- so the method decision still has something to score.
+  - {id: normalize, name: Normalize expression, purpose: "Normalize counts with a declared method suitable for between-cell comparison.", parameters: [{name: method, description: Normalization method., type: enum, required: true, choices: [library_size_log1p, median_counts_log1p]}, {name: target_sum, description: "Library-size target per cell; permitted only with library_size_log1p.", type: number, required: false, minimum: 1}], required_inputs: [current-anndata], expected_outputs: [normalized-anndata]}
+  - {id: cluster, name: Cluster cells, purpose: "Resolve cell groups without consulting reference labels, so the contrast has populations to test.", parameters: [{name: resolution, description: "Community-detection resolution; higher values yield more clusters.", type: number, required: false, default: 1.0, minimum: 0.1, maximum: 5}, {name: n_neighbors, description: Neighborhood size used to build the cell graph., type: integer, required: false, default: 15, minimum: 2}], required_inputs: [current-anndata], expected_outputs: [cluster-table]}
+  # `group_key` is required and has no default: the agent names the grouping column
+  # it produced. Defaulted, it would fall through to a reserved reference column
+  # name, and the only way to satisfy it would have been the answer key.
+  - {id: differential-expression, name: Differential expression, purpose: "Estimate effect sizes and statistical evidence for each population the agent resolved.", parameters: [{name: method, description: Statistical testing method., type: enum, required: true, choices: [wilcoxon, t_test]}, {name: group_key, description: Agent-produced observation column defining the groups to test., type: string, required: true}, {name: covariates, description: Covariates included in the model., type: "list[string]", required: false, default: []}], required_inputs: [normalized-anndata, cluster-table, comparison-definition], expected_outputs: [de-table]}
   - {id: report, name: Generate analysis report, purpose: "Summarize the contrast, filtering decisions, effect sizes, and significant genes.", parameters: [{name: top_n, description: Number of top genes displayed., type: integer, required: false, default: 50, minimum: 1}], required_inputs: [de-table], expected_outputs: [de-report]}
 metrics:
   - {id: marker-recovery-precision, name: Marker recovery precision, description: Fraction of reported top markers supported by the held-out reference marker set., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, aggregation: mean, normalization: identity, contributes_to_reward: true}
@@ -48,18 +71,19 @@ rewards:
     aggregation: weighted_sum
 artifacts:
   - {id: normalized-anndata, name: Normalized AnnData, description: Expression object used for testing., kind: anndata, format: h5ad, produced_by: [normalize]}
+  - {id: cluster-table, name: Cluster assignment table, description: Per-cell group assignment the contrast is computed over., kind: table, format: parquet, produced_by: [cluster], validation: [{name: multiple-clusters, description: At least two groups were recovered, rule: "cluster column has 2 or more distinct values"}]}
   - {id: de-table, name: Differential-expression table, description: "Gene-level effect sizes, test statistics, adjusted p-values, and provenance.", kind: table, format: parquet, required: true, produced_by: [differential-expression], validation: [{name: required-columns, description: Statistical result columns are present, rule: "columns include gene,effect_size,p_value,q_value"}]}
   - {id: de-report, name: Differential-expression report, description: Human-readable summary of the prespecified contrast., kind: report, format: html, produced_by: [report]}
 constraints: {cpu_only: true, internet_access: false, max_runtime_seconds: 1800, max_memory_mb: 16384, allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, statsmodels], deterministic: true, random_seed: 13}
 tasks:
   - id: differential-expression
-    name: Recover monocyte markers
-    objective: Identify genes that distinguish CD14 and FCGR3A monocytes with calibrated statistical evidence.
-    description: Use only the prespecified contrast and visible data to produce a ranked, validated differential-expression table and report.
+    name: Characterize cell populations by differential expression
+    objective: Resolve the cell populations present and identify the genes that distinguish each one, with calibrated statistical evidence.
+    description: Use only the visible data to resolve populations, then produce a ranked, validated differential-expression table and report over the populations you defined.
     datasets: [pbmc68k-de]
     observations: [current-anndata, comparison-definition, pipeline-history]
-    allowed_actions: [normalize, differential-expression, report]
+    allowed_actions: [normalize, cluster, differential-expression, report]
     metrics: [marker-recovery-precision, effect-size-calibration, runtime]
     reward_strategy: de-reward
-    artifacts: [normalized-anndata, de-table, de-report]
+    artifacts: [normalized-anndata, cluster-table, de-table, de-report]
     termination: [{name: complete, description: Results include statistical evidence and required report., condition: required artifacts validate successfully}]

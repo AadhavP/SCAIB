@@ -98,8 +98,18 @@ actions:
     name: Normalize and log transform
     purpose: Produce a comparable expression representation for downstream analysis.
     parameters:
+      # Optional here and required on the differential-expression benchmark, which
+      # is the difference between a stage this task takes for granted and one it
+      # asks the agent to justify. Both catalogs offer the same two choices so a
+      # single normalization decision validates against either.
+      - name: method
+        description: Normalization method.
+        type: enum
+        required: false
+        default: library_size_log1p
+        choices: [library_size_log1p, median_counts_log1p]
       - name: target_sum
-        description: Library-size target for per-cell normalization.
+        description: "Library-size target per cell; permitted only with library_size_log1p."
         type: number
         required: false
         default: 10000

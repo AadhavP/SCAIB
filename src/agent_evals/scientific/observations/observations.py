@@ -12,6 +12,44 @@ from agent_evals.environment.models import EpisodeSnapshot, Observation
 from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.executor.scanpy import ScanpyExecutor
 
+#: Actions that consume an earlier stage's output, as (spellings, required pipeline
+#: flag, reason). A table rather than a chain of ``if``s because every entry is the
+#: same shape, and because the *order* of the pipeline is the thing worth reading:
+#: buried in an elif chain it can only be reconstructed by tracing control flow.
+#:
+#: Each entry exists because offering the action earlier offers one certain to fail,
+#: and a failure is recorded against the agent rather than against the harness that
+#: offered it. ``report`` is the newest and the clearest case -- it summarizes the
+#: ranked table the agent's own differential-expression step archived, so before
+#: that step there is literally nothing for it to read.
+STAGE_PREREQUISITES: tuple[tuple[frozenset[str], str, str], ...] = (
+    # Annotation labels agent-produced groups, so a clustering must exist first;
+    # otherwise the only groups available are the reference labels.
+    (
+        frozenset({"annotate", "annotation"}),
+        "clustered",
+        "a clustering action must produce cell groups before annotation",
+    ),
+    # Scoring a PCA of raw counts as though it were a considered choice is not
+    # meaningful, so normalization precedes representation learning.
+    (
+        frozenset({"pca"}),
+        "normalized",
+        "normalization must precede dimensionality reduction",
+    ),
+    (
+        frozenset({"cluster", "clustering", "leiden"}),
+        "normalized",
+        "normalization must precede clustering",
+    ),
+    (
+        frozenset({"report"}),
+        "differential_expression_complete",
+        "a differential-expression action must produce ranked results "
+        "before they can be reported",
+    ),
+)
+
 
 def visible_metadata_columns(obs: Any) -> list[str]:
     """List the observation columns an agent is allowed to know exist.
@@ -155,6 +193,7 @@ class ScientificObservationBuilder:
                 {"differential_expression", "differential-expression", "marker-genes"}
                 & operation_names
             ),
+            "reported": "report" in operation_names,
         }
         supported = set(ScanpyExecutor._operations)
         preconditions = {
@@ -215,27 +254,9 @@ class ScientificObservationBuilder:
                         f"{batches} distinct value(s); at least 2 are required"
                     ),
                 }
-        # Annotation labels agent-produced groups, so a clustering must exist
-        # first; otherwise the only groups available are reference labels.
-        if action_id in {"annotate", "annotation"} and not pipeline_state.get("clustered", False):
-            return {
-                "available": False,
-                "reason": "a clustering action must produce cell groups before annotation",
-            }
-        # Normalization must precede representation learning; scoring a PCA of
-        # raw counts as though it were a considered choice is not meaningful.
-        if action_id == "pca" and not pipeline_state.get("normalized", False):
-            return {
-                "available": False,
-                "reason": "normalization must precede dimensionality reduction",
-            }
-        if action_id in {"cluster", "clustering", "leiden"} and not pipeline_state.get(
-            "normalized", False
-        ):
-            return {
-                "available": False,
-                "reason": "normalization must precede clustering",
-            }
+        for spellings, flag, reason in STAGE_PREREQUISITES:
+            if action_id in spellings and not pipeline_state.get(flag, False):
+                return {"available": False, "reason": reason}
         return {"available": True, "reason": "preconditions satisfied"}
 
     @staticmethod
@@ -316,6 +337,7 @@ class ScientificObservationBuilder:
             "annotation": "annotated",
             "differential-expression": "differential_expression_complete",
             "marker-genes": "differential_expression_complete",
+            "report": "reported",
         }
         return state.get(aliases.get(action_id, ""), False)
 

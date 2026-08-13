@@ -13,9 +13,12 @@ the "only what this agent wrote" rule in one place.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from agent_evals.core.de_evidence import DE_TABLE_ARTIFACT
 from agent_evals.core.reference_columns import REFERENCE_LABEL_COLUMNS
 
 #: Placeholder written when SCAIB ran the workflow and the agent still left no
@@ -29,6 +32,27 @@ UNASSIGNED_LABEL = "__unassigned__"
 
 #: Embedding the evaluator scores when the agent produced one.
 CANDIDATE_EMBEDDING_KEY = "X_pca"
+
+#: Column of the prediction frame holding the agent's own label per cell.
+CANDIDATE_LABEL_FIELD = "predicted_label"
+
+#: Column of the reference frame holding the held-out class per cell. Named here
+#: rather than in :mod:`agent_evals.core.reference_columns`, which names the *obs*
+#: columns a dataset may ship truth in; this is the schema of the evaluator-side
+#: frame this module builds, and a reader that spells it differently silently sees
+#: no reference at all.
+REFERENCE_LABEL_FIELD = "reference_label"
+
+#: Artifact ids under which an agent's ranked DE table may have been archived, in
+#: preference order. Several because the artifact id is the *operation's* choice
+#: (``differential_expression``, from ``operations/de.py``) while the benchmark
+#: declares its own (``de-table``), and either is legitimately the agent's output.
+#:
+#: Read from the agent's archived artifacts and from nowhere else. Reading
+#: ``adata.uns["rank_genes_groups"]`` instead would have been simpler and is the
+#: reason ``de_ranked`` used to be unsound: pbmc68k ships that key precomputed over
+#: the reference labels, so the shortcut reads the answer key.
+DE_TABLE_ARTIFACT_IDS = ("differential_expression", "de_table", "de-table")
 
 #: Recorded on every metric the missing join excludes, and on the evaluation
 #: itself. One constant rather than a string at each call site because it is the
@@ -74,7 +98,46 @@ def build_prediction_frame(adata: Any, prediction_column: str | None) -> Any:
         if prediction_column is not None
         else [UNASSIGNED_LABEL] * len(cell_ids)
     )
-    return pd.DataFrame({"cell_id": cell_ids, "predicted_label": labels})
+    return pd.DataFrame({"cell_id": cell_ids, CANDIDATE_LABEL_FIELD: labels})
+
+
+def load_de_table(artifacts: Mapping[str, Any]) -> Any | None:
+    """Read the agent's ranked DE table off the artifact it archived itself.
+
+    ``artifacts`` maps artifact id to anything exposing a ``path``, which is how
+    both ``ScientificContext.artifacts`` and the free tier's records are shaped;
+    accessed structurally so this module keeps no import edge into ``scientific``.
+
+    Never raises. A DE table is *evidence*, and an unreadable one must leave the
+    metrics with no candidate -- scored against the agent, since producing a
+    readable table was its job -- rather than ending the run in the evaluator.
+    """
+    for artifact_id in DE_TABLE_ARTIFACT_IDS:
+        artifact = artifacts.get(artifact_id)
+        path = getattr(artifact, "path", None) if artifact is not None else None
+        if path is None:
+            continue
+        table = _read_table(Path(str(path)))
+        if table is not None:
+            return table
+    return None
+
+
+def _read_table(path: Path) -> Any | None:
+    """Load a table by the file's own suffix, or ``None`` if it cannot be read."""
+    import pandas as pd
+
+    try:
+        if path.suffix in {".parquet", ".pq"}:
+            return pd.read_parquet(path)
+        if path.suffix in {".tsv", ".tab"}:
+            return pd.read_csv(path, sep="\t")
+        return pd.read_csv(path)
+    # Broad on purpose: a missing file, a truncated write, a parquet engine that
+    # is not installed, and a malformed header are all "no usable candidate", and
+    # distinguishing them would not change what the metric layer does about it.
+    except Exception:
+        return None
 
 
 def build_candidate_artifacts(
@@ -83,6 +146,7 @@ def build_candidate_artifacts(
     prediction_column: str | None,
     cluster_column: str | None,
     prediction: Any | None = None,
+    de_table: Any | None = None,
 ) -> dict[str, Any]:
     """Collect everything the agent produced that a metric may be scored on.
 
@@ -95,16 +159,25 @@ def build_candidate_artifacts(
         if prediction is None
         else prediction
     )
-    return {"prediction": frame, **_candidate_artifacts(adata, cluster_column)}
+    return {
+        "prediction": frame,
+        **_candidate_artifacts(adata, cluster_column, de_table),
+    }
 
 
-def _candidate_artifacts(adata: Any, cluster_column: str | None) -> dict[str, Any]:
+def _candidate_artifacts(
+    adata: Any,
+    cluster_column: str | None,
+    de_table: Any | None = None,
+) -> dict[str, Any]:
     """Collect the candidate evidence that does not depend on a prediction."""
     artifacts: dict[str, Any] = {}
     if cluster_column is not None:
         artifacts["cluster_labels"] = adata.obs[cluster_column].astype(str).to_numpy()
     if CANDIDATE_EMBEDDING_KEY in adata.obsm:
         artifacts["embedding"] = adata.obsm[CANDIDATE_EMBEDDING_KEY]
+    if de_table is not None:
+        artifacts[DE_TABLE_ARTIFACT] = de_table
     return artifacts
 
 
@@ -125,7 +198,7 @@ def build_reference_artifacts(adata: Any) -> dict[str, Any]:
         return {}
     return {
         "labels": pd.DataFrame(
-            {"reference_label": adata.obs[column].astype(str).to_numpy()}
+            {REFERENCE_LABEL_FIELD: adata.obs[column].astype(str).to_numpy()}
         )
     }
 
@@ -175,6 +248,7 @@ def build_metric_inputs(
     prediction_column: str | None,
     cluster_column: str | None,
     evaluator_observes_predictions: bool,
+    de_table: Any | None = None,
 ) -> MetricInputs:
     """Assemble metric inputs, distinguishing the agent's gaps from the harness's.
 
@@ -195,7 +269,7 @@ def build_metric_inputs(
     """
     if prediction_column is None and not evaluator_observes_predictions:
         return MetricInputs(
-            candidate_artifacts=_candidate_artifacts(adata, cluster_column),
+            candidate_artifacts=_candidate_artifacts(adata, cluster_column, de_table),
             reference_artifacts={},
             prediction=None,
             reference_join_gap=UNJOINABLE_CANDIDATE_GAP,
@@ -207,6 +281,7 @@ def build_metric_inputs(
             prediction_column=prediction_column,
             cluster_column=cluster_column,
             prediction=prediction,
+            de_table=de_table,
         ),
         reference_artifacts=build_reference_artifacts(adata),
         prediction=prediction,
@@ -215,6 +290,9 @@ def build_metric_inputs(
 
 __all__ = [
     "CANDIDATE_EMBEDDING_KEY",
+    "CANDIDATE_LABEL_FIELD",
+    "DE_TABLE_ARTIFACT_IDS",
+    "REFERENCE_LABEL_FIELD",
     "UNASSIGNED_LABEL",
     "UNJOINABLE_CANDIDATE_GAP",
     "MetricInputs",
@@ -223,4 +301,5 @@ __all__ = [
     "build_metric_inputs",
     "build_prediction_frame",
     "build_reference_artifacts",
+    "load_de_table",
 ]

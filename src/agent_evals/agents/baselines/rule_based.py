@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic
 from typing import Any
@@ -38,6 +40,7 @@ from agent_evals.scientific.action_mapper import (
 )
 from agent_evals.scientific.observations import ScientificObservation
 from agent_evals.scientific.operations.cluster import CLUSTER_COLUMN
+from agent_evals.scientific.operations.normalize import LIBRARY_SIZE_LOG1P
 
 #: Canonical PBMC marker genes per cell type. The baseline states its evidence
 #: explicitly so its annotation score reflects this panel, not the answer key.
@@ -51,6 +54,169 @@ PBMC_MARKER_PANEL: dict[str, tuple[str, ...]] = {
     "Dendritic": ("FCER1A", "CST3", "CLEC10A"),
     "Megakaryocyte": ("PPBP", "PF4", "ITGA2B"),
 }
+
+
+@dataclass(frozen=True)
+class _Rule:
+    """One pipeline stage this policy can take, and the conditions under which.
+
+    ``parameters`` is a callable rather than a mapping so that every rule builds a
+    fresh dict and none of them shares state with the table -- and because
+    ``harmony`` has to read the batch column out of the observation, which a
+    literal cannot. A rule that needed a special case would make the table lie
+    about being one.
+    """
+
+    action_id: str
+    #: The ``pipeline_state`` flag that means this stage already ran. Set, the rule
+    #: is skipped and the next one is considered.
+    completed_flag: str
+    method: str
+    decision_category: DecisionCategory
+    intent: str
+    rationale: str
+    parameters: Callable[[ScientificObservation], dict[str, Any]]
+    #: Flags that must already be true for this stage to be meaningful. Unlike
+    #: ``completed_flag``, an unmet entry *stops* the policy rather than falling
+    #: through: the stage is next in the pipeline and its input does not exist yet,
+    #: so taking a later stage instead would reorder the analysis.
+    requires: tuple[str, ...] = ()
+    #: The coarse stage an action belongs to, when that differs from the action
+    #: itself. Only ``qc`` reports one; every other action is its own category.
+    action_category: str | None = None
+
+
+#: The pipeline, in order, as the policy's single source of what comes next.
+#:
+#: An if/elif chain expressed the same thing, but the order -- the one property a
+#: reader of a baseline policy actually needs -- could only be recovered by tracing
+#: control flow past nine branch conditions and two nested guards. Every entry has
+#: the same shape, so the shape belongs in a type and the order in a sequence.
+#:
+#: ``marker-genes`` and ``differential-expression`` are separate entries for the
+#: same pipeline stage because the two catalogs that declare them ask for different
+#: parameters, and a parameter a catalog does not declare is rejected outright.
+_RULES: tuple[_Rule, ...] = (
+    _Rule(
+        action_id="qc",
+        completed_flag="qc_complete",
+        method="qc_filter",
+        decision_category=DecisionCategory.QC_STRATEGY,
+        action_category="quality_control",
+        intent="remove low-quality cells before downstream analysis",
+        rationale=(
+            "Run quality control before normalization so downstream comparisons "
+            "use retained cells."
+        ),
+        parameters=lambda _: {"min_genes": 200, "max_mito_fraction": 0.2},
+    ),
+    _Rule(
+        action_id="normalize",
+        completed_flag="normalized",
+        method="normalize",
+        decision_category=DecisionCategory.NORMALIZATION,
+        intent="put retained cells on a comparable library-size scale",
+        rationale=(
+            "Normalize library size before representation learning or marker analysis."
+        ),
+        # ``method`` is named rather than left to the default so the choice is
+        # recorded as one this policy made. All three catalogs declare the same two
+        # choices, so one parameter set validates against every one of them.
+        parameters=lambda _: {"method": LIBRARY_SIZE_LOG1P, "target_sum": 10_000},
+    ),
+    _Rule(
+        action_id="pca",
+        completed_flag="pca_complete",
+        method="pca",
+        decision_category=DecisionCategory.DIMENSIONALITY_REDUCTION,
+        intent="construct a compact representation for neighborhood analysis",
+        rationale=(
+            "Construct a compact representation before integration or neighborhood "
+            "analysis."
+        ),
+        parameters=lambda _: {"n_components": 20},
+    ),
+    _Rule(
+        action_id="harmony",
+        completed_flag="batch_corrected",
+        method="harmony",
+        decision_category=DecisionCategory.INTEGRATION,
+        intent="reduce technical batch variation while preserving biology",
+        rationale=(
+            "Correct the observed batch structure while preserving the biological "
+            "labels."
+        ),
+        parameters=lambda observation: {
+            "batch_key": observation.batch_information.get("label_key") or "batch"
+        },
+    ),
+    _Rule(
+        action_id="cluster",
+        completed_flag="clustered",
+        method="leiden",
+        decision_category=DecisionCategory.CLUSTERING,
+        intent="recover candidate cell populations without using reference labels",
+        rationale=(
+            "Group cells without reference labels so annotation has agent-produced "
+            "groups."
+        ),
+        parameters=lambda _: {"resolution": 1.0, "n_neighbors": 15},
+    ),
+    _Rule(
+        action_id="marker-genes",
+        completed_flag="differential_expression_complete",
+        method="marker-genes",
+        decision_category=DecisionCategory.DIFFERENTIAL_EXPRESSION,
+        intent="generate marker evidence for biological interpretation",
+        rationale="Rank marker genes for the agent-produced clusters.",
+        parameters=lambda _: {"group_key": CLUSTER_COLUMN},
+        requires=("clustered",),
+    ),
+    _Rule(
+        action_id="differential-expression",
+        completed_flag="differential_expression_complete",
+        method="differential-expression",
+        decision_category=DecisionCategory.DIFFERENTIAL_EXPRESSION,
+        intent="quantify which genes distinguish each recovered population",
+        rationale=(
+            "Test each agent-produced population against the rest with a rank "
+            "test, which assumes no distribution the data has to earn."
+        ),
+        parameters=lambda _: {"method": "wilcoxon", "group_key": CLUSTER_COLUMN},
+        requires=("clustered",),
+    ),
+    _Rule(
+        action_id="annotate",
+        completed_flag="annotated",
+        method="marker_based",
+        decision_category=DecisionCategory.ANNOTATION,
+        intent="assign a cell-type label to every retained cell from marker evidence",
+        rationale="Label each cluster with the canonical PBMC panel it most expresses.",
+        parameters=lambda _: {
+            "label_vocabulary": sorted(PBMC_MARKER_PANEL),
+            "markers": {
+                label: list(genes) for label, genes in PBMC_MARKER_PANEL.items()
+            },
+            "group_key": CLUSTER_COLUMN,
+        },
+    ),
+    # Last, and last for a reason: a report describes the analysis that finished, so
+    # every stage that could still add to it belongs above this line. No example
+    # catalog offers ``report`` and ``annotate`` together, so the order is currently
+    # unobservable -- which is exactly why it is worth getting right here rather than
+    # discovering it as a report of unannotated clusters in the first one that does.
+    _Rule(
+        action_id="report",
+        completed_flag="reported",
+        method="report",
+        decision_category=DecisionCategory.INTERPRETATION,
+        intent="present the ranked evidence in a form a reader can check",
+        rationale=(
+            "Summarize the ranked results this run produced as a readable document."
+        ),
+        parameters=lambda _: {"top_n": 50},
+    ),
+)
 
 
 #: Step ceiling applied only when neither the benchmark nor the caller declares
@@ -298,90 +464,55 @@ class RuleBasedSingleCellAgent:
         order: int,
     ) -> ScientificDecision | None:
         """Select the next action using only the structured observation."""
-        available = observation.available_actions
-        state = observation.pipeline_state
-        action_id: str | None = None
-        parameters: dict[str, Any] = {}
-        category = "pipeline"
-        method = None
-        rationale = "No further supported declared action is available."
-        if "qc" in available and not state.get("qc_complete", False):
-            action_id, category, method = "qc", "quality_control", "qc_filter"
-            parameters = {"min_genes": 200, "max_mito_fraction": 0.2}
-            rationale = "Run quality control before normalization so downstream comparisons use retained cells."
-        elif "normalize" in available and not state.get("normalized", False):
-            action_id, method = "normalize", "normalize"
-            parameters = {"target_sum": 10_000}
-            rationale = "Normalize library size before representation learning or marker analysis."
-        elif "pca" in available and not state.get("pca_complete", False):
-            action_id, method = "pca", "pca"
-            parameters = {"n_components": 20}
-            rationale = "Construct a compact representation before integration or neighborhood analysis."
-        elif "harmony" in available and not state.get("batch_corrected", False):
-            batch_key = observation.batch_information.get("label_key") or "batch"
-            action_id, method = "harmony", "harmony"
-            parameters = {"batch_key": batch_key}
-            rationale = "Correct the observed batch structure while preserving the biological labels."
-        elif "cluster" in available and not state.get("clustered", False):
-            action_id, method = "cluster", "leiden"
-            parameters = {"resolution": 1.0, "n_neighbors": 15}
-            rationale = "Group cells without reference labels so annotation has agent-produced groups."
-        elif "marker-genes" in available and not state.get(
-            "differential_expression_complete", False
-        ):
-            if state.get("clustered", False):
-                action_id, method = "marker-genes", "marker-genes"
-                parameters = {"group_key": CLUSTER_COLUMN}
-                rationale = "Rank marker genes for the agent-produced clusters."
-        elif "annotate" in available and not state.get("annotated", False):
-            action_id, method = "annotate", "marker_based"
-            parameters = {
-                "label_vocabulary": sorted(PBMC_MARKER_PANEL),
-                "markers": {label: list(genes) for label, genes in PBMC_MARKER_PANEL.items()},
-                "group_key": CLUSTER_COLUMN,
-            }
-            rationale = "Label each cluster with the canonical PBMC panel it most expresses."
-        if action_id is None:
+        rule = self._next_rule(observation)
+        if rule is None:
             return None
-        category_map = {
-            "qc": DecisionCategory.QC_STRATEGY,
-            "normalize": DecisionCategory.NORMALIZATION,
-            "pca": DecisionCategory.DIMENSIONALITY_REDUCTION,
-            "harmony": DecisionCategory.INTEGRATION,
-            "cluster": DecisionCategory.CLUSTERING,
-            "marker-genes": DecisionCategory.DIFFERENTIAL_EXPRESSION,
-            "annotate": DecisionCategory.ANNOTATION,
-        }
-        intent_map = {
-            "qc": "remove low-quality cells before downstream analysis",
-            "normalize": "put retained cells on a comparable library-size scale",
-            "pca": "construct a compact representation for neighborhood analysis",
-            "harmony": "reduce technical batch variation while preserving biology",
-            "cluster": "recover candidate cell populations without using reference labels",
-            "marker-genes": "generate marker evidence for biological interpretation",
-            "annotate": "assign a cell-type label to every retained cell from marker evidence",
-        }
         return ScientificDecision(
             decision_id=f"decision-{order + 1}",
             episode_id=episode_id,
             step_id=f"step-{order + 1}",
             order=order,
             decision_type="method_selection",
-            action_category=category if action_id == "qc" else action_id,
-            decision_category=category_map.get(action_id, DecisionCategory.OTHER),
-            intent=intent_map.get(action_id),
+            action_category=rule.action_category or rule.action_id,
+            decision_category=rule.decision_category,
+            intent=rule.intent,
             hypothesis="the declared upstream transformation will improve downstream scientific evidence",
-            method=method,
-            parameters=parameters,
-            rationale=rationale,
+            method=rule.method,
+            parameters=rule.parameters(observation),
+            rationale=rule.rationale,
             evidence_used=["scientific-observation"],
             confidence=0.7,
             expected_effect={"downstream_quality": 0.7},
-            alternatives_considered=list(available),
+            alternatives_considered=list(observation.available_actions),
             timestamp=datetime.now(UTC),
-            selected_value=action_id,
-            metadata={"policy": "deterministic-rule-based", "rule_action": action_id},
+            selected_value=rule.action_id,
+            metadata={
+                "policy": "deterministic-rule-based",
+                "rule_action": rule.action_id,
+            },
         )
+
+    @staticmethod
+    def _next_rule(observation: ScientificObservation) -> _Rule | None:
+        """Find the first stage that is offered, unfinished, and ready to run.
+
+        An unmet ``requires`` returns ``None`` rather than continuing the scan, and
+        that is the whole reason this is a separate function: it is the behaviour the
+        original if/elif chain had by accident of syntax -- an inner guard that
+        failed left the chain with nothing to do, and ``elif`` meant no later branch
+        was ever tested. Preserved deliberately, because the alternative reorders the
+        analysis. Asked to rank markers before clustering exists, the policy would
+        otherwise skip forward and report on results it has not computed.
+        """
+        available = observation.available_actions
+        state = observation.pipeline_state
+        for rule in _RULES:
+            if rule.action_id not in available or state.get(rule.completed_flag, False):
+                continue
+            if not all(state.get(flag, False) for flag in rule.requires):
+                return None
+            return rule
+        return None
 
     @staticmethod
     def _scientific_observation(snapshot: Any) -> ScientificObservation:

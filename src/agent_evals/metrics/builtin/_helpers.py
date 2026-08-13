@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
+from agent_evals.core.de_evidence import (
+    DE_SCORED_GROUP,
+    DE_TABLE_ARTIFACT,
+    DE_TABLE_EFFECT_COLUMN,
+    DE_TABLE_GENE_COLUMNS,
+    DE_TABLE_GROUP_COLUMN,
+    REFERENCE_EFFECT_SIZES,
+    REFERENCE_MARKERS,
+)
 from agent_evals.core.reference_columns import (
     AGENT_PREDICTION_COLUMNS,
     REFERENCE_LABEL_COLUMNS,
@@ -88,21 +98,93 @@ def unavailable(reason: str) -> MetricComputation:
 
 
 def de_ranked(context: ScientificMetricContext) -> tuple[list[str], set[str]] | None:
-    """Extract ranked genes and evaluator-owned reference markers."""
-    table = context.candidate_artifacts.get("de_table")
-    reference = context.metadata.get("reference_markers")
-    if table is not None:
-        column = "gene" if "gene" in table.columns else "names"
-        ranked = [str(value) for value in table[column].tolist()]
-    elif context.adata is not None and "rank_genes_groups" in context.adata.uns:
-        names = context.adata.uns["rank_genes_groups"]["names"]
-        group = names.dtype.names[0] if getattr(names.dtype, "names", None) else None
-        ranked = [str(row[group] if group else row) for row in names]
-    else:
+    """Extract the agent's ranked genes and the evaluator's reference markers.
+
+    The candidate ranking comes from the agent's own DE table and from nowhere
+    else. An earlier version fell back to ``adata.uns["rank_genes_groups"]`` when
+    no table was present, which cannot distinguish a block the agent computed from
+    one the dataset shipped -- and pbmc68k ships that key precomputed with
+    ``groupby="bulk_labels"``, so on the benchmark's own fixture the fallback read
+    the answer key and scored it as the agent's answer. Same family as the ``uns``
+    redaction finding in Stage 7.
+    """
+    table = context.candidate_artifacts.get(DE_TABLE_ARTIFACT)
+    reference = context.metadata.get(REFERENCE_MARKERS)
+    if table is None or not reference:
         return None
-    if not reference:
+    ranked = _ranked_genes(table, context.metadata.get(DE_SCORED_GROUP))
+    if ranked is None:
         return None
     return ranked, {str(value) for value in reference}
 
 
-__all__ = ["de_ranked", "embedding", "failed", "labels", "unavailable"]
+def _ranked_genes(table: Any, scored_group: Any) -> list[str] | None:
+    """Read one ranking out of a candidate DE table, narrowing to one group.
+
+    ``rank_genes_groups_df(adata, group=None)`` stacks every tested group into one
+    frame, so a table carrying a group column holds several rankings concatenated.
+    Reading it flat would build a mixed ranking whose top-K is whichever group
+    sorted first, and precision@K against a single population's markers would then
+    measure row order rather than biology.
+
+    A table with no group column is one ranking already and is read whole. A table
+    that has the column but not the requested group yields an empty ranking, which
+    is the honest reading: the agent characterized populations, and none of them
+    was the one being scored.
+    """
+    columns = getattr(table, "columns", ())
+    column = next((name for name in DE_TABLE_GENE_COLUMNS if name in columns), None)
+    if column is None:
+        return None
+    if scored_group is not None and DE_TABLE_GROUP_COLUMN in columns:
+        table = table[table[DE_TABLE_GROUP_COLUMN].astype(str) == str(scored_group)]
+    return [str(value) for value in table[column].tolist()]
+
+
+def de_effect_sizes(
+    context: ScientificMetricContext,
+) -> tuple[dict[str, float], dict[str, float]] | None:
+    """Pair candidate and reference effect sizes over the genes both carry.
+
+    Narrowed to the scored group for the same reason :func:`_ranked_genes` is, and
+    the consequence here is sharper: the previous per-gene lookup was
+    ``table.loc[table["gene"] == gene].iloc[0]``, which on a multi-group table
+    silently answered with whichever group happened to be listed first. So the
+    correlation was computed against an arbitrary population's fold changes.
+
+    Returns ``None`` when either side is absent, and drops any gene whose
+    candidate value is not finite -- one NaN poisons Pearson's r for the whole run.
+    """
+    table = context.candidate_artifacts.get(DE_TABLE_ARTIFACT)
+    reference = context.metadata.get(REFERENCE_EFFECT_SIZES)
+    if table is None or not reference:
+        return None
+    columns = getattr(table, "columns", ())
+    gene_column = next((name for name in DE_TABLE_GENE_COLUMNS if name in columns), None)
+    if gene_column is None or DE_TABLE_EFFECT_COLUMN not in columns:
+        return None
+    scored_group = context.metadata.get(DE_SCORED_GROUP)
+    if scored_group is not None and DE_TABLE_GROUP_COLUMN in columns:
+        table = table[table[DE_TABLE_GROUP_COLUMN].astype(str) == str(scored_group)]
+    reference_values = {str(gene): float(value) for gene, value in reference.items()}
+    candidate: dict[str, float] = {}
+    genes = table[gene_column].tolist()
+    effects = table[DE_TABLE_EFFECT_COLUMN].tolist()
+    for gene, effect in zip(genes, effects, strict=False):
+        name = str(gene)
+        if name not in reference_values or name in candidate or effect is None:
+            continue
+        value = float(effect)
+        if math.isfinite(value):
+            candidate[name] = value
+    return candidate, reference_values
+
+
+__all__ = [
+    "de_effect_sizes",
+    "de_ranked",
+    "embedding",
+    "failed",
+    "labels",
+    "unavailable",
+]

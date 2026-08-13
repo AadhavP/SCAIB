@@ -26,6 +26,7 @@ from agent_evals.scientific.operations import (
     normalize,
     pca,
     qc_filter,
+    report,
     select_hvg,
 )
 
@@ -54,6 +55,7 @@ class ScanpyExecutor(ScientificExecutor):
         "differential_expression": differential_expression,
         "differential-expression": differential_expression,
         "marker-genes": differential_expression,
+        "report": report,
     }
 
     def execute(self, action: ActionIntent, context: ScientificContext) -> ActionExecutionResult:
