@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import inspect
+import json
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
+from enum import StrEnum
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from agent_evals.agents.decisions import extract_decision
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.events import AgentEventType, AgentTrajectory
 from agent_evals.agents.runtime.protocol import (
@@ -20,9 +24,58 @@ from agent_evals.agents.runtime.protocol import (
     FinalSubmission,
 )
 from agent_evals.agents.tools import ToolExecutor
+
+# The rest of ``agents.trajectory`` is imported inside the conversion method to
+# avoid the cycle through ``agents.harness``. These two are enums with no onward
+# dependencies, and the status tables below have to be module-level constants to
+# read as the mapping they are.
+from agent_evals.agents.trajectory import FailureKind, RunTerminationStatus
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
-from agent_evals.environment.models import ActionStatus, EpisodeSnapshot, EpisodeStatus
+from agent_evals.core.progress_keys import PROGRESS_DELTA_KEY
+from agent_evals.environment.cutoff import (
+    CutoffController,
+    CutoffDecision,
+    CutoffReason,
+    CutoffReport,
+    StepObservation,
+    budget_from_specification,
+)
+from agent_evals.environment.models import (
+    ActionStatus,
+    EnvironmentStep,
+    EpisodeSnapshot,
+    EpisodeStatus,
+    agent_visible_observations,
+    agent_visible_state,
+)
 from agent_evals.environment.runtime import ScientificEnvironment
+
+
+class RuntimeVerdict(StrEnum):
+    """How the universal runtime loop decided a run ended.
+
+    A vocabulary rather than four bare literals because the loop writes these and
+    the adapter below reads them as lookup keys, and a spelling that only one side
+    knows fails *silently*: the lookup falls back to ``FAILED`` and the verdict
+    disappears without anything raising. That is how ``INCOMPLETE`` was being lost
+    before it ever reached a result file.
+    """
+
+    #: The run met its declared artifact contract.
+    COMPLETED = "completed"
+    #: The step budget ran out with the contract unmet.
+    TIMEOUT = "timeout"
+    #: Something raised, in the harness or in the agent.
+    FAILED = "failed"
+    #: The agent claimed completion and the contract was not met. A clean run
+    #: that stopped early, which is not the same finding as a broken one.
+    INCOMPLETE = "incomplete"
+    #: The controller stopped a run that was no longer making measurable
+    #: progress, or was repeating itself. One verdict rather than one per
+    #: mechanism -- ``CutoffReport.reason`` carries which fired, the same
+    #: argument that put ``ExecutionStatus`` beside ``ActionStatus`` instead of
+    #: widening it.
+    STAGNATED = "stagnated"
 
 
 class RuntimeRun(BaseModel):
@@ -36,12 +89,17 @@ class RuntimeRun(BaseModel):
     task_id: str
     started_at: datetime
     finished_at: datetime
-    termination_status: str
+    termination_status: RuntimeVerdict
     termination_reason: str | None = None
     step_count: int = Field(default=0, ge=0)
     trajectory: AgentTrajectory
     final_submission: FinalSubmission | None = None
     final_snapshot: EpisodeSnapshot
+    #: Optional so persisted runs from before controller-owned termination still
+    #: load. ``None`` means the run predates the cutoff layer, which is a
+    #: different fact from a run whose budgets were all undeclared -- that one
+    #: still gets a report, with every reason marked ``UNDECLARED``.
+    cutoff: CutoffReport | None = None
 
 
 class AgentRuntimeManager:
@@ -83,9 +141,40 @@ class AgentRuntimeManager:
     ) -> RuntimeRun:
         """Run a universal runtime while preserving partial trajectories."""
         started_at = datetime.now(UTC)
+        # Built here rather than accepted as a parameter so every existing call
+        # site -- including ``RuntimeAgentAdapter``, which constructs this manager
+        # itself -- gets controller-owned stopping without being changed.
+        controller = CutoffController(
+            budget_from_specification(
+                environment.specification.cutoff,
+                environment.specification.constraints,
+                caller_max_steps=max_steps,
+            )
+        )
+        # A monotonic origin, not ``started_at``: a wall-clock budget must not be
+        # voided or doubled because the host adjusted its clock mid-run.
+        run_origin = monotonic()
+
+        def visible_budget() -> dict[str, float | int | None]:
+            """This instant's headroom. Hard budgets only, by construction --
+            see ``CutoffController.agent_visible_budget``. An agent that cannot
+            see its step and time limits cannot plan against them, and would be
+            judged on a horizon it was never told."""
+            return controller.agent_visible_budget(
+                elapsed_seconds=monotonic() - run_origin
+            )
+
         initial = await environment.reset(seed=seed, dataset_id=dataset_id)
         trajectory = AgentTrajectory()
-        observation = _observation_from_snapshot(initial, environment.task)
+        # The budget goes on before the planning call, not after it: choosing how
+        # many steps a plan should span is exactly when an agent needs to know how
+        # many it has.
+        opening = _observation_from_snapshot(
+            initial, environment.task, environment.specification
+        )
+        observation = opening.model_copy(
+            update={"metadata": {**opening.metadata, "budget": visible_budget()}}
+        )
         trajectory.observations.append(observation)
         trajectory.record(AgentEventType.OBSERVATION, observation.model_dump(mode="json"))
         session = await runtime.initialize(context)
@@ -125,6 +214,10 @@ class AgentRuntimeManager:
                     **observation.metadata,
                     "active_plan": plan.model_dump(mode="json"),
                     "plan_review": "After each result, decide whether to keep, revise, or end this plan.",
+                    # Re-read rather than reuse the opening snapshot: planning is
+                    # the one call that can take minutes, and a stale reading
+                    # would hand the agent a horizon it no longer has.
+                    "budget": visible_budget(),
                 }
             }
         )
@@ -138,12 +231,31 @@ class AgentRuntimeManager:
             }
         )
         trajectory.record(AgentEventType.PLAN, plan.model_dump(mode="json"))
-        status = "completed"
+        status = RuntimeVerdict.COMPLETED
         reason = "agent runtime completed"
         submission: FinalSubmission | None = None
         steps = 0
         try:
-            while max_steps is None or steps < max_steps:
+            while True:
+                cutoff = controller.decide(elapsed_seconds=monotonic() - run_origin)
+                if cutoff.stop:
+                    termination = cutoff_termination(cutoff, environment)
+                    status, reason = termination.verdict, termination.reason
+                    trajectory.record(
+                        AgentEventType.FAILURE
+                        if status is not RuntimeVerdict.COMPLETED
+                        else AgentEventType.OBSERVATION,
+                        {"cutoff": cutoff.model_dump(mode="json"), "reason": reason},
+                    )
+                    await self._emit(
+                        {
+                            "type": "run_cutoff",
+                            "step": steps,
+                            "message": reason,
+                            "cutoff": cutoff.model_dump(mode="json"),
+                        }
+                    )
+                    break
                 current_step = steps + 1
                 await self._emit(
                     {
@@ -210,6 +322,13 @@ class AgentRuntimeManager:
                             action = AgentAction.model_validate(tool_result)
                         else:
                             steps += 1
+                            # A tool call that returned data rather than an action
+                            # still spends a step, so the controller has to see it
+                            # or its step count drifts below the loop's. No
+                            # signature: a tool call is not a scientific decision.
+                            controller.observe(
+                                StepObservation(step=steps, succeeded=True)
+                            )
                             continue
                     except Exception as error:
                         trajectory.record(
@@ -218,6 +337,9 @@ class AgentRuntimeManager:
                             parent_event_id=action_event.event_id,
                         )
                         steps += 1
+                        controller.observe(
+                            StepObservation(step=steps, succeeded=False)
+                        )
                         continue
                 if action.action_type in self.terminal_actions:
                     # A terminal action is a claim of completion, not proof of it.
@@ -232,7 +354,7 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                     if missing:
-                        status = "incomplete"
+                        status = RuntimeVerdict.INCOMPLETE
                         reason = (
                             "agent submitted a terminal action while required "
                             f"benchmark artifacts were missing: {sorted(missing)}"
@@ -254,7 +376,12 @@ class AgentRuntimeManager:
                     result.model_dump(mode="json"),
                     parent_event_id=action_event.event_id,
                 )
-                if not result.accepted or result.execution is None or result.execution.status != ActionStatus.SUCCEEDED:
+                step_succeeded = (
+                    result.accepted
+                    and result.execution is not None
+                    and result.execution.status == ActionStatus.SUCCEEDED
+                )
+                if not step_succeeded:
                     trajectory.record(
                         AgentEventType.FAILURE,
                         {
@@ -264,13 +391,24 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                 steps += 1
-                next_observation = _observation_from_snapshot(result.observation, environment.task)
+                controller.observe(
+                    StepObservation(
+                        step=steps,
+                        succeeded=step_succeeded,
+                        signature=decision_signature(action.action_type, action.parameters),
+                        progress_delta=progress_delta(result),
+                    )
+                )
+                next_observation = _observation_from_snapshot(
+                    result.observation, environment.task, environment.specification
+                )
                 observation = next_observation.model_copy(
                     update={
                         "metadata": {
                             **next_observation.metadata,
                             "active_plan": plan.model_dump(mode="json"),
                             "plan_review": "After this result, decide whether to keep, revise, or end the plan.",
+                            "budget": visible_budget(),
                         }
                     }
                 )
@@ -280,15 +418,6 @@ class AgentRuntimeManager:
                     observation.model_dump(mode="json"),
                     parent_event_id=action_event.event_id,
                 )
-            else:
-                produced_artifacts = set(environment.episode.snapshot().state.artifacts) if environment.episode else set()
-                required_artifacts = set(environment.task.artifacts)
-                if required_artifacts and required_artifacts.issubset(produced_artifacts):
-                    status = "completed"
-                    reason = "required benchmark artifacts were produced within the step budget"
-                else:
-                    status = "timeout"
-                    reason = "maximum runtime steps reached before the benchmark goal was satisfied"
             if submission is None:
                 submission = await runtime.terminate(session, observation)
                 trajectory.final_submission = submission
@@ -297,7 +426,7 @@ class AgentRuntimeManager:
                     submission.model_dump(mode="json"),
                 )
         except Exception as error:
-            status = "failed"
+            status = RuntimeVerdict.FAILED
             reason = str(error)
             trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
             try:
@@ -311,7 +440,9 @@ class AgentRuntimeManager:
             EpisodeStatus.CANCELLED,
         }:
             environment.terminate(
-                status=EpisodeStatus.COMPLETED if status == "completed" else EpisodeStatus.FAILED,
+                status=EpisodeStatus.COMPLETED
+                if status is RuntimeVerdict.COMPLETED
+                else EpisodeStatus.FAILED,
                 reason=reason,
             )
         final_snapshot = await environment.observe()
@@ -328,7 +459,150 @@ class AgentRuntimeManager:
             trajectory=trajectory,
             final_submission=submission,
             final_snapshot=final_snapshot,
+            cutoff=controller.report(),
         )
+
+
+#: Cutoff reasons that describe a *consumed budget*. These keep mapping to
+#: ``TIMEOUT`` because that is what they are -- the run ran out of something.
+#: Stagnation and repetition do not: the run had budget left and was not using it
+#: to make progress, which is a different finding and gets its own verdict.
+_BUDGET_CUTOFFS = frozenset(
+    {
+        CutoffReason.MAX_STEPS,
+        CutoffReason.WALL_TIME,
+        CutoffReason.COST,
+        CutoffReason.TOKENS,
+        CutoffReason.CONSECUTIVE_FAILURES,
+    }
+)
+
+
+class CutoffTermination(BaseModel):
+    """How one fired cutoff is archived.
+
+    A single object rather than three lookups at each call site, because every
+    loop that can be cut off has to reach the same verdict, status, and failure
+    kind from the same cutoff -- and getting that wrong fails *silently*, filing
+    a run the controller stopped as one that finished cleanly.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    #: What the runtime loop calls this ending.
+    verdict: RuntimeVerdict
+    #: What the archived run records as its terminal status.
+    status: RunTerminationStatus
+    #: ``None`` only when the run still met its artifact contract. Every other
+    #: ending keeps a failure, because the contract genuinely was not met.
+    failure_kind: FailureKind | None
+    #: Human-readable, and always names the cutoff detail it came from.
+    reason: str
+
+
+def cutoff_termination(
+    cutoff: CutoffDecision, environment: ScientificEnvironment
+) -> CutoffTermination:
+    """Translate a fired cutoff into how the run should be recorded.
+
+    A run that produced everything the benchmark required and then hit its step
+    budget completed; it did not time out. That check is the one the old
+    ``while``/``else`` clause performed, kept here so exhausting the budget means
+    the same thing it always did, and extended to the reasons that did not exist
+    before.
+
+    A benchmark that requires no artifacts is *not* credited with completing --
+    the ``required and`` guard is load-bearing, because an empty required set
+    makes the subset test vacuously true and would file every cut-off run as
+    finished. With nothing to check against, a run the controller stopped is
+    recorded as stopped. This became reachable once requiredness started coming
+    from ``required_task_artifacts``, which is empty for a free-execution
+    benchmark whose artifacts are all optional by design.
+    """
+    produced = (
+        set(environment.episode.snapshot().state.artifacts)
+        if environment.episode
+        else set()
+    )
+    required = environment.specification.required_task_artifacts(environment.task)
+    detail = cutoff.detail or "a run cutoff fired"
+    if required and required.issubset(produced):
+        verdict, reason = (
+            RuntimeVerdict.COMPLETED,
+            f"required benchmark artifacts were produced before the run stopped: {detail}",
+        )
+    elif cutoff.reason in _BUDGET_CUTOFFS:
+        verdict, reason = (
+            RuntimeVerdict.TIMEOUT,
+            f"the run stopped before the benchmark goal was satisfied: {detail}",
+        )
+    else:
+        verdict, reason = (
+            RuntimeVerdict.STAGNATED,
+            f"the controller stopped an unproductive run: {detail}",
+        )
+    status = _TERMINATION_STATUSES.get(verdict, RunTerminationStatus.FAILED)
+    return CutoffTermination(
+        verdict=verdict,
+        status=status,
+        failure_kind=_FAILURE_KINDS.get(status),
+        reason=reason,
+    )
+
+
+def decision_signature(action_name: str, parameters: Mapping[str, Any]) -> str:
+    """Fingerprint an action so a repeated decision is recognizable.
+
+    Takes the name and parameters rather than an action object because the typed
+    baseline holds an ``ActionIntent`` where the universal loop holds an
+    ``AgentAction``. Both must fingerprint identically or the same loop would be
+    detected on one path and not the other.
+
+    Parameters are included and sorted, so the same method at a different
+    resolution is not a repeat. ``default=str`` because a parameter value only
+    has to be *comparable* here, not round-trippable -- and a fingerprint that
+    raised on an exotic value would break the loop over a detail it is allowed to
+    be imprecise about.
+    """
+    return f"{action_name}({json.dumps(dict(parameters), sort_keys=True, default=str)})"
+
+
+def progress_delta(result: EnvironmentStep) -> float | None:
+    """Read ``dS`` off the step's reward, or ``None`` when nobody measured it.
+
+    Absent is not zero. The key is only written when two consecutive steps shared
+    a comparable metric, and treating its absence as a flat delta is what would
+    let the controller stop a run for the harness's blindness.
+    """
+    if result.reward is None:
+        return None
+    value = result.reward.metric_values.get(PROGRESS_DELTA_KEY)
+    return None if value is None else float(value)
+
+
+#: Each runtime verdict mapped to the status archived in the run record. Every
+#: member of :class:`RuntimeVerdict` needs an entry: an unmapped one falls back to
+#: ``FAILED``, which is lossy rather than wrong, so the omission would not raise
+#: and would surface only as a status that never appears in any result file.
+_TERMINATION_STATUSES: dict[RuntimeVerdict, RunTerminationStatus] = {
+    RuntimeVerdict.COMPLETED: RunTerminationStatus.COMPLETED,
+    RuntimeVerdict.TIMEOUT: RunTerminationStatus.TIMEOUT,
+    RuntimeVerdict.FAILED: RunTerminationStatus.FAILED,
+    RuntimeVerdict.INCOMPLETE: RunTerminationStatus.INCOMPLETE,
+    RuntimeVerdict.STAGNATED: RunTerminationStatus.STAGNATED,
+}
+
+#: How a non-completed status is described in the retained failure. A failure is
+#: still recorded in every case -- the run genuinely did not meet its contract --
+#: but the kind now says which contract, instead of reporting a clean early stop
+#: and a timeout as the same agent malfunction.
+_FAILURE_KINDS: dict[RunTerminationStatus, FailureKind] = {
+    RunTerminationStatus.TIMEOUT: FailureKind.TIMEOUT,
+    RunTerminationStatus.STAGNATED: FailureKind.STAGNATION,
+    RunTerminationStatus.INCOMPLETE: FailureKind.INCOMPLETE_SUBMISSION,
+    RunTerminationStatus.UNAVAILABLE: FailureKind.ADAPTER_UNAVAILABLE,
+    RunTerminationStatus.INVALID_CONFIGURATION: FailureKind.INVALID_ACTION,
+}
 
 
 class RuntimeAgentAdapter:
@@ -353,12 +627,7 @@ class RuntimeAgentAdapter:
     ) -> Any:
         """Run and convert a universal result into the normalized AgentRun model."""
         from agent_evals.agents.harness import build_agent_run
-        from agent_evals.agents.trajectory import (
-            AgentFailure,
-            FailureKind,
-            RawTraceEvent,
-            RunTerminationStatus,
-        )
+        from agent_evals.agents.trajectory import AgentFailure, RawTraceEvent
         from agent_evals.agents.trajectory import (
             AgentManifest as LegacyAgentManifest,
         )
@@ -398,13 +667,16 @@ class RuntimeAgentAdapter:
             )
             for event in universal.trajectory.events
         ]
-        status = {
-            "completed": RunTerminationStatus.COMPLETED,
-            "timeout": RunTerminationStatus.TIMEOUT,
-            "failed": RunTerminationStatus.FAILED,
-        }.get(universal.termination_status, RunTerminationStatus.FAILED)
+        status = _TERMINATION_STATUSES.get(
+            universal.termination_status, RunTerminationStatus.FAILED
+        )
         failures = (
-            [AgentFailure(kind=FailureKind.AGENT_ERROR, message=universal.termination_reason or "runtime failed")]
+            [
+                AgentFailure(
+                    kind=_FAILURE_KINDS.get(status, FailureKind.AGENT_ERROR),
+                    message=universal.termination_reason or "runtime failed",
+                )
+            ]
             if status != RunTerminationStatus.COMPLETED
             else []
         )
@@ -438,41 +710,122 @@ class RuntimeAgentAdapter:
                 "final_submission": universal.final_submission.model_dump(mode="json")
                 if universal.final_submission is not None
                 else None,
+                # Persisted here because this is the only conversion between the
+                # runtime result and the archived run, so a cutoff report left out
+                # of it would be computed correctly every run and read by nobody.
+                "cutoff": universal.cutoff.model_dump(mode="json")
+                if universal.cutoff is not None
+                else None,
             },
         )
 
 
-def _observation_from_snapshot(snapshot: EpisodeSnapshot, task: TaskSpecification) -> AgentObservation:
-    """Project an environment snapshot and scientific goal into agent-visible context."""
-    termination = [
-        {
-            "name": condition.name,
-            "description": condition.description,
-            "condition": condition.condition,
-        }
-        for condition in task.termination
-    ]
+def _observation_from_snapshot(
+    snapshot: EpisodeSnapshot,
+    task: TaskSpecification,
+    specification: BenchmarkSpecification | None = None,
+) -> AgentObservation:
+    """Project an environment snapshot and scientific goal into agent-visible context.
+
+    This is the only place an agent is handed the episode state wholesale, so it
+    is the one place the ``visible_to_agent`` boundary has to hold. Both channels
+    that carry observations -- the state itself and the convenience copy under
+    ``metadata`` -- are filtered through :func:`agent_visible_state` and
+    :func:`agent_visible_observations`; filtering one and not the other filters
+    nothing, since the executor's isolation report would still reach the agent
+    through whichever was left.
+
+    ``declared_artifacts`` and ``required_artifacts`` are separate keys because
+    they answer different questions and the task's reference list only answers the
+    first. An agent needs every declared id to label its outputs with -- on the
+    free tier an artifact is only recorded if the agent names it -- but publishing
+    that list as *required* told the free benchmark's agent to produce four files
+    when the benchmark demands none, which is a false contract that costs real
+    steps. Requiredness is resolvable only with the specification, so without one
+    the key is omitted rather than guessed: an absent key reads as unknown, and an
+    empty list would assert that nothing is required.
+    """
+    visible = {
+        key: value.model_dump(mode="json")
+        for key, value in agent_visible_observations(snapshot.state.observations).items()
+    }
     return AgentObservation(
-        state=snapshot.state.model_dump(mode="json"),
+        state=agent_visible_state(snapshot.state).model_dump(mode="json"),
         available_actions=list(task.allowed_actions),
         artifacts=[artifact.model_dump(mode="json") for artifact in snapshot.state.artifacts.values()],
         metadata={
             "episode_id": snapshot.state.episode_id,
             "step": snapshot.state.current_step,
-            "scenario": {
-                "name": task.name,
-                "objective": task.objective,
-                "description": task.description,
-                "success_criteria": termination,
-                "required_artifacts": list(task.artifacts),
-                "required_metrics": list(task.metrics),
-            },
+            "scenario": _scenario(task, specification),
             "goal": task.objective,
-            "observations": {
-                key: value.model_dump(mode="json") for key, value in snapshot.state.observations.items()
-            },
+            "observations": visible,
         },
     )
+
+
+def _scenario(
+    task: TaskSpecification,
+    specification: BenchmarkSpecification | None,
+) -> dict[str, Any]:
+    """Describe what the task asks for, without prescribing how to do it.
+
+    ``artifact_contracts`` is the discoverable half of the output contract. The
+    benchmark validates a produced artifact against declared
+    :class:`ValidationRule` s and scores the verdict -- ``artifact_validity``
+    carries weight inside ``trajectory_quality`` -- and until now the rules were
+    published nowhere, so an agent could satisfy "columns include
+    barcode,predicted_label" only by guessing the column name. A rule the agent
+    cannot read is one it can only pass by luck, and luck is not what the
+    benchmark means to measure.
+
+    Publishing them leaks nothing: a rule names the shape of the agent's *own*
+    output and the vocabulary of its own intent parameters, never reference
+    biology, and the benchmark YAML that declares it is public anyway. This is the
+    line the environment documentation is meant to hold -- specify the
+    environment and the contract, never the method.
+    """
+    scenario: dict[str, Any] = {
+        "name": task.name,
+        "objective": task.objective,
+        "description": task.description,
+        "success_criteria": [
+            {
+                "name": condition.name,
+                "description": condition.description,
+                "condition": condition.condition,
+            }
+            for condition in task.termination
+        ],
+        "declared_artifacts": list(task.artifacts),
+        "required_metrics": list(task.metrics),
+    }
+    if specification is None:
+        return scenario
+    required = specification.required_task_artifacts(task)
+    declared = {artifact.id: artifact for artifact in specification.artifacts}
+    scenario["required_artifacts"] = [
+        artifact_id for artifact_id in task.artifacts if artifact_id in required
+    ]
+    scenario["artifact_contracts"] = [
+        {
+            "artifact_id": artifact.id,
+            "name": artifact.name,
+            "description": artifact.description,
+            "kind": artifact.kind.value,
+            "format": artifact.format,
+            "required": artifact.id in required,
+            "validation": [
+                {
+                    "name": rule.name,
+                    "description": rule.description,
+                    "rule": rule.rule,
+                }
+                for rule in artifact.validation
+            ],
+        }
+        for artifact in (declared[key] for key in task.artifacts if key in declared)
+    ]
+    return scenario
 
 
 def _action_to_intent(
@@ -495,10 +848,18 @@ def _action_to_intent(
         (item for item in specification.actions if item.id == action_id),
         None,
     )
-    rationale = action.reasoning_metadata.get("explanation") or action.reasoning_metadata.get("summary")
-    metadata = {
+    reasoning = action.reasoning_metadata
+    rationale = (
+        reasoning.get("explanation") or reasoning.get("summary") or reasoning.get("rationale")
+    )
+    # Coerce before the metadata reaches ``decision_cascade_from_episode``, which
+    # indexes these keys by type. Unparsed, a string where it expects a mapping
+    # raised, and a string where it expects a list recorded one item per
+    # character -- inventing evidence the agent never offered.
+    extracted = extract_decision(reasoning)
+    metadata: dict[str, Any] = {
         "runtime_action_type": action.action_type,
-        **action.reasoning_metadata,
+        **extracted.metadata,
     }
     if declared_action is not None:
         metadata.update(
@@ -524,8 +885,16 @@ def _model_dump(value: Any) -> dict[str, Any]:
 
 
 def _missing_required_artifacts(environment: ScientificEnvironment) -> set[str]:
-    """Return the task's required artifact IDs that have not been produced."""
-    required = set(environment.task.artifacts)
+    """Return the required artifact IDs this run has not produced.
+
+    Requiredness comes from ``BenchmarkSpecification.required_task_artifacts``
+    rather than from the task's reference list, because a benchmark whose
+    artifacts are deliberately optional must be finishable. A free-execution
+    benchmark cannot demand a fixed set of files without dictating the pipeline
+    shape it exists to measure, so per-invocation enforcement happens through the
+    action's ``produces`` parameter instead.
+    """
+    required = environment.specification.required_task_artifacts(environment.task)
     if not required:
         return set()
     produced = (
@@ -545,4 +914,12 @@ def _is_registered_tool(executor: ToolExecutor, name: str) -> bool:
     return True
 
 
-__all__ = ["AgentRuntimeManager", "RuntimeAgentAdapter", "RuntimeRun"]
+__all__ = [
+    "AgentRuntimeManager",
+    "CutoffTermination",
+    "RuntimeAgentAdapter",
+    "RuntimeRun",
+    "cutoff_termination",
+    "decision_signature",
+    "progress_delta",
+]

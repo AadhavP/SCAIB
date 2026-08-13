@@ -68,6 +68,11 @@ class DefaultTraceNormalizer:
     _EVENT_MAP: ClassVar[dict[str, EventType]] = {
         "message": EventType.AGENT_MESSAGE,
         "assistant_message": EventType.AGENT_MESSAGE,
+        # ``AgentEventType.PLAN`` is emitted by every runtime turn loop. Absent
+        # from this table it fell through to ``AGENT_MESSAGE``, which is why no
+        # consumer could find plans in a normalized trajectory.
+        "plan": EventType.PLAN_DECLARED,
+        "plan_declared": EventType.PLAN_DECLARED,
         "observation": EventType.OBSERVATION_RECEIVED,
         "tool_call": EventType.TOOL_CALL,
         "tool_result": EventType.TOOL_RESULT,

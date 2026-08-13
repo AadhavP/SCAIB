@@ -7,6 +7,7 @@ import math
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.evaluation.profiles.base import MetricGroupProfile, MetricProfileEntry
+from agent_evals.metrics.results import MetricResult, MetricStatus
 
 
 class MetricScoreInput(BaseModel):
@@ -18,7 +19,53 @@ class MetricScoreInput(BaseModel):
     value: float | None = Field(default=None, ge=0, le=1)
     applicable: bool = True
     structurally_ineligible: bool = False
-    status: str = "computed"
+    #: Typed rather than a bare ``str``. This field held the literal
+    #: ``"computed"`` and was compared against the same literal below, while the
+    #: caller filled it from ``MetricStatus``. Renaming a status value would then
+    #: have moved every metric into ``failed_metrics`` with nothing raising --
+    #: the report would have claimed a total metric failure on a healthy run.
+    status: MetricStatus = MetricStatus.SCORED
+
+    @classmethod
+    def from_metric_result(cls, result: MetricResult) -> MetricScoreInput:
+        """Translate one computed metric into an aggregator input.
+
+        A classmethod rather than a literal at the call site because the mark
+        below decides whether a metric is dropped or charged as a failure, and
+        getting it wrong fails *silently* -- the score simply comes out lower with
+        no error anywhere. ``metric_id`` is the dotted registry id the profiles
+        key on; ``metric_name`` is a human-readable title, and feeding that here
+        would make every profile lookup miss.
+        """
+        return cls(
+            name=result.metric_id,
+            value=result.normalized_value,
+            applicable=result.eligible,
+            # Asks the vocabulary which statuses leave the aggregate rather than
+            # naming one here. Spelling ``is INELIGIBLE`` meant a second excluding
+            # status was included at 0.0 and reported as a metric the agent failed.
+            structurally_ineligible=result.status.excluded_from_scoring,
+            status=result.status,
+        )
+
+    @classmethod
+    def from_external_score(cls, name: str, value: float | None) -> MetricScoreInput:
+        """Translate a score computed outside the metric registry.
+
+        Built even when ``value`` is ``None``, and marked excluded in that case.
+        Omitting it would not leave it out: an ``external_score`` is injected as a
+        *required* entry and a required entry with no result is scored ``0.0``, so
+        the domain would report a zero for something nobody tried to measure --
+        the opposite error to the free ``1.0`` this replaced.
+        """
+        measured = value is not None
+        return cls(
+            name=name,
+            value=value,
+            applicable=measured,
+            structurally_ineligible=not measured,
+            status=MetricStatus.SCORED if measured else MetricStatus.MISSING,
+        )
 
 
 class DomainScore(BaseModel):
@@ -30,6 +77,14 @@ class DomainScore(BaseModel):
     included_metrics: list[str] = Field(default_factory=list)
     excluded_metrics: list[str] = Field(default_factory=list)
     failed_metrics: list[str] = Field(default_factory=list)
+    #: The excluded metrics the profile marked *required*, which is what collapses
+    #: :attr:`value` to ``None`` even when other metrics in the domain scored
+    #: perfectly well. Recorded separately from :attr:`excluded_metrics` because
+    #: only this layer knows which entries were required, and a reader trying to
+    #: explain a ``None`` domain otherwise has to guess which of the exclusions
+    #: mattered -- an optional metric that simply did not apply looks identical to
+    #: the required one that voided the domain.
+    blocking_metrics: list[str] = Field(default_factory=list)
     formula: str
 
 
@@ -54,10 +109,11 @@ class WeightedGeometricAggregator:
                 excluded.append(name)
                 continue
             value = 0.0 if result is None or result.value is None else result.value
-            if result is None or result.status != "computed":
+            if result is None or result.status is not MetricStatus.SCORED:
                 failed.append(name)
             included.append((name, entry.weight, max(0.0, min(1.0, value))))
-        if entries and any(entry.required and name in excluded for name, entry in entries.items()):
+        blocking = [name for name, entry in entries.items() if entry.required and name in excluded]
+        if blocking:
             aggregate: float | None = None
         elif not included:
             aggregate = None
@@ -77,6 +133,7 @@ class WeightedGeometricAggregator:
             included_metrics=[name for name, _, _ in included],
             excluded_metrics=excluded,
             failed_metrics=failed,
+            blocking_metrics=blocking,
             formula=formula,
         )
 

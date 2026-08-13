@@ -8,6 +8,7 @@ from agent_evals.scientific.operations.hvg import select_hvg
 from agent_evals.scientific.operations.normalize import normalize
 from agent_evals.scientific.operations.pca import pca
 from agent_evals.scientific.operations.qc import qc_filter
+from agent_evals.scientific.operations.report import report
 
 __all__ = [
     "annotate",
@@ -17,5 +18,6 @@ __all__ = [
     "normalize",
     "pca",
     "qc_filter",
+    "report",
     "select_hvg",
 ]

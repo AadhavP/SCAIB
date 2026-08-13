@@ -37,7 +37,11 @@ class ScientificArtifact(BaseModel):
             format=self.format,
             uri=str(self.path),
             checksum=self.checksum,
-            validated=self.path.exists(),
+            # Existence is not validation -- an empty file exists. The bit is set
+            # by the environment's artifact validator, which reads the file and
+            # checks it against the rules the benchmark declared. Leaving it False
+            # here means "not yet checked", which is what is true at this point.
+            validated=False,
             metadata=self.metadata,
         )
 

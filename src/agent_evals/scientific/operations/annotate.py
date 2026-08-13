@@ -10,11 +10,8 @@ picked sensible markers, not to have copied the answer key.
 
 from typing import Any
 
-from agent_evals.scientific.context import (
-    RESERVED_REFERENCE_COLUMNS,
-    OperationOutput,
-    ScientificContext,
-)
+from agent_evals.core.reference_columns import RESERVED_REFERENCE_COLUMNS
+from agent_evals.scientific.context import OperationOutput, ScientificContext
 from agent_evals.scientific.operations.cluster import CLUSTER_COLUMN
 
 #: Observation column holding the agent's per-cell prediction.

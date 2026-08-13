@@ -5,14 +5,21 @@ from agent_evals.evaluation.scoring.aggregation import (
     MetricScoreInput,
     WeightedGeometricAggregator,
 )
-from agent_evals.evaluation.scoring.domains import ScientificScore, aggregate_domains
+from agent_evals.evaluation.scoring.domains import (
+    UNRECORDED_METRIC_REASON,
+    ScientificScore,
+    aggregate_domains,
+    describe_unmeasured_domains,
+)
 from agent_evals.evaluation.scoring.weights import FrozenWeight
 
 __all__ = [
+    "UNRECORDED_METRIC_REASON",
     "DomainScore",
     "FrozenWeight",
     "MetricScoreInput",
     "ScientificScore",
     "WeightedGeometricAggregator",
     "aggregate_domains",
+    "describe_unmeasured_domains",
 ]

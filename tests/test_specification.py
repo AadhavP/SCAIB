@@ -24,6 +24,7 @@ def test_realistic_examples_load_and_registry_search() -> None:
     assert registry.list_ids() == [
         "pbmc-batch-correction",
         "pbmc-cell-annotation",
+        "pbmc-cell-annotation-free",
         "pbmc-differential-expression",
     ]
     assert registry.search(tags={"single-cell"})

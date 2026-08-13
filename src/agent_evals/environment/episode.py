@@ -21,6 +21,7 @@ from agent_evals.environment.models import (
     Observation,
     ResourceUsage,
     RewardRecord,
+    StateDelta,
     utc_now,
 )
 
@@ -181,6 +182,16 @@ class Episode:
             },
         )
         return record
+
+    def record_state_change(self, delta: StateDelta) -> None:
+        """Append what observation says the last action did to the environment.
+
+        Recorded even when the action failed, because a step that crashed partway
+        through can still have changed the data, and a trace that showed only
+        successful changes would make a half-applied filter invisible.
+        """
+        self._ensure_running()
+        self._append_event(EventType.ENVIRONMENT_STATE_CHANGED, delta.summary())
 
     def record_outputs(
         self,

@@ -8,11 +8,18 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from agent_evals.agents.decisions.verification import (
+    DecisionVerification,
+    verify_state_claim,
+)
+from agent_evals.core.intent_parameters import EXECUTION_PARAMETERS
 from agent_evals.environment.models import (
     ActionStatus,
     ArtifactRecord,
     EpisodeSnapshot,
     EventType,
+    ResourceUsage,
+    StateDelta,
 )
 
 
@@ -82,6 +89,19 @@ class RunTerminationStatus(StrEnum):
     CANCELLED = "cancelled"
     UNAVAILABLE = "unavailable"
     INVALID_CONFIGURATION = "invalid_configuration"
+    #: The agent stopped of its own accord and the declared artifact contract was
+    #: not met. Distinct from :attr:`FAILED`, which is for a run that broke: an
+    #: incomplete run executed cleanly and simply stopped too early, and the two
+    #: call for different reading. The runtime already produced this verdict and
+    #: it was being flattened to ``FAILED`` on the way into the archive, so an
+    #: agent that quit early was indistinguishable from one that crashed.
+    INCOMPLETE = "incomplete"
+    #: The controller stopped the run because it was no longer making measurable
+    #: scientific progress, or was repeating work. Distinct from :attr:`TIMEOUT`,
+    #: which means a budget was consumed: a stagnated run still had budget and was
+    #: not using it productively, and reading the two as one would make an agent
+    #: that looped indistinguishable from one that ran out of room to finish.
+    STAGNATED = "stagnated"
 
 
 class FailureKind(StrEnum):
@@ -95,6 +115,13 @@ class FailureKind(StrEnum):
     WORKSPACE_ERROR = "workspace_error"
     RESOURCE_LIMIT = "resource_limit"
     TIMEOUT = "timeout"
+    #: A verified-false completion claim: the agent said it was done and the
+    #: required artifacts were not there. Nothing errored, so filing this under
+    #: :attr:`AGENT_ERROR` misattributed a premature stop to a malfunction.
+    INCOMPLETE_SUBMISSION = "incomplete_submission"
+    #: The run was stopped for making no measurable progress, or for repeating
+    #: itself. Not a :attr:`RESOURCE_LIMIT`: nothing was exhausted.
+    STAGNATION = "stagnation"
     UNKNOWN = "unknown"
 
 
@@ -197,6 +224,13 @@ class ScientificDecision(AgentRuntimeModel):
     decision_category: DecisionCategory = DecisionCategory.OTHER
     intent: str | None = None
     hypothesis: str | None = None
+    #: Step the agent's own plan said this was, when it said so. Recorded so a
+    #: reader can ask whether the agent followed its stated plan or abandoned
+    #: it, which is a finding either way. It is never checked against the plan
+    #: to *reject* a decision -- a plan is an evaluation object, not a
+    #: constraint, and an agent that adapts when the data contradicts its plan
+    #: is doing science rather than disobeying.
+    plan_reference: str | None = None
     method: str | None = None
     chosen_method: str | None = None
     parameters: dict[str, Any] = Field(default_factory=dict)
@@ -216,6 +250,24 @@ class ScientificDecision(AgentRuntimeModel):
     confidence: float | None = Field(default=None, ge=0, le=1)
     expected_effect: dict[str, float] = Field(default_factory=dict)
     downstream_dependency: dict[str, Any] = Field(default_factory=dict)
+    #: What the agent said this step did to the data. Recorded because a claim is
+    #: evidence about the agent even when it is false -- and especially then.
+    claimed_state_delta: dict[str, Any] = Field(default_factory=dict)
+    #: What the harness measured the step doing, by comparing state before and
+    #: after. ``None`` when nothing was observed, which is not the same as
+    #: nothing having happened.
+    observed_state_delta: StateDelta | None = None
+    #: The comparison of the two above. Populated whenever either exists, so a
+    #: reader never has to redo the comparison to find out whether it was done.
+    verification: DecisionVerification | None = None
+    #: What this one step cost. Present per decision, not just per run, because
+    #: an efficiency claim about a *trajectory* needs to know which steps were
+    #: expensive rather than only what the total was.
+    resource_usage: ResourceUsage | None = None
+    #: Which agent produced this decision, for runs with more than one. Opaque
+    #: on purpose: topology is metadata the benchmark records, never something it
+    #: scores, so this is a label rather than a structure.
+    agent_origin: str | None = None
     method_choice: MethodChoice | None = None
     parameter_choice: ParameterChoice | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -370,7 +422,27 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
         output_artifacts = [artifact.artifact_id for artifact in record.result.artifacts]
         method_name = metadata.get("method") or record.intent.parameters.get("method")
         category = _decision_category(metadata.get("decision_category"), record.intent.action_id)
+        # Coerced again here, not redundantly: only runtime turns pass through
+        # the decision extraction layer. ``mock``, ``action_mapper`` and
+        # ``scientific/runner`` build intents directly, so for those paths this
+        # is the only coercion these two fields ever get.
         evidence_used = [str(item) for item in metadata.get("evidence_used", [])]
+        # The claim comes from the agent's metadata and the observation from the
+        # executor's result, and they are read from those two separate places on
+        # purpose: if the observation were ever derived from the claim, the
+        # verification below would be checking the agent against itself.
+        claimed_state_delta = dict(metadata.get("state_claim") or {})
+        observed_state_delta = record.result.observed_state_delta
+        verification = (
+            verify_state_claim(claimed_state_delta, observed_state_delta)
+            if claimed_state_delta or observed_state_delta is not None
+            else None
+        )
+        # ``method`` is the method choice, not a parameter of it, and the
+        # execution parameters are mechanics rather than methodology: a
+        # free-execution step would otherwise emit a parameter decision whose
+        # selected value is the agent's entire program, scored as if choosing a
+        # script were a methodological choice comparable to choosing n_pcs=50.
         parameter_choices = [
             ParameterChoice(
                 name=name,
@@ -379,7 +451,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 source="action_intent",
             )
             for name, value in record.intent.parameters.items()
-            if name != "method"
+            if name != "method" and name not in EXECUTION_PARAMETERS
         ]
         method_choice = (
             MethodChoice(
@@ -403,6 +475,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 decision_category=category,
                 intent=metadata.get("intent"),
                 hypothesis=metadata.get("hypothesis"),
+                plan_reference=_optional_str(metadata.get("plan_reference")),
                 method=str(method_name) if method_name is not None else None,
                 chosen_method=str(method_name) if method_name is not None else None,
                 parameters=record.intent.parameters,
@@ -426,11 +499,23 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                     if isinstance(value, (int, float))
                 },
                 downstream_dependency=dict(metadata.get("downstream_dependency", {})),
+                claimed_state_delta=claimed_state_delta,
+                observed_state_delta=observed_state_delta,
+                verification=verification,
+                resource_usage=record.result.resource_usage,
+                agent_origin=_optional_str(metadata.get("agent_origin")),
                 method_choice=method_choice,
                 metadata=metadata,
             )
         )
         method_decision_id = f"{decision_id}-method"
+        # The step decision above is the only one that carries the state claim,
+        # the observation, and the cost. The method and parameter decisions below
+        # are facets of that same execution, so repeating any of the three would
+        # make one discrepancy look like three and one step's runtime look like
+        # several. ``agent_origin`` does repeat, because attribution is a label
+        # rather than a measurement and nothing aggregates it.
+        agent_origin = _optional_str(metadata.get("agent_origin"))
         if method_choice is not None:
             decisions.append(
                 ScientificDecision(
@@ -452,6 +537,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                     source_event_ids=list(metadata.get("source_event_ids", [])),
                     timestamp=record.recorded_at,
                     selected_value=method_choice.method_name,
+                    agent_origin=agent_origin,
                     method_choice=method_choice,
                 )
             )
@@ -477,6 +563,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                     source_event_ids=list(metadata.get("source_event_ids", [])),
                     timestamp=record.recorded_at,
                     selected_value=parameter_choice.value,
+                    agent_origin=agent_origin,
                     parameter_choice=parameter_choice,
                 )
             )
@@ -504,6 +591,11 @@ def _decision_category(value: Any, action_id: str) -> DecisionCategory:
         "differential-expression": DecisionCategory.DIFFERENTIAL_EXPRESSION,
     }
     return mapping.get(action_id, DecisionCategory.OTHER)
+
+
+def _optional_str(value: Any) -> str | None:
+    """Coerce an untyped metadata value to text, keeping absence as absence."""
+    return None if value is None else str(value)
 
 
 def _value_type(value: Any) -> str:

@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, ClassVar
 
+from agent_evals.environment.execution.dataset import dataset_delta, written_obs_columns
+from agent_evals.environment.execution.observer import InMemoryDatasetObserver
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
@@ -24,6 +26,7 @@ from agent_evals.scientific.operations import (
     normalize,
     pca,
     qc_filter,
+    report,
     select_hvg,
 )
 
@@ -52,6 +55,7 @@ class ScanpyExecutor(ScientificExecutor):
         "differential_expression": differential_expression,
         "differential-expression": differential_expression,
         "marker-genes": differential_expression,
+        "report": report,
     }
 
     def execute(self, action: ActionIntent, context: ScientificContext) -> ActionExecutionResult:
@@ -66,17 +70,29 @@ class ScanpyExecutor(ScientificExecutor):
                 intent_id=action.intent_id, action_id=action.action_id, status=ActionStatus.FAILED,
                 error=error, started_at=started, completed_at=datetime.now(UTC),
             )
-        columns_before = {str(column) for column in context.adata.obs.columns}
+        dataset_before = InMemoryDatasetObserver(context.adata).snapshot()
         try:
             output = operation(context, action.parameters)
             if output.adata is not None:
                 context.adata = output.adata
-            # Attribute newly written observation columns to the agent so scoring
-            # can distinguish agent predictions from pre-existing reference labels.
-            new_columns = {
-                str(column) for column in context.adata.obs.columns
-            } - columns_before
-            context.record_produced_columns(new_columns)
+            # Attribute what this operation wrote to the agent so scoring can tell
+            # an agent prediction from a column the dataset shipped with.
+            #
+            # Observed by fingerprint rather than by set-differencing column
+            # names, for two reasons. Provenance now comes from the same
+            # mechanism the free-execution tier uses, so the two tiers cannot
+            # disagree about identical work. And a name-only comparison is blind
+            # to an operation that overwrites an existing column in place, which
+            # is precisely the write the reserved-column guard exists to catch.
+            #
+            # The 'before' fingerprint is taken above rather than a reference to
+            # ``adata`` being held, because operations may mutate in place: a
+            # reference read afterwards would report the after state twice.
+            delta = dataset_delta(
+                dataset_before,
+                InMemoryDatasetObserver(context.adata).snapshot(),
+            )
+            context.record_produced_columns(written_obs_columns(delta))
             for artifact in output.artifacts:
                 context.add_artifact(artifact)
             artifact_records = [artifact.to_artifact_record() for artifact in output.artifacts]
@@ -88,6 +104,7 @@ class ScanpyExecutor(ScientificExecutor):
                 intent_id=action.intent_id, action_id=action.action_id, status=ActionStatus.SUCCEEDED,
                 outputs=output.outputs, artifacts=artifact_records,
                 resource_usage=ResourceUsage(wall_time_seconds=perf_counter() - timer),
+                observed_state_delta=delta,
                 started_at=started, completed_at=datetime.now(UTC),
             )
         except Exception as error:  # operation errors must be represented in the trajectory
@@ -96,6 +113,15 @@ class ScanpyExecutor(ScientificExecutor):
             return ActionExecutionResult(
                 intent_id=action.intent_id, action_id=action.action_id, status=ActionStatus.FAILED,
                 error=message, resource_usage=ResourceUsage(wall_time_seconds=perf_counter() - timer),
+                # An operation that raised partway through can still have changed
+                # the data, so the observation is attached to the failure too.
+                # Recomputed here rather than reused, because the exception may
+                # have come from anywhere above -- including before the delta
+                # existed.
+                observed_state_delta=dataset_delta(
+                    dataset_before,
+                    InMemoryDatasetObserver(context.adata).snapshot(),
+                ),
                 started_at=started, completed_at=datetime.now(UTC),
             )
 

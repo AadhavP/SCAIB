@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY", repr=False)
     openrouter_base_url: str | None = Field(default=None, validation_alias="OPENROUTER_BASE_URL")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
+    # Black-box agent boundary: a URL that answers POST /step, plus its bearer
+    # token. Declared here so the endpoint is configuration rather than a flag
+    # someone has to remember on every invocation.
+    scaib_agent_endpoint: str | None = Field(default=None, validation_alias="SCAIB_AGENT_ENDPOINT")
+    scaib_agent_token: str | None = Field(default=None, validation_alias="SCAIB_AGENT_TOKEN", repr=False)
 
     api: APISettings = Field(default_factory=APISettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)

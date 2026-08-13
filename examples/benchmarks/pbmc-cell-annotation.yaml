@@ -98,8 +98,18 @@ actions:
     name: Normalize and log transform
     purpose: Produce a comparable expression representation for downstream analysis.
     parameters:
+      # Optional here and required on the differential-expression benchmark, which
+      # is the difference between a stage this task takes for granted and one it
+      # asks the agent to justify. Both catalogs offer the same two choices so a
+      # single normalization decision validates against either.
+      - name: method
+        description: Normalization method.
+        type: enum
+        required: false
+        default: library_size_log1p
+        choices: [library_size_log1p, median_counts_log1p]
       - name: target_sum
-        description: Library-size target for per-cell normalization.
+        description: "Library-size target per cell; permitted only with library_size_log1p."
         type: number
         required: false
         default: 10000
@@ -442,7 +452,10 @@ artifacts:
     format: h5ad
     produced_by: [annotate]
     validation:
-      - {name: complete-labels, description: Every retained cell has one allowed label, rule: obs.cell_type is non-null and belongs to label_vocabulary}
+      # Targets predicted_label, not cell_type: cell_type is a reserved reference
+      # column that an agent is refused permission to write, so a rule asking for
+      # it could only ever be satisfied by the answer key.
+      - {name: complete-labels, description: Every retained cell has one allowed label, rule: predicted_label is non-null and belongs to label_vocabulary}
 constraints:
   cpu_only: true
   internet_access: false
@@ -451,6 +464,33 @@ constraints:
   allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy]
   deterministic: true
   random_seed: 42
+# Declared so the controller is enforcing a number this benchmark chose rather
+# than a harness fallback. The typed catalog is eight actions and a step may
+# legitimately be retried, so twenty leaves room for a retry per stage without
+# letting a loop spend an entire budget.
+#
+# `max_wall_time_seconds` deliberately exceeds `constraints.max_runtime_seconds`:
+# the constraint bounds time inside the executor, this bounds the whole run
+# including the agent's deliberation, which is the larger quantity.
+#
+# `max_repeated_decisions` is left undeclared. On this tier a decision signature
+# is an action name plus typed parameters, and re-running `cluster` at the same
+# resolution against a dataset a previous step changed is legitimately different
+# work.
+#
+# `stagnation_window` is left undeclared on purpose, and this is a blocker rather
+# than a preference. The biology domain is a geometric mean that includes
+# `cell_annotation.rare_recall`, which currently normalizes to exactly 0.0 for
+# every agent whose label spellings do not match the reference vocabulary. A
+# single 0.0 annihilates the product, so `S_t` is pinned at 0.0 for the whole run
+# and every `dS` is a measured 0.0 -- verified on a real run, where all five
+# measured deltas were 0.0 while `clustering.ari` was 0.81 and moving. The
+# controller cannot tell a degenerate scale from a genuinely flat one, so arming
+# the window here would cut off correct runs. Arm it once the metric is fixed.
+cutoff:
+  max_steps: 20
+  max_wall_time_seconds: 3600
+  max_consecutive_failures: 3
 tasks:
   - id: cell-annotation
     name: PBMC cell-type annotation

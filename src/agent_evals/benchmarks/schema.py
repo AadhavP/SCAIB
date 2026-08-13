@@ -15,9 +15,21 @@ from typing import Any, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent_evals.core.artifact_rules import (
+    UnparseableValidationRule,
+    parse_validation_rule,
+)
 from agent_evals.metrics.models import MetricRole
 
 CURRENT_SCHEMA_VERSION = "1.0.0"
+
+#: Tolerance for the scoring-weights sum check. Three exact thirds are not
+#: representable in binary floating point, so an exact comparison would reject
+#: the neutral default. Deliberately a local literal rather than an import from
+#: ``evaluation.global_score``: the dependency runs the other way (``evaluation``
+#: consumes this schema), and both layers guard the same invariant *loudly*, so a
+#: drift here surfaces as a rejected benchmark rather than as a wrong score.
+_WEIGHT_SUM_TOLERANCE = 1e-6
 """Newest benchmark specification schema version understood by this package."""
 
 
@@ -208,6 +220,21 @@ class EstimatedCost(SpecificationModel):
     complexity: str | None = None
 
 
+class ActionKind(StrEnum):
+    """Whether an action names an operation or hands the agent the keyboard.
+
+    A ``TYPED`` action is one the benchmark implements: the agent selects it and
+    supplies declared parameters, and the harness performs the science. A
+    ``FREE_EXECUTION`` action inverts that -- the agent supplies the program and
+    the harness only runs it and observes what changed. The two coexist because
+    they measure different things, and a benchmark that offers only the first
+    measures how well an agent fills in someone else's pipeline.
+    """
+
+    TYPED = "typed"
+    FREE_EXECUTION = "free_execution"
+
+
 class ActionSpecification(SpecificationModel):
     """Interface contract for an operation an agent may request.
 
@@ -219,12 +246,31 @@ class ActionSpecification(SpecificationModel):
     id: str
     name: str = Field(min_length=1)
     purpose: str = Field(min_length=1)
+    kind: ActionKind = ActionKind.TYPED
     parameters: list[ParameterSpecification] = Field(default_factory=list)
     required_inputs: list[str] = Field(default_factory=list)
     expected_outputs: list[str] = Field(default_factory=list)
     estimated_cost: EstimatedCost | None = None
 
     _identifier = field_validator("id")(_validate_identifier)
+
+    @model_validator(mode="after")
+    def validate_free_execution(self) -> Self:
+        """Keep the artifact contract per-intent for free-execution actions.
+
+        A free-execution action is invoked many times for different purposes, so
+        a fixed ``expected_outputs`` list would demand the same files from every
+        invocation. The contract instead travels on each intent's ``produces``
+        parameter, which the executor verifies against the workspace. Rejecting
+        the declaration here rather than ignoring it is what keeps the
+        environment's own output check unchanged for both kinds of action.
+        """
+        if self.kind is ActionKind.FREE_EXECUTION and self.expected_outputs:
+            raise ValueError(
+                f"free-execution action '{self.id}' must declare 'expected_outputs: []'; "
+                "its artifact contract belongs on each intent's 'produces' parameter"
+            )
+        return self
 
 
 class ExpectedRange(SpecificationModel):
@@ -383,6 +429,61 @@ class ConstraintSpecification(SpecificationModel):
         return self
 
 
+class EnvironmentBackend(StrEnum):
+    """Which execution tier a benchmark asks for.
+
+    ``LOCAL`` runs a subprocess on the evaluator's own host, which is fast and
+    portable but cannot confine writes or cut off the network. ``CONTAINER``
+    can, at the cost of requiring a container runtime. The declaration is a
+    request, not a guarantee: what was actually enforced is reported per control
+    in the run record, so a paper cannot claim isolation its runs lacked.
+    """
+
+    LOCAL = "local"
+    CONTAINER = "container"
+
+
+class EnvironmentSpecification(SpecificationModel):
+    """A workspace a free-execution agent may bring its own workflow into.
+
+    This block specifies the environment without prescribing the method: it says
+    which interpreter is available and how the workspace is isolated, and says
+    nothing about what analysis to run in it. Resource and reproducibility
+    limits deliberately stay in ``ConstraintSpecification`` so both action kinds
+    are bound by one set of numbers rather than two that can drift apart.
+    """
+
+    id: str
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    backend: EnvironmentBackend = EnvironmentBackend.LOCAL
+    image: str | None = None
+    languages: list[str] = Field(default_factory=lambda: ["python"])
+
+    _identifier = field_validator("id")(_validate_identifier)
+
+    @model_validator(mode="after")
+    def validate_backend(self) -> Self:
+        """Reject an under-specified container tier and an empty language list."""
+        if not self.languages:
+            raise ValueError(
+                f"environment '{self.id}' must declare at least one language; "
+                "an environment nothing can run in is not an environment"
+            )
+        if self.backend is EnvironmentBackend.CONTAINER and not self.image:
+            raise ValueError(
+                f"environment '{self.id}' requests the container backend and must "
+                "name an 'image'; resolving one implicitly would make the run "
+                "depend on whatever the host happened to have cached"
+            )
+        if self.backend is EnvironmentBackend.LOCAL and self.image:
+            raise ValueError(
+                f"environment '{self.id}' names an 'image' but requests the local "
+                "backend, which ignores it; the declaration would misdescribe the run"
+            )
+        return self
+
+
 class TerminationCondition(SpecificationModel):
     """Declarative condition describing when a task is complete or stopped."""
 
@@ -401,6 +502,13 @@ class WorkflowStage(SpecificationModel):
     allowed_actions: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     required: bool = False
+    #: Metrics that become meaningful once this stage has run. This is the
+    #: declaration point for per-stage scoring: it says *when* a metric can be
+    #: asked, not what a good answer is. Leaving it empty keeps the stage
+    #: unscored rather than scoring it against metrics whose inputs cannot exist
+    #: yet -- a clustering metric asked before clustering does not measure a bad
+    #: agent, it measures a badly specified benchmark.
+    metrics: list[str] = Field(default_factory=list)
 
     _identifier = field_validator("id")(_validate_identifier)
 
@@ -438,8 +546,102 @@ class TaskSpecification(SpecificationModel):
     depends_on: list[str] = Field(default_factory=list)
     termination: list[TerminationCondition] = Field(default_factory=list)
     constraints: ConstraintSpecification | None = None
+    environment: str | None = None
 
     _identifier = field_validator("id")(_validate_identifier)
+
+
+class ScoringSpecification(SpecificationModel):
+    """How this benchmark weighs outcome, decisions, and trajectory.
+
+    The three weights are exponents in a weighted geometric mean and must sum to
+    one, so a benchmark cannot quietly inflate or depress its own scores relative
+    to another's -- it can only redistribute emphasis. The defaults are equal
+    thirds, which asserts nothing; a benchmark that cares more about the result
+    than the route says so here.
+
+    The two penalty coefficients are ``kD`` and ``kT`` in the reported
+    confidence. They scale how much unmeasurable evidence costs *confidence*, and
+    can never move the score itself.
+    """
+
+    outcome_weight: float = Field(default=1.0 / 3.0, ge=0, le=1)
+    decision_weight: float = Field(default=1.0 / 3.0, ge=0, le=1)
+    trajectory_weight: float = Field(default=1.0 - 2.0 / 3.0, ge=0, le=1)
+    decision_confidence_penalty: float = Field(default=0.5, ge=0, le=1)
+    trajectory_confidence_penalty: float = Field(default=0.5, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _weights_sum_to_one(self) -> ScoringSpecification:
+        """Reject a weighting that would not be a mean, at load time.
+
+        Caught here rather than at scoring time so a mis-declared benchmark fails
+        when someone reads it, not after a paid run has finished.
+        """
+        total = self.outcome_weight + self.decision_weight + self.trajectory_weight
+        if abs(total - 1.0) > _WEIGHT_SUM_TOLERANCE:
+            raise ValueError(
+                "scoring weights must sum to 1.0 so the benchmark score is a "
+                f"weighted mean comparable with other benchmarks; got {total!r}"
+            )
+        return self
+
+
+class CutoffSpecification(SpecificationModel):
+    """When this benchmark stops a run, independently of what the agent says.
+
+    Three mechanisms, deliberately separate. Hard budgets bound what a run may
+    consume. The stagnation window bounds how long a run may continue without
+    measurable scientific progress. The repetition and consecutive-failure
+    limits bound work that is being repeated or that cannot succeed.
+
+    Most fields default to undeclared, because a cutoff that fires on a correct
+    run is worse than one that never fires: it turns a benchmark result into a
+    statement about the harness. ``max_consecutive_failures`` is the exception --
+    it cannot fire on a run whose steps succeed.
+
+    Note ``max_wall_time_seconds`` is not a duplicate of
+    ``constraints.max_runtime_seconds``. The constraint is checked against
+    executor-reported time and fails an individual *step*; this bounds the whole
+    run's clock, including the time an agent spends deliberating, and *stops*
+    it. When undeclared it falls back to the constraint's value, which is at
+    least a ceiling the benchmark author already agreed to.
+    """
+
+    max_steps: int | None = Field(default=None, gt=0)
+    max_wall_time_seconds: float | None = Field(default=None, gt=0)
+    max_cost_usd: float | None = Field(default=None, gt=0)
+    max_total_tokens: int | None = Field(default=None, gt=0)
+    stagnation_window: int | None = Field(default=None, gt=0)
+    stagnation_epsilon: float = Field(default=0.01, ge=0)
+    patience_steps: int = Field(default=2, ge=0)
+    max_repeated_decisions: int | None = Field(default=None, gt=0)
+    max_consecutive_failures: int | None = Field(default=3, gt=0)
+
+    @model_validator(mode="after")
+    def _stagnation_is_fully_declared(self) -> Self:
+        """Reject an epsilon or patience declared without a window to use it.
+
+        Both are inert without a window, so accepting them would let a benchmark
+        author believe a stagnation cutoff was configured when none was armed --
+        the silent-no-op failure mode, caught at load time instead.
+        """
+        if self.stagnation_window is not None:
+            return self
+        declared = [
+            name
+            for name, value, default in (
+                ("stagnation_epsilon", self.stagnation_epsilon, 0.01),
+                ("patience_steps", self.patience_steps, 2),
+            )
+            if value != default
+        ]
+        if declared:
+            raise ValueError(
+                f"{', '.join(declared)} has no effect without stagnation_window; "
+                "declare the window to arm the stagnation cutoff"
+            )
+        return self
 
 
 class BenchmarkMetadata(SpecificationModel):
@@ -477,6 +679,7 @@ class BenchmarkSpecification(SpecificationModel):
     references: list[Reference] = Field(default_factory=list)
     datasets: list[DatasetSpecification] = Field(default_factory=list)
     observations: list[ObservationSpecification] = Field(default_factory=list)
+    environments: list[EnvironmentSpecification] = Field(default_factory=list)
     actions: list[ActionSpecification] = Field(default_factory=list)
     metrics: list[MetricSpecification] = Field(default_factory=list)
     metric_groups: list[MetricGroupSpecification] = Field(default_factory=list)
@@ -484,6 +687,8 @@ class BenchmarkSpecification(SpecificationModel):
     rewards: list[RewardSpecification] = Field(default_factory=list)
     artifacts: list[ArtifactSpecification] = Field(default_factory=list)
     constraints: ConstraintSpecification = Field(default_factory=ConstraintSpecification)
+    scoring: ScoringSpecification = Field(default_factory=ScoringSpecification)
+    cutoff: CutoffSpecification = Field(default_factory=CutoffSpecification)
     tasks: list[TaskSpecification] = Field(default_factory=list)
 
     _schema_version = field_validator("schema_version")(
@@ -514,7 +719,11 @@ class BenchmarkSpecification(SpecificationModel):
             )
         dataset_ids = self._unique_ids(self.datasets, "dataset")
         observation_ids = self._unique_ids(self.observations, "observation")
+        environment_ids = self._unique_ids(self.environments, "environment")
         action_ids = self._unique_ids(self.actions, "action")
+        free_execution_actions = {
+            action.id for action in self.actions if action.kind is ActionKind.FREE_EXECUTION
+        }
         metric_ids = self._unique_ids(self.metrics, "metric")
         group_ids = {group.group_id for group in self.metric_groups}
         if len(group_ids) != len(self.metric_groups):
@@ -562,6 +771,18 @@ class BenchmarkSpecification(SpecificationModel):
             unknown = self._unknown(artifact.produced_by, action_ids)
             if unknown:
                 raise ValueError(f"artifact '{artifact.id}' has unknown producer(s): {', '.join(unknown)}")
+            for rule in artifact.validation:
+                # At load time rather than at evaluation time, because who is at
+                # fault differs: a rule the evaluator cannot read is the benchmark
+                # author's typo, and surfacing it during a run would charge the
+                # agent for an unchecked artifact it produced correctly.
+                try:
+                    parse_validation_rule(rule.rule)
+                except UnparseableValidationRule as error:
+                    raise ValueError(
+                        f"artifact '{artifact.id}' validation rule '{rule.name}' "
+                        f"cannot be evaluated: {error}"
+                    ) from error
 
         for reward in self.rewards:
             unknown = self._unknown([component.metric for component in reward.components], metric_ids)
@@ -586,6 +807,17 @@ class BenchmarkSpecification(SpecificationModel):
             for stage in task.workflow:
                 unknown_actions = self._unknown(stage.allowed_actions, action_ids)
                 unknown_stages = self._unknown(stage.depends_on, stage_ids)
+                # Rejected at load time for the same reason an unparseable
+                # validation rule is: a stage naming a metric the benchmark does
+                # not declare can only ever contribute nothing to per-stage
+                # progress, and a silently unscored stage is indistinguishable
+                # from a stage the agent handled badly.
+                unknown_metrics = self._unknown(stage.metrics, metric_ids)
+                if unknown_metrics:
+                    raise ValueError(
+                        f"workflow stage '{stage.id}' references unknown metric(s): "
+                        f"{', '.join(unknown_metrics)}"
+                    )
                 if unknown_actions:
                     raise ValueError(
                         f"workflow stage '{stage.id}' references unknown action(s): "
@@ -600,6 +832,19 @@ class BenchmarkSpecification(SpecificationModel):
                 raise ValueError(
                     f"task '{task.id}' references unknown reward '{task.reward_strategy}'"
                 )
+            if task.environment is not None and task.environment not in environment_ids:
+                raise ValueError(
+                    f"task '{task.id}' references unknown environment '{task.environment}'"
+                )
+            free_actions = sorted(free_execution_actions.intersection(task.allowed_actions))
+            if free_actions and task.environment is None:
+                # Without this the benchmark would look complete and then fail at
+                # run time with no workspace to execute in, blaming the agent for
+                # the benchmark author's omission.
+                raise ValueError(
+                    f"task '{task.id}' allows free-execution action(s) "
+                    f"{', '.join(free_actions)} but declares no 'environment'"
+                )
             missing_artifacts = sorted(
                 artifact.id
                 for artifact in self.artifacts
@@ -613,6 +858,57 @@ class BenchmarkSpecification(SpecificationModel):
 
         self._validate_task_dependencies()
         return self
+
+    def required_task_artifacts(self, task: TaskSpecification) -> set[str]:
+        """Return the artifacts this task must produce for its goal to be met.
+
+        ``TaskSpecification.artifacts`` is a *reference* list: it names every
+        artifact the task recognises, which is what an agent needs in order to
+        label its outputs at all.  Requiredness lives one level up, on
+        :attr:`ArtifactSpecification.required`, and the two are not the same
+        question.  Reading the task list as the required set is what made the
+        free-execution benchmark unfinishable: it declares four artifacts
+        ``required: false`` precisely so the agent's workflow decides which files
+        exist, and every run was nonetheless filed ``incomplete`` for not
+        producing all four.
+
+        The intersection is defensive.  ``validate_integrity`` already forces a
+        ``required=True`` artifact into every task, so for any loadable benchmark
+        the required set is a subset of the task's list; a directly constructed
+        specification could still demand an artifact its task never mentions, and
+        an unmeetable demand is not something to inherit silently.
+        """
+        required = {artifact.id for artifact in self.artifacts if artifact.required}
+        return required.intersection(task.artifacts)
+
+    def evaluator_executes_task_actions(self, task: TaskSpecification) -> bool:
+        """Whether SCAIB itself runs any action this task allows.
+
+        True for the typed catalog, where the benchmark performs the science and
+        every result therefore lands in the object the evaluator scores. False when
+        every allowed action is :attr:`ActionKind.FREE_EXECUTION`: the agent runs
+        its own code against its own copy in a workspace, so the evaluator's copy
+        is untouched by construction and finds nothing there no matter how good the
+        agent was.
+
+        This is what tells an *agent's* omission apart from the *harness's*
+        blindness, which is the same absent-versus-unobserved distinction the state
+        observer draws one layer down. A mixed task counts as executed by the
+        evaluator: at least one operation did reach its copy, so a gap there is a
+        claim it can defend.
+
+        A task naming no action this benchmark declares also counts as executed,
+        and the asymmetry is deliberate. Answering False excuses every
+        reference-consuming metric from scoring, so if that were the answer to "no
+        evidence either way", the cheapest route to an unpunished bad run would be
+        a benchmark whose action list does not line up -- and a scoring gap that
+        opens on a typo is exactly the kind this project keeps finding late.
+        """
+        allowed = set(task.allowed_actions)
+        declared = [action for action in self.actions if action.id in allowed]
+        if not declared:
+            return True
+        return any(action.kind is not ActionKind.FREE_EXECUTION for action in declared)
 
     def _validate_task_dependencies(self) -> None:
         """Reject circular task dependencies with a useful cycle path."""
@@ -652,6 +948,7 @@ MetricSpec = MetricSpecification
 RewardSpec = RewardSpecification
 ArtifactSpec = ArtifactSpecification
 ConstraintSpec = ConstraintSpecification
+EnvironmentSpec = EnvironmentSpecification
 TaskSpec = TaskSpecification
 ReferenceSpec = Reference
 WorkflowStageSpec = WorkflowStage
@@ -660,6 +957,7 @@ EvaluationConfig = EvaluationConfiguration
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
+    "ActionKind",
     "ActionSpec",
     "ActionSpecification",
     "Aggregation",
@@ -673,10 +971,14 @@ __all__ = [
     "ConstraintSpec",
     "ConstraintSpecification",
     "Contributor",
+    "CutoffSpecification",
     "DatasetSpec",
     "DatasetSpecification",
     "DecisionEvaluationSpecification",
     "Direction",
+    "EnvironmentBackend",
+    "EnvironmentSpec",
+    "EnvironmentSpecification",
     "EstimatedCost",
     "EvaluationConfig",
     "EvaluationConfiguration",
@@ -694,6 +996,7 @@ __all__ = [
     "RewardComponent",
     "RewardSpec",
     "RewardSpecification",
+    "ScoringSpecification",
     "TaskSpec",
     "TaskSpecification",
     "TerminationCondition",

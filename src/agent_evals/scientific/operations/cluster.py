@@ -8,10 +8,13 @@ the agent rather than from a label the dataset already shipped.
 
 from typing import Any
 
+from agent_evals.core.reference_columns import AGENT_CLUSTER_COLUMNS
 from agent_evals.scientific.context import OperationOutput, ScientificContext
 
-#: Observation column this operation writes. Never a reserved reference name.
-CLUSTER_COLUMN = "predicted_clusters"
+#: Observation column this operation writes. Never a reserved reference name, and
+#: taken from the shared vocabulary rather than spelled out here so the evaluator
+#: that has to find this column again cannot be looking for a different name.
+CLUSTER_COLUMN = AGENT_CLUSTER_COLUMNS[0]
 
 #: Embeddings to cluster, most-integrated first.
 EMBEDDING_CANDIDATES = ("X_integrated", "X_pca")

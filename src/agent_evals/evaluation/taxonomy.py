@@ -60,7 +60,10 @@ def default_decision_ontology() -> DecisionOntology:
         DecisionCategory.QC_STRATEGY: (
             ["mitochondrial_filter", "adaptive_filter", "scrublet", "emptyDrops"],
             ["current-anndata", "qc-statistics"],
-            ["rare_cell_retention", "artifact_removal", "biological_retention"],
+            # Spelled to match ``LocalRewardEvaluator._WEIGHTS`` and the benchmark
+            # YAML, which both say ``rare_population_preservation``. This field
+            # named a fourth spelling that nothing scored.
+            ["artifact_removal", "biological_retention", "rare_population_preservation"],
         ),
         DecisionCategory.NORMALIZATION: (
             ["normalize", "log_normalize", "scran"],

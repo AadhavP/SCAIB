@@ -58,7 +58,7 @@ class ScientificMetricEngine:
                         role=definition.role,
                         direction=definition.direction,
                         eligible=False,
-                        status=MetricStatus.STRUCTURALLY_INELIGIBLE,
+                        status=MetricStatus.INELIGIBLE,
                         eligibility_reason=decision.reason,
                         metadata={"implementation": self._implementation_metadata(definition)},
                     )
@@ -75,7 +75,10 @@ class ScientificMetricEngine:
                         raw_value=None,
                         normalized_value=definition.failure_score,
                         eligible=True,
-                        status=MetricStatus.FAILED,
+                        # The agent could have produced this input and did not, so
+                        # the failure score stands. Naming the cause only makes the
+                        # record readable; it does not excuse the gap.
+                        status=MetricStatus.MISSING,
                         eligibility_reason=decision.reason,
                         missing_artifacts=decision.missing_candidate_artifacts,
                         metadata={
@@ -87,6 +90,29 @@ class ScientificMetricEngine:
                 continue
             try:
                 computation = self.registry.get_computer(metric_id)(context)
+                if computation.unavailable:
+                    results.append(
+                        MetricResult(
+                            metric_id=definition.metric_id,
+                            version=definition.version,
+                            metric_name=definition.name,
+                            role=definition.role,
+                            direction=definition.direction,
+                            # No number, and deliberately not the failure score.
+                            # This outcome is identical for a perfect run and a
+                            # worthless one, so it carries no information about the
+                            # agent and must not be spent on the agent's score.
+                            normalized_value=None,
+                            eligible=False,
+                            status=MetricStatus.UNIMPLEMENTED,
+                            eligibility_reason=decision.reason,
+                            metadata={
+                                **(computation.metadata or {}),
+                                "implementation": self._implementation_metadata(definition),
+                            },
+                        )
+                    )
+                    continue
                 if computation.raw_value is None:
                     results.append(
                         MetricResult(
@@ -97,7 +123,9 @@ class ScientificMetricEngine:
                             direction=definition.direction,
                             normalized_value=definition.failure_score,
                             eligible=True,
-                            status=MetricStatus.FAILED,
+                            # Every required input was present and the computer
+                            # still read no number out of them.
+                            status=MetricStatus.MALFORMED,
                             eligibility_reason=decision.reason,
                             metadata={
                                 **(computation.metadata or {}),
@@ -117,7 +145,7 @@ class ScientificMetricEngine:
                         raw_value=computation.raw_value,
                         normalized_value=normalized,
                         eligible=True,
-                        status=MetricStatus.COMPUTED,
+                        status=MetricStatus.SCORED,
                         eligibility_reason=decision.reason,
                         metadata={
                             **(computation.metadata or {}),
@@ -135,9 +163,14 @@ class ScientificMetricEngine:
                         role=definition.role,
                         direction=definition.direction,
                         raw_value=None,
+                        # Still the failure score, deliberately. The agent chose
+                        # the arrays this computer ran on, so excluding an
+                        # evaluator crash from the aggregate would let it delete a
+                        # metric it was about to fail by handing the computer
+                        # something that raises.
                         normalized_value=definition.failure_score,
                         eligible=True,
-                        status=MetricStatus.FAILED,
+                        status=MetricStatus.EVALUATOR_ERROR,
                         eligibility_reason=decision.reason,
                         metadata={
                             "failure_reason": f"{type(error).__name__}: {error}",
@@ -174,10 +207,8 @@ class ScientificMetricEngine:
             candidate_metadata=set(context.metadata),
             observation_columns=observation_columns,
             representations=representations,
-            reference_labels_available=(
-                adata is not None
-                and any(key in adata.obs for key in ("cell_type", "cell_type_ref", "bulk_labels"))
-            ),
+            reference_labels_available=context.has_reference_labels,
+            reference_gap_reason=context.reference_join_gap,
             predictions_available="prediction" in context.candidate_artifacts
             or "cluster_labels" in context.candidate_artifacts,
             payload=context,

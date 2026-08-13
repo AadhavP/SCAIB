@@ -5,8 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
-import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -17,19 +16,24 @@ from agent_evals.agents import (
     AgentConfiguration,
     AgentHarness,
     AgentRun,
-    RuntimeAgentAdapter,
-    agent_adapter_registry,
-    agent_runtime_registry,
 )
+from agent_evals.agents.selection import build_agent_adapter, is_universal_runtime
 from agent_evals.agents.trajectory import DecisionCategory
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.registry import benchmark_spec_registry
 from agent_evals.benchmarks.schema import BenchmarkSpecification
-from agent_evals.core.config import get_settings
+from agent_evals.core.decision_components import (
+    OBSERVED_CELL_COUNT,
+    OBSERVED_GENE_COUNT,
+)
 from agent_evals.datasets.preflight import (
     DatasetContractError,
     describe_readiness,
     validate_dataset_contract,
+)
+from agent_evals.environment.execution import (
+    ActionKindRouter,
+    WorkspaceObservationBuilder,
 )
 from agent_evals.environment.models import (
     ActionExecutionResult,
@@ -37,7 +41,16 @@ from agent_evals.environment.models import (
     ArtifactRecord,
     RewardRecord,
 )
-from agent_evals.environment.ports import ExecutionContext
+from agent_evals.environment.ports import (
+    CompositeObservationBuilder,
+    DeclaredObservationBuilder,
+    ExecutionContext,
+    ObservationBuilder,
+)
+from agent_evals.environment.provisioning import (
+    provision_environment,
+    select_environment,
+)
 from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.evaluation import (
     DecisionEvaluator,
@@ -46,32 +59,49 @@ from agent_evals.evaluation import (
     MethodSelectionEvaluator,
     ScientificEvaluation,
     ScientificMetricEngine,
+    ScoreWeights,
     TrajectoryEvaluator,
     compute_global_agent_score,
+    compute_score_confidence,
+    describe_score,
+)
+from agent_evals.evaluation.candidates import (
+    build_metric_inputs,
+    build_reference_artifacts,
+    load_de_table,
 )
 from agent_evals.evaluation.methods import method_score
-from agent_evals.evaluation.metrics import (
-    ArtifactBundle,
-    EvaluationContext,
-    ReferenceBundle,
-)
-from agent_evals.evaluation.metrics import (
-    ScientificMetricEngine as GenericScientificMetricEngine,
-)
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
 from agent_evals.evaluation.models import MethodScore
-from agent_evals.evaluation.profiles import load_metric_profile, pbmc_annotation_profile
+from agent_evals.evaluation.profiles import (
+    BenchmarkMetricProfile,
+    profile_external_scores,
+    profile_metric_ids,
+    resolve_metric_profile,
+)
+from agent_evals.evaluation.progress import (
+    ProgressSignal,
+    ScientificProgressTracker,
+    summarize_progress,
+)
+from agent_evals.evaluation.reference_de import (
+    reference_de_metadata,
+    scored_group_metadata,
+)
 from agent_evals.evaluation.scoring import (
     MetricScoreInput,
     WeightedGeometricAggregator,
     aggregate_domains,
+    describe_unmeasured_domains,
 )
+from agent_evals.evaluation.stage_rewards import StageAwareRewardEvaluator
 from agent_evals.evaluation.taxonomy import DecisionProfile, decision_ontology
 from agent_evals.evaluators.models import MetricResult
 from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
 from agent_evals.metrics import MetricGroup, MetricWeight
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.scientific.artifacts.storage import LocalArtifactStore
+from agent_evals.scientific.artifacts.validation import ArtifactRuleValidator
 from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.executor.scanpy import ScanpyExecutor
 from agent_evals.scientific.metrics import (
@@ -113,6 +143,12 @@ class AgentScientificRun(BaseModel):
     final_metrics: list[MetricResult] = Field(default_factory=list)
     evaluation: ScientificEvaluation | None = None
     report_path: str | None = None
+    #: What the free-execution workspace was and what it failed to guarantee.
+    #: ``None`` on the typed tier, where SCAIB runs the science in-process and
+    #: there is no workspace to describe. A new optional field rather than a
+    #: widened one, so every ``report.json`` written before this existed still
+    #: loads against ``extra="forbid"``.
+    environment: dict[str, Any] | None = None
 
     def to_json(self) -> str:
         """Serialize the agent-scientific run."""
@@ -135,11 +171,39 @@ class AgentScientificRun(BaseModel):
             f"- Agent type: {self.agent_run.manifest.type if self.agent_run.manifest else self.agent_run.adapter_name}",
             f"- Model: {self.agent_run.manifest.model.name if self.agent_run.manifest else self.agent_run.model or 'unspecified'}",
             "",
-            "## Decision summary",
-            "",
-            "| Step | Decision | Method | Execution | Local reward |",
-            "| ---: | --- | --- | --- | ---: |",
         ]
+        # Printed before the scores, because an unconfined workspace or an
+        # unmeasurable outcome dimension changes how every number below should be
+        # read, and a reader who reaches the scores first has already formed a
+        # view by the time the caveat arrives.
+        if self.environment is not None:
+            lines.extend(
+                [
+                    "## Execution environment",
+                    "",
+                    f"- Environment: `{self.environment.get('environment_id')}` "
+                    f"({self.environment.get('backend')})",
+                    f"- Agent dataset: `{self.environment.get('agent_dataset')}`",
+                    f"- Withheld obs columns: "
+                    f"{', '.join(self.environment.get('withheld_obs_columns', [])) or '(none)'}",
+                    "",
+                    "Not guaranteed by this run:",
+                    "",
+                    *[
+                        f"- {limitation}"
+                        for limitation in self.environment.get("limitations", [])
+                    ],
+                    "",
+                ]
+            )
+        lines.extend(
+            [
+                "## Decision summary",
+                "",
+                "| Step | Decision | Method | Execution | Local reward |",
+                "| ---: | --- | --- | --- | ---: |",
+            ]
+        )
         for index, step in enumerate(self.trajectory, start=1):
             decision = step.get("decision", {})
             result = step.get("result") or {}
@@ -173,17 +237,22 @@ class AgentScientificRun(BaseModel):
                     "",
                     "## Evaluation dimensions",
                     "",
-                    f"- Scientific outcome score: {evaluation.scientific_outcome_score}",
+                    f"- Scientific outcome score: {_unmeasured_or(evaluation.scientific_outcome_score)}",
                     *[
-                        f"- {domain.domain.title()} score: {domain.value}"
+                        # ``unmeasured`` rather than the bare ``None`` this used to
+                        # print, which reads as a crash rather than as a gap.
+                        f"- {domain.domain.title()} score: "
+                        f"{_unmeasured_or(domain.value)}"
                         for domain in evaluation.domain_scores
                     ],
-                    f"- Decision score: {evaluation.decision_score}",
+                    f"- Outcome formula: `{evaluation.scientific_outcome_formula}`",
+                    f"- Decision score: {_unmeasured_or(evaluation.decision_score)}",
                     f"- Method score: {evaluation.method_score}",
-                    f"- Decision quality multiplier: {evaluation.decision_quality_score}",
+                    f"- Decision quality multiplier: "
+                    f"{_unmeasured_or(evaluation.decision_quality_score)}",
                     f"- Trajectory score: {evaluation.trajectory_score}",
-                    f"- Final agent score: {evaluation.global_agent_score}",
-                    f"- Global agent score: {evaluation.global_agent_score}",
+                    f"- Final agent score: {_unmeasured_or(evaluation.global_agent_score)}",
+                    f"- Global agent score: {_unmeasured_or(evaluation.global_agent_score)}",
                     f"- Score formula: `{evaluation.score_formula}`",
                     "",
                     "### Applicability matrix",
@@ -222,8 +291,11 @@ class AgentScientificRun(BaseModel):
                 ]
             )
             lines.extend(
-                f"| {item.decision_id} | {item.method or '-'} | {item.appropriateness:.3f} | "
-                f"{item.parameter_quality:.3f} | {item.execution_quality:.3f} | {item.overall:.3f} |"
+                f"| {item.decision_id} | {item.method or '-'} | "
+                f"{_score_cell(item.appropriateness)} | "
+                f"{_score_cell(item.parameter_quality)} | "
+                f"{_score_cell(item.execution_quality)} | "
+                f"{_score_cell(item.overall)} |"
                 for item in evaluation.method_selection_evaluations
             )
             lines.extend(
@@ -282,9 +354,12 @@ class AgentScientificRun(BaseModel):
                         "### Robustness",
                         "",
                         f"- Seeds: {', '.join(str(seed) for seed in evaluation.robustness.seeds)}",
-                        f"- Seed stability: {evaluation.robustness.seed_stability}",
-                        f"- Clustering pairwise ARI: {evaluation.robustness.clustering_pairwise_ari}",
-                        f"- Prediction agreement: {evaluation.robustness.annotation_prediction_agreement}",
+                        "- Seed stability: "
+                        f"{_unmeasured_or(evaluation.robustness.seed_stability)}",
+                        "- Clustering pairwise ARI: "
+                        f"{_unmeasured_or(evaluation.robustness.clustering_pairwise_ari)}",
+                        "- Prediction agreement: "
+                        f"{_unmeasured_or(evaluation.robustness.annotation_prediction_agreement)}",
                     ]
                 )
         return "\n".join(lines) + "\n"
@@ -391,6 +466,7 @@ class ScientificLoop:
         max_steps: int | None = None,
         model: str | None = None,
         provider: str | None = None,
+        environment: str | None = None,
         test_mode: bool = False,
         event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
     ) -> AgentScientificRun:
@@ -434,34 +510,116 @@ class ScientificLoop:
             artifact_store=store,
             workspace=pending_root,
         )
-        observation_builder = ScientificObservationBuilder(context)
-        reward_evaluator = RewardEvaluator()
-        environment = ScientificEnvironment(
+        # The reference differential-expression evidence, computed once here on the
+        # dataset as issued rather than per step. ``context.metadata`` is read by
+        # exactly one thing -- the metric context assembled after the run -- so it
+        # is an evaluator channel; the reference marker list must never reach an
+        # observation, and a test asserts that.
+        reference_de, reference_de_gap = await asyncio.to_thread(
+            reference_de_metadata,
+            specification.metadata.id,
+            adata,
+            build_reference_artifacts(adata),
+        )
+        context.metadata.update(reference_de)
+        if reference_de_gap is not None:
+            # Emitted as a dataset limitation rather than swallowed, so an
+            # exclusion downstream is attributable to its real cause instead of
+            # looking like a benchmark that never asked for marker recovery.
+            await _emit_event(
+                event_callback,
+                {"type": "dataset_warning", "message": reference_de_gap},
+            )
+        # Wraps rather than replaces the reward evaluator, so the reward scalar the
+        # environment records is unchanged and ``S_t`` rides alongside it as
+        # evaluator-side evidence. Reference-derived quality must not become the
+        # number an agent optimizes directly.
+        reward_evaluator = StageAwareRewardEvaluator(
+            RewardEvaluator(),
+            ScientificProgressTracker(self._load_metric_profile(specification)),
+            context,
+            self._progress_metric_ids(specification),
+        )
+        # Provisioning follows the benchmark's own declaration; ``environment``
+        # only selects among what it declares. An opt-in flag would make omitting
+        # it a silent misconfiguration, and the router below turns that same
+        # mistake into a refusal at construction rather than a run in which every
+        # free-execution action failed for the harness's reason.
+        selected_environment = select_environment(specification, task, environment)
+        provisioned = (
+            None
+            if selected_environment is None
+            else await provision_environment(
+                specification,
+                selected_environment,
+                adata,
+                run_root=pending_root,
+            )
+        )
+        if provisioned is not None:
+            await _emit_event(
+                event_callback,
+                {
+                    "type": "environment_provisioned",
+                    "environment_id": provisioned.environment.id,
+                    "workspace_root": str(provisioned.workspace_root),
+                    "limitations": provisioned.limitations(),
+                },
+            )
+        # Observation values come from three places and only one of them is the
+        # scientific state: a benchmark can declare a value it owns (the DE
+        # contrast), the scientific builder measures the dataset, and the
+        # workspace builder measures what is on disk and what the last command
+        # printed -- neither of which the scientific builder can see, since it
+        # holds an in-memory ``AnnData`` and an operation history only the typed
+        # executor writes. Argument order is precedence order: a measurement
+        # overrides a declaration, never the reverse.
+        observation_builder: ObservationBuilder = CompositeObservationBuilder(
+            DeclaredObservationBuilder(),
+            ScientificObservationBuilder(context),
+            *(
+                ()
+                if provisioned is None
+                else (WorkspaceObservationBuilder(provisioned.backend),)
+            ),
+        )
+        episode_environment = ScientificEnvironment(
             specification,
             task_id=task.id,
-            executor=ScientificActionExecutor(
-                context,
-                event_callback=event_callback,
-                expected_outputs={
-                    action.id: list(action.expected_outputs)
-                    for action in specification.actions
-                },
+            # Always routed, even with nothing provisioned: the router is a
+            # pass-through when a benchmark declares no free-execution actions,
+            # and it refuses at construction when it declares some and has
+            # nowhere to run them.
+            executor=ActionKindRouter.from_specification(
+                specification,
+                typed=ScientificActionExecutor(
+                    context,
+                    event_callback=event_callback,
+                    expected_outputs={
+                        action.id: list(action.expected_outputs)
+                        for action in specification.actions
+                    },
+                ),
+                free=None if provisioned is None else provisioned.executor,
             ),
             observation_builder=observation_builder,
             reward_evaluator=reward_evaluator,
+            # Injected here rather than reached for inside the environment, so
+            # ``runtime.py`` keeps knowing only the port and stays importable
+            # without the science extra installed.
+            artifact_validator=ArtifactRuleValidator(),
         )
-        adapter = _create_scientific_adapter(
+        adapter = build_agent_adapter(
             agent_type,
             model=model,
-            provider=provider,
-            test_mode=test_mode,
             event_callback=event_callback,
+            test_mode=test_mode,
         )
         # Test mode replaces the selected legacy agent with the universal GLM
         # runtime, so it must receive the same finite default step cap.
         effective_max_steps = (
             DEFAULT_RUNTIME_MAX_STEPS
-            if max_steps is None and (test_mode or agent_type in agent_runtime_registry.list())
+            if max_steps is None and (test_mode or is_universal_runtime(agent_type))
             else max_steps
         )
         configuration = AgentConfiguration(
@@ -477,7 +635,13 @@ class ScientificLoop:
                 "run_id": requested_run_id,
             },
         )
-        agent_run = await AgentHarness().run(adapter, environment, configuration)
+        agent_run = await AgentHarness().run(adapter, episode_environment, configuration)
+        if provisioned is not None:
+            # Before the run directory is renamed below: the backend holds the
+            # workspace root by path, and a Windows directory rename fails while
+            # anything under it is still open. Nothing is deleted -- the workspace
+            # and its artifacts are evidence and outlive the run.
+            await provisioned.backend.close()
         pipeline_parameters: dict[str, Any] = {}
         metrics = await asyncio.to_thread(
             compute_objective_metrics,
@@ -521,6 +685,7 @@ class ScientificLoop:
             agent_run,
             context,
             store,
+            reward_evaluator.signals,
         )
         final_root = Path(output_dir) / agent_run.run_id
         final_root.parent.mkdir(parents=True, exist_ok=True)
@@ -540,6 +705,7 @@ class ScientificLoop:
             final_metrics=metrics,
             evaluation=evaluation,
             report_path=str(final_root / "report.md"),
+            environment=None if provisioned is None else provisioned.describe(),
         )
         (final_root / "trajectory.json").write_text(
             json.dumps(
@@ -607,86 +773,76 @@ class ScientificLoop:
         return run
 
     @staticmethod
-    def _evaluate_scientific_run(  # noqa: C901
+    def _evaluate_scientific_run(
         specification: BenchmarkSpecification,
         task: Any,
         agent_run: AgentRun,
         context: ScientificContext,
         store: LocalArtifactStore,
+        progress_signals: Sequence[ProgressSignal] = (),
     ) -> ScientificEvaluation:
         """Run versioned evaluation on hidden reference data and visible outputs."""
-        import pandas as pd
-
         adata = context.adata
-        cell_ids = [str(value) for value in adata.obs_names]
         # Only columns this run's agent actually wrote may count as predictions.
         # Reading a pre-existing column (bulk_labels, cell_type, or the dataset's
         # own louvain assignment) would score reference biology as agent output.
         prediction_column = context.agent_prediction_column()
-        candidate: dict[str, Any] = {"cell_id": cell_ids}
-        if prediction_column is not None:
-            candidate["predicted_label"] = [str(value) for value in adata.obs[prediction_column]]
-        else:
-            candidate["predicted_label"] = ["__unassigned__"] * len(cell_ids)
-        prediction = pd.DataFrame(candidate)
-        prediction_artifact = store.save_table(
-            "evaluation-prediction",
-            prediction,
-            metadata={
-                "hidden_from_agent": True,
-                "source_column": prediction_column,
-                "agent_produced_prediction": prediction_column is not None,
-            },
-        )
-        candidate_artifacts: dict[str, Any] = {"prediction": prediction}
-        cluster_column = next(
-            (
-                column
-                for column in ("leiden", "louvain")
-                if column in context.agent_produced_columns and column in adata.obs
+        # Built through ``evaluation.candidates`` rather than inline, so the final
+        # outcome and the per-step ``S_t`` see the same artifacts. Assembled
+        # separately they could disagree for reasons that are the harness's, not
+        # the agent's, and the progress signal would measure that disagreement.
+        candidate_inputs = build_metric_inputs(
+            adata,
+            prediction_column=prediction_column,
+            cluster_column=context.agent_cluster_column(),
+            evaluator_observes_predictions=(
+                specification.evaluator_executes_task_actions(task)
             ),
-            None,
+            # Read off the artifact the agent archived itself, never from
+            # ``adata.uns`` -- pbmc68k ships ``rank_genes_groups`` precomputed over
+            # the reference labels, so the shortcut reads the answer key.
+            de_table=load_de_table(context.artifacts),
         )
-        if cluster_column is not None:
-            candidate_artifacts["cluster_labels"] = (
-                adata.obs[cluster_column].astype(str).to_numpy()
+        prediction = candidate_inputs.prediction
+        candidate_artifacts = candidate_inputs.candidate_artifacts
+        reference_artifacts = candidate_inputs.reference_artifacts
+        # No placeholder table is archived when there was no candidate to build one
+        # from. A CSV of ``__unassigned__`` rows looks exactly like a run that
+        # annotated every cell wrongly, and it is the file someone opens to find
+        # out why the outcome came back unmeasured.
+        prediction_artifact = (
+            store.save_table(
+                "evaluation-prediction",
+                prediction,
+                metadata={
+                    "hidden_from_agent": True,
+                    "source_column": prediction_column,
+                    "agent_produced_prediction": prediction_column is not None,
+                },
             )
-        if "X_pca" in adata.obsm:
-            candidate_artifacts["embedding"] = adata.obsm["X_pca"]
-        label_column = next(
-            (
-                column
-                for column in ("cell_type", "cell_type_ref", "known_labels", "bulk_labels")
-                if column in adata.obs
-            ),
-            None,
-        )
-        reference_artifacts = (
-            {"labels": pd.DataFrame({"reference_label": adata.obs[label_column].astype(str).to_numpy()})}
-            if label_column is not None
-            else {}
+            if prediction is not None
+            else None
         )
         metric_ids = [
             item.metric_id
             for group in specification.metric_groups
             for item in group.metrics
         ]
-        if not metric_ids:
-            metric_ids = [
-                "cell_annotation.macro_f1",
-                "cell_annotation.mcc",
-                "cell_annotation.balanced_accuracy",
-                "cell_annotation.rare_recall",
-                "cell_annotation.accuracy",
-            ]
+        # No hardcoded fallback list. A benchmark declaring no ``metric_groups``
+        # used to fall back to five annotation metrics regardless of what it
+        # measured, which is the same defect as the profile fallback one layer
+        # down: a DE benchmark got a cell-annotation score. The profile below is
+        # the declaration, and it is now benchmark-specific.
         metric_profile = ScientificLoop._load_metric_profile(specification)
         for group in metric_profile.metric_groups.values():
             metric_ids.extend(name for name in group.metrics if name not in metric_ids)
-        metric_ids = [
-            name
-            for name in metric_ids
-            if name != metric_profile.metric_groups["robustness"].external_score
-        ]
+        # A set over every group, not an index into one. This read
+        # ``metric_groups["robustness"]`` directly, and neither the integration
+        # nor the DE profile declares that group -- so this line raised KeyError
+        # for exactly the two benchmarks that resolving profiles correctly makes
+        # reachable, which is why the two changes are one commit.
+        external_scores = profile_external_scores(metric_profile)
+        metric_ids = [name for name in metric_ids if name not in external_scores]
         groups = [
             MetricGroup(
                 group_id=group.group_id,
@@ -701,8 +857,25 @@ class ScientificLoop:
             adata=adata,
             candidate_artifacts=candidate_artifacts,
             reference_artifacts=reference_artifacts,
-            metadata={**context.metadata, "prediction_artifact_uri": str(prediction_artifact.path)},
+            metadata={
+                **context.metadata,
+                # Which of the agent's own groups the DE ranking is read from.
+                # Resolved by overlap with the hidden reference population rather
+                # than by name, because the agent chose its own class names.
+                **scored_group_metadata(
+                    candidate_artifacts,
+                    reference_artifacts,
+                    context.metadata,
+                ),
+                **(
+                    {"prediction_artifact_uri": str(prediction_artifact.path)}
+                    if prediction_artifact is not None
+                    else {}
+                ),
+            },
             trajectory=agent_run.trajectory.model_dump(mode="json"),
+            agent_produced_columns=frozenset(context.agent_produced_columns),
+            reference_join_gap=candidate_inputs.reference_join_gap,
         )
         engine = ScientificMetricEngine()
         results, applicability, group_results, _legacy_scientific_score = engine.evaluate(
@@ -710,56 +883,55 @@ class ScientificLoop:
             metric_context,
             groups=groups,
         )
-        generic_results = GenericScientificMetricEngine().evaluate(
-            metric_ids,
-            ArtifactBundle(values=candidate_artifacts),
-            ReferenceBundle(values=reference_artifacts),
-            EvaluationContext(
-                metadata=metric_context.metadata,
-                available_artifacts=set(candidate_artifacts),
-                available_metadata=set(metric_context.metadata),
-                payload=metric_context,
-            ),
-        )
-        for result in results:
-            result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
+        if prediction_artifact is not None:
+            for result in results:
+                result.metadata["candidate_evidence_uri"] = str(prediction_artifact.path)
         robustness = RobustnessEvaluator().evaluate(
             [
                 {
                     "seed": agent_run.configuration.seed,
                     "cluster_labels": candidate_artifacts.get("cluster_labels"),
-                    "predicted_labels": prediction["predicted_label"].tolist(),
-                    "artifact_checksums": [prediction_artifact.checksum],
+                    "predicted_labels": (
+                        prediction["predicted_label"].tolist()
+                        if prediction is not None
+                        else None
+                    ),
+                    "artifact_checksums": (
+                        [prediction_artifact.checksum]
+                        if prediction_artifact is not None
+                        else []
+                    ),
                 }
             ]
         )
         metric_inputs = [
-            MetricScoreInput(
-                name=result.metric_name,
-                value=result.normalized_value,
-                applicable=result.applicable,
-                structurally_ineligible=result.status.value == "structurally_ineligible",
-                status=result.status.value,
-            )
-            for result in generic_results
+            MetricScoreInput.from_metric_result(result) for result in results
         ]
         domain_scores = []
         for domain_name, group in metric_profile.metric_groups.items():
             inputs = list(metric_inputs)
             if group.external_score == "robustness.seed_stability":
                 inputs.append(
-                    MetricScoreInput(
-                        name=group.external_score,
-                        value=robustness.seed_stability,
+                    MetricScoreInput.from_external_score(
+                        group.external_score, robustness.seed_stability
                     )
                 )
             domain_scores.append(
                 WeightedGeometricAggregator().aggregate(domain_name, group, inputs)
             )
-        scientific_score = aggregate_domains(domain_scores).value
+        scientific = aggregate_domains(domain_scores)
+        scientific_score = scientific.value
         decisions = DecisionEvaluator().evaluate(agent_run, task)
         methods = MethodEvaluator().evaluate(agent_run, task, metric_ids, scientific_score)
         local_reward_values = [reward.value for reward in agent_run.final_environment_state.state.rewards]
+        progress = summarize_progress(
+            progress_signals,
+            action_count=len(agent_run.final_environment_state.state.actions),
+            token_usage=(
+                agent_run.token_usage.total_tokens if agent_run.token_usage else None
+            ),
+            runtime_seconds=agent_run.wall_clock_seconds,
+        )
         trajectory = TrajectoryEvaluator().evaluate(
             agent_run,
             task,
@@ -769,8 +941,17 @@ class ScientificLoop:
                 category: profile.alternatives
                 for category, profile in specification.decision_evaluation.items()
             },
+            progress=progress,
         )
-        decision_value = sum(item.score for item in decisions) / len(decisions) if decisions else 1.0
+        # ``None``, not 1.0, when there is nothing to score. An agent that runs
+        # its own workflow without recording decisions used to collect a free
+        # perfect score on this dimension, so the benchmark paid better for less
+        # structure. Unmeasured propagates to no global score at all, which is
+        # the convention ``compute_global_agent_score`` already follows for a
+        # missing scientific outcome.
+        decision_value = (
+            sum(item.score for item in decisions) / len(decisions) if decisions else None
+        )
         method_value = method_score(methods)
         profiles = ScientificLoop._decision_profiles(specification)
         selection_evaluator = MethodSelectionEvaluator(decision_ontology)
@@ -804,21 +985,61 @@ class ScientificLoop:
             except ValueError:
                 step_number = decision.order + 1
             evidence["decision_local_reward"] = reward_by_step.get(step_number, 0.0)
+            before, after = ScientificLoop._decision_observations(decision)
             local_decision_rewards.append(
-                local_evaluator.evaluate(decision, None, None, evidence).model_dump(mode="json")
+                local_evaluator.evaluate(decision, before, after, evidence).model_dump(
+                    mode="json"
+                )
             )
+        # Only the selections that produced a number. A decision whose every
+        # component was unanswerable contributes nothing rather than dragging the
+        # mean toward a value the harness never observed.
+        scored_selections = [
+            item.overall for item in selection_scores if item.overall is not None
+        ]
         selection_value = (
-            sum(item.overall for item in selection_scores) / len(selection_scores)
-            if selection_scores
-            else 1.0
+            sum(scored_selections) / len(scored_selections)
+            if scored_selections
+            else None
         )
-        decision_quality = decision_value * selection_value
+        decision_quality = (
+            None
+            if decision_value is None or selection_value is None
+            else decision_value * selection_value
+        )
+        weights = ScoreWeights(
+            outcome=specification.scoring.outcome_weight,
+            decision=specification.scoring.decision_weight,
+            trajectory=specification.scoring.trajectory_weight,
+        )
         global_score = compute_global_agent_score(
             scientific_score,
             decision_quality,
             trajectory.trajectory_quality,
+            weights=weights,
+            confidence=compute_score_confidence(
+                ineligible_fraction_decision=_ineligible_fraction_decision(
+                    selection_scores
+                ),
+                ineligible_fraction_trajectory=trajectory.unmeasured_weight,
+                decision_penalty=specification.scoring.decision_confidence_penalty,
+                trajectory_penalty=specification.scoring.trajectory_confidence_penalty,
+            ),
         )
         benchmark_score = global_score.value if global_score is not None else None
+        # Both halves, because they answer different questions and either alone
+        # leaves an unexplained gap. The join gap says the evaluator could not
+        # reach the reference at all; the domain descriptions say which scored
+        # quantities went unmeasured and why. A DE run with no reference markers
+        # has no join gap -- its candidate never existed -- so before this the
+        # entire outcome was ``None`` beside an empty limitation list.
+        limitations = [
+            *candidate_inputs.limitations,
+            *describe_unmeasured_domains(
+                domain_scores,
+                {result.metric_id: result.eligibility_reason for result in results},
+            ),
+        ]
         return ScientificEvaluation(
             metric_results=results,
             applicability=applicability,
@@ -831,29 +1052,84 @@ class ScientificLoop:
             local_decision_rewards=local_decision_rewards,
             trajectory=trajectory,
             scientific_outcome_score=scientific_score,
+            scientific_outcome_formula=scientific.formula,
+            outcome_limitations=limitations,
             decision_score=decision_value,
             method_score=method_value,
             decision_quality_score=decision_quality,
             trajectory_score=trajectory.trajectory_quality,
             global_agent_score=benchmark_score,
             benchmark_score=benchmark_score,
-            score_formula="scientific_outcome * decision_score * method_selection_score * trajectory_score",
+            score_formula=_score_formula(
+                weights,
+                scientific_outcome=scientific_score,
+                decision=decision_value,
+                selection=selection_value,
+            ),
+            score_detail=global_score,
         )
 
     @staticmethod
-    def _load_metric_profile(specification: BenchmarkSpecification) -> Any:
-        """Load the declarative profile, with a typed built-in fallback."""
-        if specification.metadata.id == "pbmc-cell-annotation":
-            path = (
-                Path(__file__).resolve().parents[3]
-                / "configs"
-                / "metrics"
-                / "pbmc_annotation.yaml"
-            )
-            if path.exists():
-                return load_metric_profile(path)
-            return pbmc_annotation_profile()
-        return pbmc_annotation_profile()
+    def _decision_observations(
+        decision: Any,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Report the observed cell and gene counts either side of a decision.
+
+        Sourced from the observed state delta rather than from the agent's claim,
+        and ``(None, None)`` when nothing was observed -- which excludes the
+        observation-derived reward components rather than scoring them zero.
+        """
+        delta = getattr(decision, "observed_state_delta", None)
+        if delta is None:
+            return None, None
+        return (
+            {
+                OBSERVED_CELL_COUNT: delta.n_obs_before,
+                OBSERVED_GENE_COUNT: delta.n_vars_before,
+            },
+            {
+                OBSERVED_CELL_COUNT: delta.n_obs_after,
+                OBSERVED_GENE_COUNT: delta.n_vars_after,
+            },
+        )
+
+    @staticmethod
+    def _progress_metric_ids(specification: BenchmarkSpecification) -> list[str]:
+        """List the metrics worth recomputing every step to track ``S_t``.
+
+        Restricted to the profile's weighted metrics because those are the only
+        ones the tracker can aggregate; computing the rest each step would cost
+        real time and change no number.
+        """
+        profile = ScientificLoop._load_metric_profile(specification)
+        external = profile_external_scores(profile)
+        return sorted(
+            name for name in profile_metric_ids(profile) if name not in external
+        )
+
+    @staticmethod
+    def _load_metric_profile(
+        specification: BenchmarkSpecification,
+    ) -> BenchmarkMetricProfile:
+        """Resolve the scoring profile this benchmark declares.
+
+        Both branches of this function used to return ``pbmc_annotation_profile()``
+        -- the second unconditionally -- so an integration or differential-
+        expression run was scored on ``clustering.ari`` and
+        ``cell_annotation.rare_recall``, and produced a number that looked
+        entirely ordinary. See
+        :mod:`agent_evals.evaluation.profiles.resolution` for why an unknown
+        benchmark now raises instead of defaulting.
+
+        The preferential load from ``configs/metrics/*.yaml`` is gone with it. A
+        YAML file and a built-in that mirror each other are two declarations of
+        one scoring rule, and they drift *silently*; worse, the guard was
+        ``path.exists()``, so deleting or misplacing the file changed the scoring
+        rule with no diagnostic. ``load_metric_profile`` remains public for
+        third-party profiles, and ``configs/metrics/pbmc_annotation.yaml`` remains
+        as the documented example, pinned by a test to the built-in it mirrors.
+        """
+        return resolve_metric_profile(specification.metadata.id)
 
     @staticmethod
     def _decision_profiles(
@@ -897,65 +1173,71 @@ class ScientificLoop:
         return benchmark_spec_registry.get(str(reference))
 
 
-def _create_scientific_adapter(
-    agent_type: str,
+def _ineligible_fraction_decision(selections: Sequence[MethodScore]) -> float:
+    """Share of the decision dimension's components that were unmeasurable.
+
+    Counted over components rather than over decisions because that is where the
+    gaps actually are: a decision whose category declares no parameter ranges
+    still yields real evidence about method appropriateness and execution, and
+    calling the whole decision ineligible would understate the run as badly as
+    the old substituted numbers overstated it.
+
+    The other half of the dimension -- ``decision_score`` -- needs no term here.
+    It is built from whether the action was allowed and whether it succeeded,
+    both of which the harness always observes.
+    """
+    if not selections:
+        return 0.0
+    total = 0
+    unmeasured = 0
+    for item in selections:
+        # Three declared components per selection, whatever their values; the
+        # denominator has to be what could have been measured, not what was.
+        total += 3
+        unmeasured += len(item.unmeasured_components)
+    return 0.0 if total == 0 else unmeasured / total
+
+
+def _score_formula(
+    weights: ScoreWeights,
     *,
-    model: str | None = None,
-    provider: str | None = None,
-    test_mode: bool = False,
-    event_callback: Callable[[dict[str, Any]], Awaitable[None] | None] | None = None,
-) -> Any:
-    """Create a legacy adapter or wrap a universal runtime for scientific episodes."""
-    if test_mode:
-        settings = get_settings()
-        test_model = (
-            settings.llm_model
-            or settings.glm_model
-            or os.getenv("LLM_MODEL")
-            or os.getenv("GLM_MODEL")
-            or model
-            or "z-ai/glm-5.2"
+    scientific_outcome: float | None,
+    decision: float | None,
+    selection: float | None,
+) -> str:
+    """Describe the score, naming any dimension that could not be measured.
+
+    Names the two halves of the decision dimension separately rather than just
+    reporting ``decision_quality`` as absent, because which half went missing is
+    the difference between an agent that recorded no decisions and a benchmark
+    that declared nothing to score them against.
+    """
+    unmeasured = [
+        name
+        for name, value in (
+            ("scientific_outcome", scientific_outcome),
+            ("decision_score", decision),
+            ("method_selection_score", selection),
         )
-        test_base_url = (
-            settings.llm_base_url
-            or settings.glm_base_url
-            or settings.openrouter_base_url
-            or os.getenv("LLM_BASE_URL")
-            or os.getenv("GLM_BASE_URL")
-            or os.getenv("OPENROUTER_BASE_URL")
-            or "https://openrouter.ai/api/v1"
-        )
-        test_api_key = (
-            settings.llm_api_key
-            or settings.glm_api_key
-            or settings.openrouter_api_key
-            or settings.openai_api_key
-            or os.getenv("LLM_API_KEY")
-            or os.getenv("GLM_API_KEY")
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-        )
-        if not test_api_key:
-            raise RuntimeError(
-                "GLM test mode requires LLM_API_KEY, GLM_API_KEY, "
-                "OPENROUTER_API_KEY, or OPENAI_API_KEY in the backend environment"
-            )
-        runtime = agent_runtime_registry.create(
-            "openai-compatible",
-            model=test_model,
-            base_url=test_base_url,
-            api_key=test_api_key,
-        )
-        return RuntimeAgentAdapter(runtime, event_callback=event_callback)
-    if agent_type in agent_runtime_registry.list():
-        runtime_config: dict[str, object] = {}
-        if model is not None and agent_type not in {"gpt-5", "claude-sonnet"}:
-            runtime_config["model"] = model
-        return RuntimeAgentAdapter(
-            agent_runtime_registry.create(agent_type, **runtime_config),
-            event_callback=event_callback,
-        )
-    return agent_adapter_registry.create(agent_type)
+        if value is None
+    ]
+    return describe_score(weights, unmeasured)
+
+
+def _unmeasured_or(value: float | None) -> str:
+    """Render an optional score so a gap cannot be mistaken for a failure."""
+    return "unmeasured" if value is None else str(value)
+
+
+def _score_cell(value: float | None) -> str:
+    """Render an optional score into a report table cell.
+
+    Spelled out rather than shown as a dash, which the metric table above uses
+    for a metric that was attempted and produced nothing. These components were
+    never attempted, and a reader comparing two runs needs to be able to tell
+    those apart.
+    """
+    return "unmeasured" if value is None else f"{value:.3f}"
 
 
 __all__ = [

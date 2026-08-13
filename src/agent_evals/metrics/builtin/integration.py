@@ -7,7 +7,12 @@ from typing import Any
 import numpy as np
 
 from agent_evals.metrics.backends.sklearn import adjusted_rand, silhouette
-from agent_evals.metrics.builtin._helpers import embedding, failed, labels
+from agent_evals.metrics.builtin._helpers import (
+    embedding,
+    failed,
+    labels,
+    unavailable,
+)
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.metrics.models import (
     MetricApplicability,
@@ -82,19 +87,27 @@ def _ilis(context: ScientificMetricContext) -> MetricComputation:
 
 
 def _kbet(context: ScientificMetricContext) -> MetricComputation:
+    """Report the missing backend rather than scoring the agent for it.
+
+    Both branches were ``failed(...)``, which carries the metric's failure score
+    of 0.0 -- so an agent with flawless batch integration was charged a zero for
+    a metric SCAIB has never implemented. Neither branch depends on anything the
+    agent did, which is the tell.
+    """
     from agent_evals.metrics.backends.scib_metrics import available
 
     if not available():
-        return failed("scib-metrics is not installed")
-    return failed("scib-metrics kBET adapter is reserved for pinned backend wiring")
+        return unavailable("scib-metrics is not installed")
+    return unavailable("no kBET adapter is wired to the installed scib-metrics")
 
 
 def _bras(context: ScientificMetricContext) -> MetricComputation:
+    """See :func:`_kbet`: a harness gap, reported as one."""
     from agent_evals.metrics.backends.scib_metrics import available
 
     if not available():
-        return failed("scib-metrics is not installed")
-    return failed("BRAS adapter is unavailable for the installed backend")
+        return unavailable("scib-metrics is not installed")
+    return unavailable("no BRAS adapter is wired to the installed scib-metrics")
 
 
 def cell_type_asw(context: ScientificMetricContext) -> MetricComputation:
