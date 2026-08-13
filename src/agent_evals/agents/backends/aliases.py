@@ -27,6 +27,7 @@ from agent_evals.agents.backends.external_process import ExternalProcessRuntime
 from agent_evals.agents.backends.http_step import HttpStepRuntime
 from agent_evals.agents.backends.openai import OpenAIRuntime
 from agent_evals.agents.backends.openai_compatible import OpenAICompatibleRuntime
+from agent_evals.agents.backends.openrouter import OpenRouterRuntime
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.registry import agent_runtime_registry
 
@@ -71,6 +72,7 @@ DEFAULT_RUNTIMES: tuple[RuntimeRegistration, ...] = (
         ("tool_use",),
     ),
     RuntimeRegistration("openai-compatible", OpenAICompatibleRuntime, ("tool_use",)),
+    RuntimeRegistration("openrouter", OpenRouterRuntime, ("tool_use",)),
     RuntimeRegistration(
         "external-process", ExternalProcessRuntime, ("external_process",)
     ),

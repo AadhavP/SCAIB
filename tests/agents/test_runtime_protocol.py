@@ -11,8 +11,8 @@ from agent_evals.agents.backends import (
     AnthropicRuntime,
     CustomPythonRuntime,
     OpenAICompatibleRuntime,
-    OpenRouterRuntime,
     OpenAIRuntime,
+    OpenRouterRuntime,
 )
 from agent_evals.agents.backends.aliases import build_runtime
 from agent_evals.agents.harness import AgentHarness

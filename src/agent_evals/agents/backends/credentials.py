@@ -75,8 +75,10 @@ def resolve_compatible_credentials(
     resolved_model = (
         _first(
             settings.llm_model,
+            settings.openrouter_model,
             settings.glm_model,
             os.getenv("LLM_MODEL"),
+            os.getenv("OPENROUTER_MODEL"),
             os.getenv("GLM_MODEL"),
             model,
         )

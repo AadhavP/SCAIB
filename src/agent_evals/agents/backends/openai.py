@@ -53,6 +53,7 @@ class OpenAIRuntime(AgentRuntime):
         api_key: str | None = None,
         base_url: str | None = None,
         organization: str | None = None,
+        default_headers: dict[str, str] | None = None,
         system_prompt: str | None = None,
         use_chat_completions: bool = False,
     ) -> None:
@@ -63,6 +64,7 @@ class OpenAIRuntime(AgentRuntime):
         self.api_key = api_key
         self.base_url = base_url
         self.organization = organization
+        self.default_headers = default_headers or {}
         self.system_prompt = system_prompt or DEFAULT_OPENAI_ACTION_PROMPT
         self.use_chat_completions = use_chat_completions
         self.manifest = AgentManifest(
@@ -98,6 +100,7 @@ class OpenAIRuntime(AgentRuntime):
                 api_key=self.api_key,
                 base_url=self.base_url,
                 organization=self.organization,
+                default_headers=self.default_headers,
             )
         response = await _call_openai(
             self.client,
@@ -121,6 +124,7 @@ class OpenAIRuntime(AgentRuntime):
                 api_key=self.api_key,
                 base_url=self.base_url,
                 organization=self.organization,
+                default_headers=self.default_headers,
             )
         session.state.setdefault("messages", []).append({
             "role": "user",
@@ -190,6 +194,7 @@ def _build_openai_client(
     api_key: str | None,
     base_url: str | None,
     organization: str | None,
+    default_headers: dict[str, str] | None = None,
 ) -> Any:
     resolved_api_key = api_key or os.getenv("OPENAI_API_KEY")
     if not resolved_api_key:
@@ -210,6 +215,8 @@ def _build_openai_client(
     resolved_organization = organization or os.getenv("OPENAI_ORG_ID") or os.getenv("OPENAI_ORGANIZATION")
     if resolved_organization:
         kwargs["organization"] = resolved_organization
+    if default_headers:
+        kwargs["default_headers"] = dict(default_headers)
     return OpenAI(**kwargs)
 
 

@@ -100,8 +100,11 @@ class Settings(BaseSettings):
     glm_model: str | None = Field(default=None, validation_alias="GLM_MODEL")
     glm_api_key: str | None = Field(default=None, validation_alias="GLM_API_KEY", repr=False)
     glm_base_url: str | None = Field(default=None, validation_alias="GLM_BASE_URL")
+    openrouter_model: str | None = Field(default=None, validation_alias="OPENROUTER_MODEL")
     openrouter_api_key: str | None = Field(default=None, validation_alias="OPENROUTER_API_KEY", repr=False)
     openrouter_base_url: str | None = Field(default=None, validation_alias="OPENROUTER_BASE_URL")
+    openrouter_http_referer: str | None = Field(default=None, validation_alias="OPENROUTER_HTTP_REFERER")
+    openrouter_app_title: str | None = Field(default=None, validation_alias="OPENROUTER_APP_TITLE")
     openai_api_key: str | None = Field(default=None, validation_alias="OPENAI_API_KEY", repr=False)
     # Black-box agent boundary: a URL that answers POST /step, plus its bearer
     # token. Declared here so the endpoint is configuration rather than a flag

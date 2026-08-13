@@ -8,6 +8,7 @@ from agent_evals.agents.backends import (
     HttpStepRuntime,
     OpenAICompatibleRuntime,
     OpenAIRuntime,
+    OpenRouterRuntime,
 )
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.events import (
@@ -76,6 +77,7 @@ __all__ = [
     "HttpStepRuntime",
     "OpenAICompatibleRuntime",
     "OpenAIRuntime",
+    "OpenRouterRuntime",
     "RuntimeAgentAdapter",
     "RuntimeRun",
     "agent_runtime_registry",

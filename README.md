@@ -64,9 +64,37 @@ uv run agent-evals list-benchmarks
 # Run a benchmark against an agent
 uv run agent-evals run --config configs/benchmark_config.yaml
 
+# Run with OpenRouter through the OpenAI-compatible runtime
+uv run agent-evals run \
+  --benchmark examples/benchmarks/pbmc-cell-annotation-free.yaml \
+  --agent openrouter \
+  --model z-ai/glm-5.2
+
 # Launch FastAPI web server
 uv run agent-evals serve --port 8000
 ```
+
+### OpenRouter
+
+OpenRouter is supported as a provider-named OpenAI-compatible runtime. Keep the
+key in the backend environment or `.env`; never commit it and never expose it as
+a `VITE_` browser variable.
+
+```powershell
+$env:OPENROUTER_API_KEY = "sk-or-v1-..."
+$env:OPENROUTER_MODEL = "z-ai/glm-5.2"
+$env:OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+$env:OPENROUTER_HTTP_REFERER = "https://github.com/AadhavP/SCAIB"
+$env:OPENROUTER_APP_TITLE = "SCAIB"
+
+uv run agent-evals run `
+  --benchmark examples/benchmarks/pbmc-cell-annotation-free.yaml `
+  --agent openrouter `
+  --model z-ai/glm-5.2
+```
+
+For the web console, start the backend after setting those variables, then use
+the `openrouter` agent from the console.
 
 ---
 

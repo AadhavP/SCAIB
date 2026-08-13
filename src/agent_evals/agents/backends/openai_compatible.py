@@ -19,6 +19,7 @@ class OpenAICompatibleRuntime(OpenAIRuntime):
         base_url: str | None = None,
         api_key: str | None = None,
         tools: list[dict[str, Any]] | None = None,
+        default_headers: dict[str, str] | None = None,
         system_prompt: str | None = None,
     ) -> None:
         super().__init__(
@@ -27,6 +28,7 @@ class OpenAICompatibleRuntime(OpenAIRuntime):
             base_url=base_url,
             api_key=api_key,
             tools=tools,
+            default_headers=default_headers,
             system_prompt=system_prompt,
             use_chat_completions=True,
         )

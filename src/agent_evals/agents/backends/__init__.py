@@ -25,6 +25,7 @@ from agent_evals.agents.backends.external_process import ExternalProcessRuntime
 from agent_evals.agents.backends.http_step import HttpStepError, HttpStepRuntime
 from agent_evals.agents.backends.openai import OpenAIRuntime
 from agent_evals.agents.backends.openai_compatible import OpenAICompatibleRuntime
+from agent_evals.agents.backends.openrouter import OpenRouterRuntime
 
 __all__ = [
     "DEFAULT_RUNTIMES",
@@ -37,6 +38,7 @@ __all__ = [
     "MissingCredentialsError",
     "OpenAICompatibleRuntime",
     "OpenAIRuntime",
+    "OpenRouterRuntime",
     "RuntimeRegistration",
     "build_runtime",
     "compatible_runtime_from_environment",
