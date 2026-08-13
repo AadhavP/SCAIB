@@ -32,11 +32,10 @@ from agent_evals.benchmarks.schema import (
 )
 from agent_evals.cli.references import resolve_benchmark_path
 from agent_evals.environment.execution import (
-    IsolationControl,
     IsolationOutcome,
-    describe_process_limits,
     free_execution_action_ids,
     isolation_from_constraints,
+    local_isolation_controls,
 )
 
 console = Console()
@@ -83,38 +82,55 @@ def env_list_command() -> None:
     console.print(f"Platform: [bold]{sys.platform}[/bold]")
 
 
+#: The probe used to ask the local tier what it would enforce. Every control the
+#: tier has a mechanism for is requested, because the column reports what this
+#: host *can* impose and a control nobody asked for answers ``not_requested`` --
+#: which would drop it from both halves of the summary and read as no gap. The
+#: values do not reach the verdict; only their presence does.
+_SUMMARY_PROBE = ConstraintSpecification(
+    internet_access=False,
+    max_memory_mb=1024,
+    max_runtime_seconds=60,
+)
+
+
 def _backend_isolation_summary(backend: EnvironmentBackend) -> str:
     """Summarize which controls a backend can impose on this host.
 
-    Phrased as what is *missing* rather than what is present, because the
-    absence is the fact a reader needs and the one a configuration file hides.
+    Both halves are reported, present *and* missing, because either alone is
+    misread: a list of guarantees implies the rest were not asked for, and a
+    list of gaps implies everything else held.
+
+    Derived from :func:`local_isolation_controls` rather than assembled here.
+    This function used to hand-list ``filesystem_scope`` among the controls the
+    local tier imposes, while the tier itself reports it ``unenforceable`` on
+    every host and says why -- a local process keeps the host write permissions
+    of the user running the benchmark. So the pre-run summary promised
+    confinement that no run ever had, and nothing could notice, because a
+    summary blocks nothing.
     """
     if backend is EnvironmentBackend.CONTAINER:
         if not _container_available():
             return "-"
-        return "network, resident memory, cpu time, filesystem scope, environment"
-    probe = describe_process_limits(
-        isolation_from_constraints(
-            ConstraintSpecification(max_memory_mb=1024, max_runtime_seconds=60)
-        )
-    )
-    enforced = [
+        # Deliberately no list. The controls this tier imposes are flags on a
+        # daemon this command does not talk to, and some of them -- a cgroup
+        # memory ceiling in particular -- are accepted and then ignored by a
+        # host without the matching cgroup support. Naming them here would be
+        # the unchecked claim the whole isolation layer exists to prevent.
+        return "resolved against the container runtime at run time"
+    reports = local_isolation_controls(isolation_from_constraints(_SUMMARY_PROBE))
+    present = [
         report.control.value
-        for report in probe
+        for report in reports
         if report.outcome is IsolationOutcome.ENFORCED
     ]
-    # The network is listed as unenforceable unconditionally: a bare subprocess
-    # cannot be denied one without privileges no benchmark runner should hold,
-    # so this is a property of the tier rather than of the host.
     missing = [
         report.control.value
-        for report in probe
-        if report.outcome is IsolationOutcome.UNENFORCEABLE
-    ] + [IsolationControl.NETWORK.value]
-    present = ", ".join(
-        [*enforced, IsolationControl.FILESYSTEM_SCOPE.value, IsolationControl.ENVIRONMENT.value]
-    )
-    return f"{present} (no {', '.join(missing)})"
+        for report in reports
+        if report.outcome
+        in (IsolationOutcome.UNENFORCEABLE, IsolationOutcome.FAILED)
+    ]
+    return f"{', '.join(present) or '(none)'} (no {', '.join(missing)})"
 
 
 @env_app.command("inspect")
@@ -175,6 +191,13 @@ def _print_isolation(
 ) -> None:
     """Report per control what the benchmark asked for and what it would get.
 
+    The rows are the local tier's own report, not a re-derivation. Assembled
+    here from :func:`describe_process_limits` alone, the table listed only the
+    resource ceilings plus a hand-written network row, and silently omitted
+    ``filesystem_scope`` -- the one control this tier most notably does not
+    impose, and the one an operator reading a table headed "Isolation on this
+    host" would take the omission as absence of a problem.
+
     The container tier's answers depend on a daemon this command deliberately
     does not talk to, so they are reported as undetermined rather than assumed:
     predicting enforcement without checking would be exactly the claim this
@@ -185,7 +208,7 @@ def _print_isolation(
     table.add_column("Control", style="cyan")
     table.add_column("Requested")
     table.add_column("Outcome")
-    table.add_column("Mechanism")
+    table.add_column("Detail")
     if backend is EnvironmentBackend.CONTAINER:
         table.add_row(
             "(all)",
@@ -195,23 +218,13 @@ def _print_isolation(
         )
         console.print(table)
         return
-    rows = list(describe_process_limits(request))
-    for report in rows:
+    for report in local_isolation_controls(request):
         table.add_row(
             report.control.value,
             report.requested or "-",
             _outcome_style(report.outcome),
-            report.mechanism or "-",
+            report.mechanism or report.detail or "-",
         )
-    if not request.network_access:
-        table.add_row(
-            IsolationControl.NETWORK.value,
-            "denied",
-            _outcome_style(IsolationOutcome.UNENFORCEABLE),
-            "the local tier cannot deny a subprocess the network",
-        )
-    if not rows and request.network_access:
-        table.add_row("(none requested)", "-", "-", "-")
     console.print(table)
 
 
@@ -275,20 +288,22 @@ def env_validate_command(
 
 
 def _unenforceable_controls(specification: BenchmarkSpecification) -> list[str]:
-    """Name the requested controls the local tier cannot impose on this host."""
+    """Name the controls the local tier cannot impose on this host.
+
+    Reads the same report the run record will carry, so the warning an operator
+    sees before the run and the gaps recorded during it are the same list.
+    """
     if not any(
         spec.backend is EnvironmentBackend.LOCAL for spec in specification.environments
     ):
         return []
     request = isolation_from_constraints(specification.constraints)
-    controls = [
+    return [
         report.control.value
-        for report in describe_process_limits(request)
-        if report.outcome is IsolationOutcome.UNENFORCEABLE
+        for report in local_isolation_controls(request)
+        if report.outcome
+        in (IsolationOutcome.UNENFORCEABLE, IsolationOutcome.FAILED)
     ]
-    if not request.network_access:
-        controls.append(IsolationControl.NETWORK.value)
-    return controls
 
 
 def _load(reference: str) -> BenchmarkSpecification:

@@ -31,6 +31,7 @@ from agent_evals.environment.execution.fingerprint import (
     fingerprint_workspace,
 )
 from agent_evals.environment.execution.isolation import (
+    IsolationControlReport,
     IsolationReport,
     IsolationRequest,
     build_limit_setter,
@@ -138,6 +139,35 @@ async def _sample_peak_memory(pid: int, sink: list[float]) -> None:
         await asyncio.sleep(_MEMORY_SAMPLE_INTERVAL_SECONDS)
 
 
+def local_isolation_controls(
+    request: IsolationRequest,
+    *,
+    platform_name: str = sys.platform,
+) -> tuple[IsolationControlReport, ...]:
+    """Report every control this tier touches, enforced or not.
+
+    Shared with the ``env`` CLI rather than written once here and once there,
+    because the two must agree exactly and a disagreement fails *silently*: the
+    CLI reports what an operator decides to trust before a run, the run record
+    reports what actually held, and nothing compares them. The CLI used to
+    hand-list ``filesystem_scope`` among the controls this tier imposes while
+    this backend reported it ``unenforceable`` on every host, so the pre-run
+    summary asserted confinement the run record then denied.
+
+    ``filesystem_scope`` and ``environment`` are always reported, unrequestable
+    and unconditional: this tier pins the working directory and reduces the
+    environment on every execution, and neither is something a benchmark can
+    ask for or decline. Reporting them only when asked would leave the honest
+    ``unenforceable`` verdict on the first one absent from the record.
+    """
+    return (
+        network_report(network_access=request.network_access, enforceable=False),
+        filesystem_report(enforceable=False),
+        environment_report(allowlisted=environment_allowlist(platform_name)),
+        *describe_process_limits(request, platform_name=platform_name),
+    )
+
+
 class LocalProcessBackend:
     """Execute agent-authored code in a local subprocess."""
 
@@ -175,22 +205,15 @@ class LocalProcessBackend:
 
     def isolation_report(self) -> IsolationReport:
         """Report what this backend does and does not guarantee."""
-        controls = [
-            network_report(
-                network_access=self.isolation_request.network_access,
-                enforceable=False,
-            ),
-            filesystem_report(enforceable=False),
-            environment_report(allowlisted=self._allowlist),
-            *describe_process_limits(
-                self.isolation_request,
-                platform_name=self.platform_name,
-            ),
-        ]
         return IsolationReport(
             backend=self.name,
             platform=self.platform_name,
-            controls=controls,
+            controls=list(
+                local_isolation_controls(
+                    self.isolation_request,
+                    platform_name=self.platform_name,
+                )
+            ),
         )
 
     async def fingerprint(self) -> WorkspaceFingerprint:
@@ -473,5 +496,6 @@ def resolve_within(root: Path, candidate: str) -> Path | None:
 __all__ = [
     "BACKEND_NAME",
     "LocalProcessBackend",
+    "local_isolation_controls",
     "resolve_within",
 ]

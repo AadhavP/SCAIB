@@ -57,7 +57,11 @@ from agent_evals.environment.execution.isolation import (
     describe_process_limits,
     supports_resource_limits,
 )
-from agent_evals.environment.execution.local import LocalProcessBackend, resolve_within
+from agent_evals.environment.execution.local import (
+    LocalProcessBackend,
+    local_isolation_controls,
+    resolve_within,
+)
 from agent_evals.environment.execution.observations import (
     EXECUTION_OUTPUT_OBSERVATION,
     PIPELINE_HISTORY_OBSERVATION,
@@ -103,6 +107,7 @@ __all__ = [
     "free_execution_action_ids",
     "interpreter_argv",
     "isolation_from_constraints",
+    "local_isolation_controls",
     "resolve_within",
     "supports_resource_limits",
 ]
