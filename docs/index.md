@@ -13,3 +13,7 @@
 The canonical benchmark language is documented in
 [Benchmark specification](benchmark-specification.md). It describes scientific
 experiments as validated YAML without embedding execution logic.
+
+The proposed publication dataset suite, accessions, split rules, and quality
+gates are documented in the
+[SCAIB paper dataset portfolio](paper-dataset-portfolio.md).

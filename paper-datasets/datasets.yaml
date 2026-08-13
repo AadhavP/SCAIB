@@ -1,0 +1,351 @@
+portfolio:
+  name: scaib-paper-dataset-shortlist
+  version: 0.1.0
+  status: paper_ready_shortlist_not_frozen_release
+  created_at: 2026-08-11
+  dataset_count: 10
+  minimum_acceptable_count_after_audit: 8
+  purpose: >
+    Diverse high-quality single-cell dataset shortlist for SCAIB paper
+    comparisons against established benchmarking methods and agent systems.
+  default_subsetting_tiers:
+    smoke: 5000-10000 cells for interface and artifact checks
+    paper: 25000-100000 cells, stratified within biological and technical groups
+    full: complete materialized dataset for confirmatory runs
+
+datasets:
+  - id: ann_tabula_sapiens
+    name: Tabula Sapiens v1
+    family: annotation
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: cross_tissue_cell_annotation
+    quality_rationale: >
+      Broad multi-organ human atlas with expert annotation, donor and tissue
+      metadata, and a public GEO/AWS access path.
+    source:
+      primary_paper: https://www.science.org/doi/10.1126/science.abl4896
+      accession: GSE201333
+      accession_url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE201333
+      data_portal: https://registry.opendata.aws/tabula-sapiens/
+    split:
+      grouping_key: donor_id
+      secondary_grouping: tissue
+      strategy: hold_out_complete_donors_and_selected_tissues
+    hidden_reference:
+      - cell_type_label
+      - ontology_label
+      - expert_marker_tables
+    compatible_baselines:
+      - marker_rules
+      - SingleR
+      - scmap
+      - CellTypist
+      - scANVI_reference_mapping
+    limitations:
+      - Raw FASTQ access may require controlled-access approval; processed H5AD/CSV are public.
+      - Highly visible atlas; use blinded IDs and held-out variants to reduce contamination risk.
+    freeze_status: candidate
+
+  - id: ann_human_brain_v1
+    name: Human Brain Cell Atlas v1.0
+    family: annotation
+    modality: snRNA-seq
+    organism: Homo sapiens
+    primary_task: hierarchical_region_held_out_annotation
+    quality_rationale: >
+      Whole adult human brain atlas with millions of nuclei, anatomical region
+      metadata, and hierarchical supercluster/cluster/subcluster labels.
+    source:
+      atlas_page: https://data.humancellatlas.org/hca-bio-networks/nervous-system/atlases/brain-v1-0
+      allen_access: https://alleninstitute.github.io/abc_atlas_access/descriptions/WHB-10Xv3.html
+      primary_paper: https://www.science.org/doi/10.1126/science.add7046
+    split:
+      grouping_key: anatomical_region
+      secondary_grouping: donor_id
+      strategy: hold_out_anatomical_regions
+    hidden_reference:
+      - supercluster
+      - cluster
+      - subcluster
+      - taxonomy_mapping
+    compatible_baselines:
+      - marker_rules
+      - SingleR
+      - scmap
+      - scANVI_reference_mapping
+    limitations:
+      - Only three donors; do not use this dataset to claim strong donor generalization.
+      - Full expression matrices are large and require paper-scale stratified subsetting.
+      - License is CC BY-NC 4.0, so downstream redistribution terms must be audited.
+    freeze_status: candidate
+
+  - id: ann_kidney_injury
+    name: Human Kidney Atlas healthy and injured states
+    family: annotation
+    modality: scRNA-seq/snRNA-seq plus spatial/multimodal components
+    organism: Homo sapiens
+    primary_task: disease_aware_kidney_cell_state_annotation
+    quality_rationale: >
+      Large healthy and injured kidney atlas with multi-institution sampling,
+      multiple modalities, canonical cell identities, and injury-associated states.
+    source:
+      primary_paper: https://www.nature.com/articles/s41586-023-05769-3
+      accession: GSE183279
+      accession_url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE183279
+      portal: https://atlas.kpmp.org/
+      cellxgene_collection: https://cellxgene.cziscience.com/collections/bcb61471-2a44-4d00-a0af-ff085512674c
+    split:
+      grouping_key: donor_id
+      secondary_grouping: modality
+      stratify_by:
+        - disease_status
+      strategy: donor_and_modality_holdout_with_disease_stratification
+    hidden_reference:
+      - cell_type_label
+      - injury_state
+      - disease_annotation
+    compatible_baselines:
+      - marker_rules
+      - SingleR
+      - CellTypist
+      - scANVI_reference_mapping
+    limitations:
+      - Must reject splits where disease and platform/modality are perfectly confounded.
+      - Modality-specific preprocessing decisions must be preregistered.
+    freeze_status: candidate
+
+  - id: ann_pancreas_crossstudy
+    name: Human pancreas cross-study collection
+    family: annotation
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: leave_one_study_out_cell_annotation
+    quality_rationale: >
+      Established cross-study label-transfer setting with shared endocrine,
+      exocrine, stromal, and immune pancreatic populations measured by distinct
+      protocols across studies.
+    source:
+      baron_gse: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE84133
+      muraro_gse: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE85241
+      segerstolpe_arrayexpress: https://www.ebi.ac.uk/biostudies/arrayexpress/studies/E-MTAB-5061
+      scmap_example: https://scmap.sanger.ac.uk/scmap/
+    split:
+      grouping_key: source_study
+      strategy: leave_one_complete_study_out
+    hidden_reference:
+      - cell_type_label
+      - source_study_for_test_labels
+      - marker_tables_from_primary_papers
+    compatible_baselines:
+      - marker_rules
+      - SingleR
+      - scmap
+      - scANVI_reference_mapping
+    limitations:
+      - Label vocabulary harmonization across studies is the main audit burden.
+      - Include one unknown-population variant only if the held-out population policy is preregistered.
+    freeze_status: candidate
+
+  - id: int_cellbench_mixology
+    name: CellBench/sc_mixology
+    family: integration
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: controlled_protocol_and_mixture_integration
+    quality_rationale: >
+      Experimental mixture-control benchmark with known cell-line identities and
+      mixture proportions across droplet and plate protocols.
+    source:
+      primary_paper: https://www.nature.com/articles/s41592-019-0425-8
+      accession: GSE118767
+      accession_url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE118767
+      processed_data_repo: https://github.com/LuyiTian/CellBench_data
+      package: https://bioconductor.org/packages/CellBench
+    split:
+      grouping_key: protocol
+      secondary_grouping: mixture_design
+      strategy: hold_out_protocol_or_mixture_design
+    hidden_reference:
+      - cell_line_identity
+      - known_mixture_proportion
+    compatible_baselines:
+      - no_integration
+      - Harmony
+      - Scanorama
+      - scVI
+      - scANVI
+    limitations:
+      - Cell-line mixtures are controlled but less biologically complex than tissue atlases.
+      - Use as calibration/control evidence, not as the only integration benchmark.
+    freeze_status: candidate
+
+  - id: int_multicenter_reference
+    name: Multi-center cross-platform single-cell RNA-seq reference
+    family: integration
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: center_platform_batch_correction
+    quality_rationale: >
+      Twenty datasets generated from two well-characterized reference cell lines
+      and their mixtures across centers and platforms.
+    source:
+      primary_paper: https://www.nature.com/articles/s41597-021-00809-x
+      pubmed: https://pubmed.ncbi.nlm.nih.gov/33531477/
+      sra: https://www.ncbi.nlm.nih.gov/sra/?term=SRP199641
+      bioproject: https://www.ncbi.nlm.nih.gov/bioproject/PRJNA504037
+      figshare: https://springernature.figshare.com/collections/A_Multi-center_Cross-platform_Single-cell_RNA_Sequencing_Reference_Dataset/5213468
+    split:
+      grouping_key: center_platform
+      strategy: leave_one_center_platform_combination_out
+    hidden_reference:
+      - cell_line_identity
+      - mixture_composition
+      - matched_bulk_reference
+    compatible_baselines:
+      - no_integration
+      - Harmony
+      - Scanorama
+      - scVI
+    limitations:
+      - Must keep files from the same library in the same split.
+      - Like CellBench, this is strongest for technical calibration rather than tissue biology.
+    freeze_status: candidate
+
+  - id: int_hlca
+    name: Integrated Human Lung Cell Atlas
+    family: integration
+    modality: scRNA-seq/snRNA-seq
+    organism: Homo sapiens
+    primary_task: study_held_out_lung_atlas_integration
+    quality_rationale: >
+      Large lung atlas spanning many studies, donors, technologies, anatomical
+      sites, and diseases with consensus cell annotations and raw count access.
+    source:
+      primary_paper: https://www.nature.com/articles/s41591-023-02327-2
+      hca_atlas: https://data.humancellatlas.org/hca-bio-networks/lung/atlases/lung-v1-0
+      code_and_metadata: https://github.com/LungCellAtlas/HLCA
+      cellxgene_collection: https://cellxgene.cziscience.com/collections/6f6d381a-7701-4781-935c-db10d30de293
+    split:
+      grouping_key: source_study
+      secondary_grouping: donor_id
+      strategy: leave_out_complete_source_studies_and_donors
+    hidden_reference:
+      - consensus_cell_type
+      - disease_annotation_for_preservation_metrics
+      - published_integrated_embedding
+    compatible_baselines:
+      - no_integration
+      - Harmony
+      - Scanorama
+      - scVI
+      - scANVI
+    limitations:
+      - Agent input must use source counts, not the published integrated embedding.
+      - Large scale requires deterministic paper-tier subsetting.
+    freeze_status: candidate
+
+  - id: de_kang_ifnb
+    name: Kang et al. IFN-beta PBMC
+    family: differential_expression
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: paired_donor_aware_stimulation_de
+    quality_rationale: >
+      Compact paired control and IFN-beta stimulation design that directly tests
+      whether agents treat donor as the replicate rather than cell.
+    source:
+      primary_paper: https://www.nature.com/articles/nbt.4042
+      accession: GSE96583
+      accession_url: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE96583
+      sra: https://www.ncbi.nlm.nih.gov/sra/?term=SRP102802
+    split:
+      grouping_key: donor_id
+      paired_by: donor_id
+      stratify_by:
+        - condition
+      strategy: donor_holdout_with_paired_conditions_preserved
+    hidden_reference:
+      - reference_cell_type
+      - held_out_pseudobulk_de_results
+      - pathway_reference
+    compatible_baselines:
+      - edgeR_pseudobulk
+      - DESeq2_pseudobulk
+      - limma_voom_pseudobulk
+      - cell_level_wilcoxon_negative_control
+    limitations:
+      - Audit batch 1 versus batch 2 before freezing; the paired stimulation task should use the batch with paired conditions.
+      - Small donor count means this is ideal for a compact vertical slice, not the only DE evidence.
+    freeze_status: candidate
+
+  - id: de_smillie_uc
+    name: Smillie et al. ulcerative-colitis colon atlas
+    family: differential_expression
+    modality: scRNA-seq
+    organism: Homo sapiens
+    primary_task: donor_aware_tissue_case_control_de
+    quality_rationale: >
+      Large colon mucosa atlas from UC and healthy donors with epithelial,
+      stromal, and immune compartments and downloadable matrices/metadata.
+    source:
+      primary_paper: https://doi.org/10.1016/j.cell.2019.06.029
+      single_cell_portal: https://singlecell.broadinstitute.org/single_cell/study/SCP259/intra-and-inter-cellular-rewiring-of-the-human-colon-during-ulcerative-colitis
+      analysis_code: https://github.com/cssmillie/ulcerative_colitis
+    split:
+      grouping_key: donor_id
+      stratify_by:
+        - diagnosis
+        - inflammation_status
+        - colon_location
+      strategy: complete_donor_holdout_with_disease_and_location_stratification
+    hidden_reference:
+      - reference_cell_subset
+      - held_out_disease_de_results
+      - anti_tnf_response_associations
+    compatible_baselines:
+      - edgeR_pseudobulk
+      - DESeq2_pseudobulk
+      - limma_voom_pseudobulk
+      - cell_level_wilcoxon_negative_control
+    limitations:
+      - Confirm current portal download terms and file availability before freezing.
+      - Disease, inflammation, and anatomical-location covariates must be balanced in splits.
+    freeze_status: candidate
+
+  - id: de_stephenson_covid
+    name: Stephenson et al. COVID-19 PBMC multi-omics cohort
+    family: differential_expression
+    modality: CITE-seq plus VDJ
+    organism: Homo sapiens
+    primary_task: multicenter_severity_aware_pbmc_de
+    quality_rationale: >
+      Large multicenter immune cohort with COVID-19 severity, PBMC RNA, surface
+      protein, and receptor data for donor-held-out DE and independent validation.
+    source:
+      primary_paper: https://www.nature.com/articles/s41591-021-01329-2
+      accession: E-MTAB-10026
+      accession_url: https://www.ebi.ac.uk/biostudies/studies/E-MTAB-10026
+      hca_project: https://explore.data.humancellatlas.org/projects/b963bd4b-4bc1-4404-8425-69d74bc636b8
+      analysis_code: https://github.com/scCOVID-19/COVIDPBMC/
+      portal: https://covid19cellatlas.org/
+    split:
+      grouping_key: person_id
+      stratify_by:
+        - center
+        - severity
+      strategy: person_holdout_with_center_and_severity_stratification
+    hidden_reference:
+      - protein_measurements_for_validation
+      - receptor_repertoire_features
+      - held_out_pseudobulk_de_results
+    compatible_baselines:
+      - edgeR_pseudobulk
+      - DESeq2_pseudobulk
+      - limma_voom_pseudobulk
+      - cell_level_wilcoxon_negative_control
+    limitations:
+      - Human disease cohort metadata may include controlled-access components; verify agent-visible deidentification before materialization.
+      - Severity and center confounding must be audited before any scored comparison.
+    freeze_status: candidate
+
