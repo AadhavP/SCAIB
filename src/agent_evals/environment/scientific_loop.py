@@ -71,7 +71,12 @@ from agent_evals.evaluation.candidates import (
 from agent_evals.evaluation.methods import method_score
 from agent_evals.evaluation.metrics.robustness import RobustnessEvaluator
 from agent_evals.evaluation.models import MethodScore
-from agent_evals.evaluation.profiles import load_metric_profile, pbmc_annotation_profile
+from agent_evals.evaluation.profiles import (
+    BenchmarkMetricProfile,
+    profile_external_scores,
+    profile_metric_ids,
+    resolve_metric_profile,
+)
 from agent_evals.evaluation.progress import (
     ProgressSignal,
     ScientificProgressTracker,
@@ -81,6 +86,7 @@ from agent_evals.evaluation.scoring import (
     MetricScoreInput,
     WeightedGeometricAggregator,
     aggregate_domains,
+    describe_unmeasured_domains,
 )
 from agent_evals.evaluation.stage_rewards import StageAwareRewardEvaluator
 from agent_evals.evaluation.taxonomy import DecisionProfile, decision_ontology
@@ -792,22 +798,21 @@ class ScientificLoop:
             for group in specification.metric_groups
             for item in group.metrics
         ]
-        if not metric_ids:
-            metric_ids = [
-                "cell_annotation.macro_f1",
-                "cell_annotation.mcc",
-                "cell_annotation.balanced_accuracy",
-                "cell_annotation.rare_recall",
-                "cell_annotation.accuracy",
-            ]
+        # No hardcoded fallback list. A benchmark declaring no ``metric_groups``
+        # used to fall back to five annotation metrics regardless of what it
+        # measured, which is the same defect as the profile fallback one layer
+        # down: a DE benchmark got a cell-annotation score. The profile below is
+        # the declaration, and it is now benchmark-specific.
         metric_profile = ScientificLoop._load_metric_profile(specification)
         for group in metric_profile.metric_groups.values():
             metric_ids.extend(name for name in group.metrics if name not in metric_ids)
-        metric_ids = [
-            name
-            for name in metric_ids
-            if name != metric_profile.metric_groups["robustness"].external_score
-        ]
+        # A set over every group, not an index into one. This read
+        # ``metric_groups["robustness"]`` directly, and neither the integration
+        # nor the DE profile declares that group -- so this line raised KeyError
+        # for exactly the two benchmarks that resolving profiles correctly makes
+        # reachable, which is why the two changes are one commit.
+        external_scores = profile_external_scores(metric_profile)
+        metric_ids = [name for name in metric_ids if name not in external_scores]
         groups = [
             MetricGroup(
                 group_id=group.group_id,
@@ -984,6 +989,19 @@ class ScientificLoop:
             ),
         )
         benchmark_score = global_score.value if global_score is not None else None
+        # Both halves, because they answer different questions and either alone
+        # leaves an unexplained gap. The join gap says the evaluator could not
+        # reach the reference at all; the domain descriptions say which scored
+        # quantities went unmeasured and why. A DE run with no reference markers
+        # has no join gap -- its candidate never existed -- so before this the
+        # entire outcome was ``None`` beside an empty limitation list.
+        limitations = [
+            *candidate_inputs.limitations,
+            *describe_unmeasured_domains(
+                domain_scores,
+                {result.metric_id: result.eligibility_reason for result in results},
+            ),
+        ]
         return ScientificEvaluation(
             metric_results=results,
             applicability=applicability,
@@ -997,7 +1015,7 @@ class ScientificLoop:
             trajectory=trajectory,
             scientific_outcome_score=scientific_score,
             scientific_outcome_formula=scientific.formula,
-            outcome_limitations=list(candidate_inputs.limitations),
+            outcome_limitations=limitations,
             decision_score=decision_value,
             method_score=method_value,
             decision_quality_score=decision_quality,
@@ -1046,32 +1064,34 @@ class ScientificLoop:
         real time and change no number.
         """
         profile = ScientificLoop._load_metric_profile(specification)
-        external = {
-            group.external_score
-            for group in profile.metric_groups.values()
-            if group.external_score
-        }
+        external = profile_external_scores(profile)
         return sorted(
-            name
-            for group in profile.metric_groups.values()
-            for name in group.metrics
-            if name not in external
+            name for name in profile_metric_ids(profile) if name not in external
         )
 
     @staticmethod
-    def _load_metric_profile(specification: BenchmarkSpecification) -> Any:
-        """Load the declarative profile, with a typed built-in fallback."""
-        if specification.metadata.id == "pbmc-cell-annotation":
-            path = (
-                Path(__file__).resolve().parents[3]
-                / "configs"
-                / "metrics"
-                / "pbmc_annotation.yaml"
-            )
-            if path.exists():
-                return load_metric_profile(path)
-            return pbmc_annotation_profile()
-        return pbmc_annotation_profile()
+    def _load_metric_profile(
+        specification: BenchmarkSpecification,
+    ) -> BenchmarkMetricProfile:
+        """Resolve the scoring profile this benchmark declares.
+
+        Both branches of this function used to return ``pbmc_annotation_profile()``
+        -- the second unconditionally -- so an integration or differential-
+        expression run was scored on ``clustering.ari`` and
+        ``cell_annotation.rare_recall``, and produced a number that looked
+        entirely ordinary. See
+        :mod:`agent_evals.evaluation.profiles.resolution` for why an unknown
+        benchmark now raises instead of defaulting.
+
+        The preferential load from ``configs/metrics/*.yaml`` is gone with it. A
+        YAML file and a built-in that mirror each other are two declarations of
+        one scoring rule, and they drift *silently*; worse, the guard was
+        ``path.exists()``, so deleting or misplacing the file changed the scoring
+        rule with no diagnostic. ``load_metric_profile`` remains public for
+        third-party profiles, and ``configs/metrics/pbmc_annotation.yaml`` remains
+        as the documented example, pinned by a test to the built-in it mirrors.
+        """
+        return resolve_metric_profile(specification.metadata.id)
 
     @staticmethod
     def _decision_profiles(

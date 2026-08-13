@@ -233,28 +233,24 @@ def _unregistered(profile: object) -> set[str]:
 
 
 def test_the_scored_profiles_name_only_registered_metrics() -> None:
-    """A profile naming something unregistered can only ever score `None`."""
-    for profile in (pbmc_annotation_profile(), pbmc_integration_profile()):
-        assert not _unregistered(profile), profile.benchmark
+    """A profile naming something unregistered can only ever score `None`.
 
-
-def test_the_de_profile_has_exactly_one_known_unregistered_metric() -> None:
-    """A deliberately self-retiring test for a gap another stage owns.
-
-    ``differential_expression.pseudobulk_recall`` is required by the DE profile
-    and implemented nowhere, so the DE biology domain can only ever be
-    unmeasured. That is survivable today only because profile resolution returns
-    the annotation profile for every benchmark, which makes the DE profile
-    unreachable -- so fixing resolution without registering this metric would
-    trade a silently-wrong score for a silently-absent one.
-
-    This asserts the hole is *exactly* one metric, so registering it fails this
-    test and forces the general rule above to be widened rather than letting a
-    second gap appear unnoticed.
+    The DE profile joined this rule when per-benchmark resolution made it
+    reachable. It previously had a self-retiring exemption of its own for
+    ``differential_expression.pseudobulk_recall`` -- required by the profile,
+    implemented nowhere -- which was survivable only while every benchmark
+    resolved to the annotation profile and the DE one was dead code. Fixing
+    resolution without fixing the profile would have traded a silently-wrong
+    score for a crash, since ``ScientificMetricEngine`` calls ``registry.get``
+    uncaught. ``resolve_metric_profile`` now enforces the same rule at run time;
+    see ``tests/test_metric_profiles.py``.
     """
-    assert _unregistered(pbmc_de_profile()) == {
-        "differential_expression.pseudobulk_recall"
-    }
+    for profile in (
+        pbmc_annotation_profile(),
+        pbmc_integration_profile(),
+        pbmc_de_profile(),
+    ):
+        assert not _unregistered(profile), profile.benchmark
 
 
 def test_engine_results_are_keyed_by_the_id_the_profiles_use(tmp_path: Path) -> None:

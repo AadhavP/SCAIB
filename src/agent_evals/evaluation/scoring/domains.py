@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.evaluation.scoring.aggregation import DomainScore
+
+#: Said of a metric the profile scores but no metric result mentions, which is
+#: what an ``external_score`` looks like when its evaluator produced nothing.
+#: Deliberately weaker than a metric's own ``eligibility_reason``: all that is
+#: known here is that nobody recorded a verdict, and inventing a cause would be
+#: the unchecked claim this field exists to prevent.
+UNRECORDED_METRIC_REASON = "no result recorded"
 
 
 class ScientificScore(BaseModel):
@@ -44,4 +52,47 @@ def aggregate_domains(domains: list[DomainScore]) -> ScientificScore:
     return ScientificScore(value=value, domains=domains, formula=formula)
 
 
-__all__ = ["ScientificScore", "aggregate_domains"]
+def describe_unmeasured_domains(
+    domains: Iterable[DomainScore],
+    reasons: Mapping[str, str],
+) -> list[str]:
+    """Say why each domain :func:`aggregate_domains` dropped went unmeasured.
+
+    The companion to the formula string: that names *which* domains were excluded,
+    this names *why* each one was excludable. Without both, a run whose harness
+    could not see the agent's work publishes the same ``None`` as a run whose
+    metrics legitimately did not apply -- the absent-versus-unobserved ambiguity
+    this project removes everywhere else.
+
+    ``reasons`` maps a metric id to its ``eligibility_reason``. A metric with no
+    entry is reported as :data:`UNRECORDED_METRIC_REASON` rather than skipped,
+    because dropping it would shorten the explanation in exactly the case where
+    least is known.
+
+    Blocking metrics are preferred over the full exclusion list where there are
+    any: a required metric voided the domain, and listing the optional metrics
+    that merely did not apply beside it would present three equal causes for one
+    real one. Domains that scored are not described at all, so this stays empty on
+    a fully measured run instead of narrating it.
+    """
+    described: list[str] = []
+    for domain in domains:
+        if domain.value is not None:
+            continue
+        causes = domain.blocking_metrics or domain.excluded_metrics
+        if causes:
+            detail = "; ".join(
+                f"{name} ({reasons.get(name, UNRECORDED_METRIC_REASON)})" for name in causes
+            )
+        else:
+            detail = "no metric in this domain produced a value"
+        described.append(f"domain '{domain.domain}' unmeasured: {detail}")
+    return described
+
+
+__all__ = [
+    "UNRECORDED_METRIC_REASON",
+    "ScientificScore",
+    "aggregate_domains",
+    "describe_unmeasured_domains",
+]

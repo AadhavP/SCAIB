@@ -77,6 +77,14 @@ class DomainScore(BaseModel):
     included_metrics: list[str] = Field(default_factory=list)
     excluded_metrics: list[str] = Field(default_factory=list)
     failed_metrics: list[str] = Field(default_factory=list)
+    #: The excluded metrics the profile marked *required*, which is what collapses
+    #: :attr:`value` to ``None`` even when other metrics in the domain scored
+    #: perfectly well. Recorded separately from :attr:`excluded_metrics` because
+    #: only this layer knows which entries were required, and a reader trying to
+    #: explain a ``None`` domain otherwise has to guess which of the exclusions
+    #: mattered -- an optional metric that simply did not apply looks identical to
+    #: the required one that voided the domain.
+    blocking_metrics: list[str] = Field(default_factory=list)
     formula: str
 
 
@@ -104,7 +112,8 @@ class WeightedGeometricAggregator:
             if result is None or result.status is not MetricStatus.SCORED:
                 failed.append(name)
             included.append((name, entry.weight, max(0.0, min(1.0, value))))
-        if entries and any(entry.required and name in excluded for name, entry in entries.items()):
+        blocking = [name for name, entry in entries.items() if entry.required and name in excluded]
+        if blocking:
             aggregate: float | None = None
         elif not included:
             aggregate = None
@@ -124,6 +133,7 @@ class WeightedGeometricAggregator:
             included_metrics=[name for name, _, _ in included],
             excluded_metrics=excluded,
             failed_metrics=failed,
+            blocking_metrics=blocking,
             formula=formula,
         )
 

@@ -18,8 +18,31 @@ from agent_evals.metrics.models import (
 )
 from agent_evals.metrics.registry import MetricComputation
 
+#: Evaluator-owned reference evidence, named per metric because these two
+#: requirements are not interchangeable and the difference decides whether an
+#: unanswerable metric is *excluded* or scored zero.
+#:
+#: A ranked metric needs a marker set; the effect-size pair needs per-gene effect
+#: sizes. Every definition here used to declare ``reference_markers``, including
+#: the two that read ``reference_effect_sizes`` and nothing else -- so on a
+#: benchmark supplying markers alone they passed the structural gate, found no
+#: effect sizes, and returned ``failed(...)``, which lands at ``failure_score``.
+#: That is a manufactured 0.0 for evidence the *evaluator* never supplied,
+#: charged to the agent, and it would have collapsed the whole DE domain through
+#: the geometric mean.
+REFERENCE_MARKERS = "reference_markers"
+REFERENCE_EFFECT_SIZES = "reference_effect_sizes"
 
-def _definition(metric_id: str, name: str, role: MetricRole) -> MetricDefinition:
+
+def _definition(
+    metric_id: str,
+    name: str,
+    role: MetricRole,
+    *,
+    structural_metadata: str = REFERENCE_MARKERS,
+    native_min: float = 0,
+    normalization: NormalizationSpec | None = None,
+) -> MetricDefinition:
     return MetricDefinition(
         metric_id=metric_id,
         name=name,
@@ -28,14 +51,16 @@ def _definition(metric_id: str, name: str, role: MetricRole) -> MetricDefinition
         category=MetricCategory.DIFFERENTIAL_EXPRESSION,
         role=role,
         direction=MetricDirection.HIGHER_IS_BETTER,
-        native_min=0,
+        native_min=native_min,
         native_max=1,
         applicability=MetricApplicability(
+            # Candidate-side on purpose: the DE table is the agent's own output,
+            # so its absence is the agent's failure and *should* score zero.
             required_artifacts=["de_table"],
-            structural_metadata=["reference_markers"],
+            structural_metadata=[structural_metadata],
         ),
         computation_backend="sklearn/scipy",
-        normalization=NormalizationSpec(policy="bounded"),
+        normalization=normalization or NormalizationSpec(policy="bounded"),
     )
 
 
@@ -145,8 +170,32 @@ def de_definitions() -> list[tuple[MetricDefinition, Any]]:
         (_definition("differential_expression.auprc", "AUPRC", MetricRole.PRIMARY), auprc),
         (_definition("differential_expression.auroc", "AUROC", MetricRole.PRIMARY), auroc),
         (_definition("differential_expression.rbo", "Rank-biased overlap", MetricRole.SECONDARY), rank_biased_overlap),
-        (_definition("differential_expression.effect_size_correlation", "Effect-size correlation", MetricRole.SECONDARY), effect_size_correlation),
-        (_definition("differential_expression.direction_agreement", "Direction agreement", MetricRole.SECONDARY), direction_agreement),
+        # Pearson's r is native to [-1, 1], and the ``symmetric`` policy is what
+        # maps that honestly. Declared ``native_min=0`` with ``bounded``, an
+        # anti-correlated result clamped to exactly 0.0 while a barely-positive
+        # one normalized to 0.01 -- and in a geometric mean 0.0 annihilates the
+        # domain while 0.01 does not, so the score fell off a cliff at r = 0
+        # rather than declining through it.
+        (
+            _definition(
+                "differential_expression.effect_size_correlation",
+                "Effect-size correlation",
+                MetricRole.SECONDARY,
+                structural_metadata=REFERENCE_EFFECT_SIZES,
+                native_min=-1,
+                normalization=NormalizationSpec(policy="symmetric"),
+            ),
+            effect_size_correlation,
+        ),
+        (
+            _definition(
+                "differential_expression.direction_agreement",
+                "Direction agreement",
+                MetricRole.SECONDARY,
+                structural_metadata=REFERENCE_EFFECT_SIZES,
+            ),
+            direction_agreement,
+        ),
     ]
 
 

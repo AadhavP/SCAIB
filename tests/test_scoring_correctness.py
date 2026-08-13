@@ -46,7 +46,11 @@ from agent_evals.evaluation.scoring.aggregation import (
     MetricScoreInput,
     WeightedGeometricAggregator,
 )
-from agent_evals.evaluation.scoring.domains import aggregate_domains
+from agent_evals.evaluation.scoring.domains import (
+    UNRECORDED_METRIC_REASON,
+    aggregate_domains,
+    describe_unmeasured_domains,
+)
 from agent_evals.evaluation.trajectory import _QUALITY_WEIGHTS, _weighted_quality
 from agent_evals.metrics.builtin._helpers import failed, unavailable
 from agent_evals.metrics.context import ScientificMetricContext
@@ -436,6 +440,194 @@ def test_the_scientific_formula_names_only_the_domains_it_combined() -> None:
     assert score.formula == (
         "weighted_geometric_mean(biology) excluding_unmeasured(robustness)"
     )
+
+
+# --------------------------------------------------------------------------- #
+# The formula says which domains were dropped; these say why each one was
+# droppable. Publishing one without the other leaves a ``None`` outcome that a
+# reader cannot distinguish from metrics legitimately not applying -- which is
+# what a differential-expression run did until per-benchmark profiles made a
+# wholly unmeasured outcome reachable for the first time.
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unmeasured_domain_states_a_cause_beside_the_formula_that_names_it() -> None:
+    """The gap the field's own docstring promised to close and did not."""
+    dropped = DomainScore(
+        domain="biology",
+        value=None,
+        weight=1.0,
+        excluded_metrics=["differential_expression.precision_at_k"],
+        blocking_metrics=["differential_expression.precision_at_k"],
+        formula="geometric_mean()",
+    )
+
+    described = describe_unmeasured_domains(
+        [dropped],
+        {
+            "differential_expression.precision_at_k": (
+                "structural requirements unavailable: metadata:reference_markers"
+            )
+        },
+    )
+
+    assert described == [
+        "domain 'biology' unmeasured: differential_expression.precision_at_k "
+        "(structural requirements unavailable: metadata:reference_markers)"
+    ]
+
+
+def test_a_measured_domain_is_not_described_at_all() -> None:
+    """Otherwise the field narrates healthy runs and stops meaning "limitation"."""
+    measured = DomainScore(
+        domain="biology", value=0.81, weight=0.6, formula="geometric_mean(a^1)"
+    )
+
+    assert describe_unmeasured_domains([measured], {}) == []
+
+
+def test_the_required_exclusion_is_named_without_the_optional_ones_beside_it() -> None:
+    """One metric voided the domain; the others merely did not apply.
+
+    Presenting all three as equal causes would make the real one a third as
+    prominent as it is, and a reader deciding whether the benchmark or the agent
+    is at fault needs exactly that distinction.
+    """
+    dropped = DomainScore(
+        domain="biology",
+        value=None,
+        weight=1.0,
+        excluded_metrics=["optional.one", "required.blocker", "optional.two"],
+        blocking_metrics=["required.blocker"],
+        formula="geometric_mean()",
+    )
+
+    described = describe_unmeasured_domains(
+        [dropped],
+        {
+            "required.blocker": "reference unavailable",
+            "optional.one": "not applicable to this dataset",
+            "optional.two": "not applicable to this dataset",
+        },
+    )
+
+    assert described == ["domain 'biology' unmeasured: required.blocker (reference unavailable)"]
+
+
+def test_every_exclusion_is_named_when_none_of_them_was_required() -> None:
+    """The complement: with no blocking metric there is no cause to prefer, and
+    dropping the list would leave the domain unexplained."""
+    dropped = DomainScore(
+        domain="technical",
+        value=None,
+        weight=0.2,
+        excluded_metrics=["batch_integration.iLISI", "batch_integration.graph_connectivity"],
+        formula="geometric_mean()",
+    )
+
+    described = describe_unmeasured_domains(
+        [dropped],
+        {
+            "batch_integration.iLISI": "no batch key",
+            "batch_integration.graph_connectivity": "no neighbour graph",
+        },
+    )
+
+    assert described == [
+        "domain 'technical' unmeasured: batch_integration.iLISI (no batch key); "
+        "batch_integration.graph_connectivity (no neighbour graph)"
+    ]
+
+
+def test_a_metric_nobody_recorded_a_verdict_for_is_still_named() -> None:
+    """An ``external_score`` whose evaluator produced nothing has no
+    ``MetricResult`` and therefore no reason. Skipping it would shorten the
+    explanation in exactly the case where least is known."""
+    dropped = DomainScore(
+        domain="robustness",
+        value=None,
+        weight=0.2,
+        excluded_metrics=["robustness.seed_stability"],
+        blocking_metrics=["robustness.seed_stability"],
+        formula="geometric_mean()",
+    )
+
+    described = describe_unmeasured_domains([dropped], {})
+
+    assert described == [
+        f"domain 'robustness' unmeasured: robustness.seed_stability ({UNRECORDED_METRIC_REASON})"
+    ]
+
+
+def test_a_domain_with_nothing_to_exclude_still_says_it_was_unmeasured() -> None:
+    """A profile group with no entries drops out with an empty exclusion list, and
+    silence there is the absent-versus-unobserved ambiguity all over again."""
+    dropped = DomainScore(
+        domain="technical", value=None, weight=0.2, formula="geometric_mean()"
+    )
+
+    assert describe_unmeasured_domains([dropped], {}) == [
+        "domain 'technical' unmeasured: no metric in this domain produced a value"
+    ]
+
+
+def test_the_aggregator_names_which_required_metric_voided_the_domain() -> None:
+    """``blocking_metrics`` exists because only this layer knows requiredness.
+
+    The domain scored ``None`` while ``clustering.ari`` scored 0.81, so a reader
+    given only ``excluded_metrics`` cannot tell which of the exclusions mattered.
+    """
+    profile = MetricGroupProfile(
+        weight=1.0,
+        metrics={
+            "clustering.ari": MetricProfileEntry(weight=0.5),
+            "cell_annotation.rare_recall": MetricProfileEntry(weight=0.3),
+            "cell_annotation.ece": MetricProfileEntry(weight=0.2, required=False),
+        },
+    )
+
+    score = WeightedGeometricAggregator().aggregate(
+        "biology",
+        profile,
+        [
+            MetricScoreInput(name="clustering.ari", value=0.81),
+            MetricScoreInput(
+                name="cell_annotation.rare_recall",
+                value=None,
+                applicable=False,
+                structurally_ineligible=True,
+                status=MetricStatus.INELIGIBLE,
+            ),
+        ],
+    )
+
+    assert score.value is None
+    assert score.blocking_metrics == ["cell_annotation.rare_recall"]
+    # The optional one is excluded too, and is deliberately not blocking.
+    assert sorted(score.excluded_metrics) == [
+        "cell_annotation.ece",
+        "cell_annotation.rare_recall",
+    ]
+
+
+def test_nothing_blocks_a_domain_whose_only_exclusions_were_optional() -> None:
+    """The presence complement: marking every exclusion as blocking would make the
+    field a duplicate of ``excluded_metrics`` and explain nothing."""
+    profile = MetricGroupProfile(
+        weight=1.0,
+        metrics={
+            "clustering.ari": MetricProfileEntry(weight=0.8),
+            "cell_annotation.ece": MetricProfileEntry(weight=0.2, required=False),
+        },
+    )
+
+    score = WeightedGeometricAggregator().aggregate(
+        "biology", profile, [MetricScoreInput(name="clustering.ari", value=0.81)]
+    )
+
+    assert score.value == pytest.approx(0.81)
+    assert score.blocking_metrics == []
+    assert score.excluded_metrics == ["cell_annotation.ece"]
 
 
 # --------------------------------------------------------------------------- #
