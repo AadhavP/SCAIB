@@ -492,20 +492,21 @@ def test_the_unmeasured_de_domain_names_the_evidence_the_evaluator_never_supplie
     assert UNRECORDED_METRIC_REASON not in explanation
 
 
-def test_the_de_profile_is_the_only_declaration_of_the_de_scoring_rule() -> None:
-    """Why the annotation fallback was invisible on this benchmark.
+def test_the_de_profile_remains_the_executable_registry_scoring_rule() -> None:
+    """Publication groups must not reintroduce annotation-profile fallback.
 
-    The DE YAML declares no ``metric_groups``, so the loop's benchmark-derived
-    metric list is *empty* for it and the profile supplies every computed metric.
-    Before this fix that combination was filled by a hardcoded five-metric
-    annotation list plus the annotation profile, and neither had anything to do
-    with differential expression.
+    The DE YAML now declares human-facing metric groups for the paper artifact.
+    The executable progress metric IDs still come from the benchmark-specific
+    registry profile, not from a hardcoded annotation fallback.
     """
     specification = load_benchmark(
         "examples/benchmarks/pbmc-differential-expression.yaml"
     )
 
-    assert specification.metric_groups == []
+    assert {group.group_id for group in specification.metric_groups} == {
+        "marker_recovery",
+        "statistical_calibration",
+    }
     assert ScientificLoop._progress_metric_ids(specification) == sorted(
         profile_metric_ids(pbmc_de_profile())
     )

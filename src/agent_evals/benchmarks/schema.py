@@ -974,60 +974,11 @@ class BenchmarkSpecification(SpecificationModel):
         described as publishable needs a frozen scoring profile and hard run
         limits so results are reproducible and bounded.
         """
-        problems: list[str] = []
-        if not self.metric_groups:
-            problems.append("declares no metric_groups")
-        if self.cutoff.max_steps is None:
-            problems.append("cutoff.max_steps is required")
-        if self.cutoff.max_wall_time_seconds is None:
-            problems.append("cutoff.max_wall_time_seconds is required")
-        if not self.tasks:
-            problems.append("declares no tasks")
-        if not self.artifacts:
-            problems.append("declares no artifacts")
-
-        environment_ids = {environment.id for environment in self.environments}
-        free_execution_actions = {
-            action.id for action in self.actions if action.kind is ActionKind.FREE_EXECUTION
-        }
-        for task in self.tasks:
-            if not task.termination:
-                problems.append(f"task '{task.id}' declares no termination condition")
-            if not task.metrics:
-                problems.append(f"task '{task.id}' declares no task metrics")
-            if not task.artifacts:
-                problems.append(f"task '{task.id}' declares no task artifacts")
-            if free_execution_actions.intersection(task.allowed_actions):
-                if task.environment is None:
-                    problems.append(
-                        f"task '{task.id}' allows free execution but declares no environment"
-                    )
-                    continue
-                if task.environment not in environment_ids:
-                    problems.append(
-                        f"task '{task.id}' references unknown environment '{task.environment}'"
-                    )
-
-        for environment in self.environments:
-            missing = []
-            if not any([environment.runtime.python, environment.runtime.r, environment.runtime.shell]):
-                missing.append("runtime")
-            if not environment.data:
-                missing.append("data")
-            if not environment.writable_paths:
-                missing.append("writable_paths")
-            if not any([environment.packages.python, environment.packages.r, environment.packages.system]):
-                missing.append("packages")
-            if not environment.deliverables:
-                missing.append("deliverables")
-            if not environment.hidden_reference_boundaries:
-                missing.append("hidden_reference_boundaries")
-            if missing:
-                problems.append(
-                    f"environment '{environment.id}' is missing publishable field(s): "
-                    f"{', '.join(missing)}"
-                )
-        return problems
+        return [
+            *_publishable_core_problems(self),
+            *_publishable_task_problems(self),
+            *_publishable_environment_problems(self.environments),
+        ]
 
     def evaluator_executes_task_actions(self, task: TaskSpecification) -> bool:
         """Whether SCAIB itself runs any action this task allows.
@@ -1085,6 +1036,99 @@ class BenchmarkSpecification(SpecificationModel):
         return self.model_dump(mode="json", by_alias=True, exclude_none=True)
 
 
+def _publishable_core_problems(specification: BenchmarkSpecification) -> list[str]:
+    """Validate release-level declarations that are independent of tasks."""
+    problems: list[str] = []
+    if not specification.metric_groups:
+        problems.append("declares no metric_groups")
+    if specification.cutoff.max_steps is None:
+        problems.append("cutoff.max_steps is required")
+    if specification.cutoff.max_wall_time_seconds is None:
+        problems.append("cutoff.max_wall_time_seconds is required")
+    if not specification.tasks:
+        problems.append("declares no tasks")
+    if not specification.artifacts:
+        problems.append("declares no artifacts")
+    return problems
+
+
+def _publishable_task_problems(specification: BenchmarkSpecification) -> list[str]:
+    """Validate per-task release declarations."""
+    problems: list[str] = []
+    environment_ids = {environment.id for environment in specification.environments}
+    free_execution_actions = {
+        action.id
+        for action in specification.actions
+        if action.kind is ActionKind.FREE_EXECUTION
+    }
+    for task in specification.tasks:
+        problems.extend(_basic_task_publishable_problems(task))
+        if free_execution_actions.intersection(task.allowed_actions):
+            problems.extend(_free_execution_task_problems(task, environment_ids))
+    return problems
+
+
+def _basic_task_publishable_problems(task: TaskSpecification) -> list[str]:
+    """Validate the common task contract needed in a publishable benchmark."""
+    problems: list[str] = []
+    if not task.termination:
+        problems.append(f"task '{task.id}' declares no termination condition")
+    if not task.metrics:
+        problems.append(f"task '{task.id}' declares no task metrics")
+    if not task.artifacts:
+        problems.append(f"task '{task.id}' declares no task artifacts")
+    return problems
+
+
+def _free_execution_task_problems(
+    task: TaskSpecification,
+    environment_ids: set[str],
+) -> list[str]:
+    """Validate the extra environment contract for free-execution tasks."""
+    if task.environment is None:
+        return [f"task '{task.id}' allows free execution but declares no environment"]
+    if task.environment not in environment_ids:
+        return [f"task '{task.id}' references unknown environment '{task.environment}'"]
+    return []
+
+
+def _publishable_environment_problems(
+    environments: Sequence[EnvironmentSpecification],
+) -> list[str]:
+    """Validate agent-visible environment documentation for release specs."""
+    problems: list[str] = []
+    for environment in environments:
+        missing = _missing_publishable_environment_fields(environment)
+        if missing:
+            problems.append(
+                f"environment '{environment.id}' is missing publishable field(s): "
+                f"{', '.join(missing)}"
+            )
+    return problems
+
+
+def _missing_publishable_environment_fields(
+    environment: EnvironmentSpecification,
+) -> list[str]:
+    """Name environment fields needed to reproduce the agent boundary."""
+    missing = []
+    if not any([environment.runtime.python, environment.runtime.r, environment.runtime.shell]):
+        missing.append("runtime")
+    if not environment.data:
+        missing.append("data")
+    if not environment.writable_paths:
+        missing.append("writable_paths")
+    if not any(
+        [environment.packages.python, environment.packages.r, environment.packages.system]
+    ):
+        missing.append("packages")
+    if not environment.deliverables:
+        missing.append("deliverables")
+    if not environment.hidden_reference_boundaries:
+        missing.append("hidden_reference_boundaries")
+    return missing
+
+
 # Concise aliases are useful in authoring code while the long names remain the
 # canonical API and make generated documentation self-explanatory.
 BenchmarkSpec = BenchmarkSpecification
@@ -1139,6 +1183,7 @@ __all__ = [
     "MetricSpecification",
     "ObservationSpec",
     "ObservationSpecification",
+    "PackageSpecification",
     "ParameterSpec",
     "ParameterSpecification",
     "Reference",
@@ -1146,7 +1191,6 @@ __all__ = [
     "RewardComponent",
     "RewardSpec",
     "RewardSpecification",
-    "PackageSpecification",
     "RuntimeSpecification",
     "ScoringSpecification",
     "TaskSpec",
