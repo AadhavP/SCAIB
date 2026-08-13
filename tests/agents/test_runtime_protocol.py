@@ -11,8 +11,10 @@ from agent_evals.agents.backends import (
     AnthropicRuntime,
     CustomPythonRuntime,
     OpenAICompatibleRuntime,
+    OpenRouterRuntime,
     OpenAIRuntime,
 )
+from agent_evals.agents.backends.aliases import build_runtime
 from agent_evals.agents.harness import AgentHarness
 from agent_evals.agents.mock import MockActionExecutor, MockObservationBuilder
 from agent_evals.agents.runtime import (
@@ -287,6 +289,31 @@ def test_openai_compatible_runtime_does_not_persist_endpoint_metadata() -> None:
     )
 
     assert runtime.manifest.metadata == {}
+
+
+def test_openrouter_runtime_alias_uses_openrouter_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("OPENROUTER_MODEL", "openai/gpt-5")
+    monkeypatch.setenv("OPENROUTER_HTTP_REFERER", "https://scaib.local")
+    monkeypatch.setenv("OPENROUTER_APP_TITLE", "SCAIB")
+
+    runtime = build_runtime("openrouter")
+
+    assert isinstance(runtime, OpenRouterRuntime)
+    assert runtime.agent_id == "openrouter"
+    assert runtime.model == "openai/gpt-5"
+    assert runtime.base_url == "https://openrouter.ai/api/v1"
+    assert runtime.default_headers == {
+        "HTTP-Referer": "https://scaib.local",
+        "X-OpenRouter-Title": "SCAIB",
+    }
+    assert runtime.manifest.model.provider == "openrouter"
+    assert "test-openrouter-key" not in str(runtime.manifest.model_dump(mode="json"))
 
 
 @pytest.mark.asyncio
