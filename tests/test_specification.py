@@ -10,6 +10,7 @@ from agent_evals.benchmarks.registry import BenchmarkSpecificationRegistry
 from agent_evals.benchmarks.schema import (
     BenchmarkMetadata,
     BenchmarkSpecification,
+    EnvironmentSpecification,
     TaskSpecification,
 )
 
@@ -91,4 +92,74 @@ def test_json_semantics_round_trip(tmp_path: Path) -> None:
     output = tmp_path / "annotation.json"
     dump_benchmark(specification, output)
     assert load_benchmark(output).model_dump() == specification.model_dump()
+
+
+def test_environment_spec_publishes_the_agent_visible_runtime_contract() -> None:
+    """A publishable free-execution benchmark must document more than a backend."""
+    specification = load_benchmark(EXAMPLES / "pbmc-cell-annotation-free.yaml")
+    environment = specification.environments[0]
+
+    assert environment.runtime.python == "3.12"
+    assert "scanpy" in environment.packages.python
+    assert environment.working_directory == "/workspace"
+    assert "/workspace/results" in environment.writable_paths
+    assert environment.data[0].id == "pbmc_input"
+    assert environment.data[0].read_only is True
+    assert environment.deliverables[0].artifact_id == "cell-labels"
+    assert environment.hidden_reference_boundaries == [
+        "reference cell-type labels",
+        "reference marker rankings",
+    ]
+    assert any("Do not prescribe" in note for note in environment.agent_instructions)
+
+
+def test_publishable_mode_rejects_incomplete_benchmark_release_contract() -> None:
+    """Release validation should catch specs that load but are not publishable."""
+    incomplete = BenchmarkSpecification(
+        metadata=BenchmarkMetadata(
+            id="paper-target",
+            title="Paper target",
+            description="A syntactically valid but under-specified benchmark.",
+            license="MIT",
+        ),
+        tasks=[
+            TaskSpecification(
+                id="task",
+                name="Task",
+                objective="Produce an artifact.",
+                description="No hard cutoff or score profile was declared.",
+            )
+        ],
+    )
+
+    problems = incomplete.validate_publishable()
+
+    assert "declares no metric_groups" in problems
+    assert "cutoff.max_steps is required" in problems
+    assert "cutoff.max_wall_time_seconds is required" in problems
+
+
+def test_publishable_mode_accepts_current_pbmc_specs() -> None:
+    """The shipped PBMC benchmarks should satisfy the paper-artifact contract."""
+    for path in sorted(EXAMPLES.glob("pbmc-*.yaml")):
+        assert load_benchmark(path).validate_publishable() == [], path.name
+
+
+def test_environment_validation_rejects_delivery_paths_outside_writable_roots() -> None:
+    with pytest.raises(ValidationError, match="deliverable 'labels' path"):
+        EnvironmentSpecification(
+            id="local-python",
+            name="Local Python",
+            description="A local runtime.",
+            packages={"python": ["scanpy"]},
+            writable_paths=["/workspace/results"],
+            deliverables=[
+                {
+                    "artifact_id": "labels",
+                    "path": "/tmp/labels.csv",
+                    "artifact_type": "table",
+                    "format": "csv",
+                }
+            ],
+        )
 

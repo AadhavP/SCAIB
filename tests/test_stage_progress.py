@@ -33,6 +33,7 @@ from agent_evals.evaluation.profiles.base import (
 from agent_evals.evaluation.progress import (
     NEUTRAL_PROGRESS,
     PipelineStage,
+    ProgressSignal,
     ScientificProgressTracker,
     infer_stage,
     summarize_progress,
@@ -395,3 +396,56 @@ async def test_progress_evidence_never_reaches_an_agent_visible_observation() ->
     # The prefix may legitimately appear in evaluator-side reward records; what
     # must never happen is it reaching an agent-visible observation above.
     assert isinstance(payload, str)
+
+
+def test_progress_signals_are_serialized_for_publishable_reports() -> None:
+    """The paper artifact needs auditable S_t and dS_t evidence, not only T."""
+    report = summarize_progress(
+        [
+            ProgressSignal(
+                step=1,
+                stage=PipelineStage.CLUSTERING,
+                scientific_state=0.4,
+                delta=None,
+                scored_metrics=("clustering.ari",),
+            ),
+            ProgressSignal(
+                step=2,
+                stage=PipelineStage.CLUSTERING,
+                scientific_state=0.7,
+                delta=0.3,
+                comparable_metrics=("clustering.ari",),
+                previous_state_on_comparable=0.4,
+                current_state_on_comparable=0.7,
+                scored_metrics=("clustering.ari",),
+            ),
+        ],
+        action_count=2,
+    )
+
+    rows = report.to_step_rows()
+
+    assert rows == [
+        {
+            "step": 1,
+            "stage": "clustering",
+            "scientific_state": 0.4,
+            "delta": None,
+            "comparable_metrics": [],
+            "previous_state_on_comparable": None,
+            "current_state_on_comparable": None,
+            "scored_metrics": ["clustering.ari"],
+            "limitations": [],
+        },
+        {
+            "step": 2,
+            "stage": "clustering",
+            "scientific_state": 0.7,
+            "delta": 0.3,
+            "comparable_metrics": ["clustering.ari"],
+            "previous_state_on_comparable": 0.4,
+            "current_state_on_comparable": 0.7,
+            "scored_metrics": ["clustering.ari"],
+            "limitations": [],
+        },
+    ]
