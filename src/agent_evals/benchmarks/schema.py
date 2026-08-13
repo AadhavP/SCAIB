@@ -443,6 +443,47 @@ class EnvironmentBackend(StrEnum):
     CONTAINER = "container"
 
 
+class RuntimeSpecification(SpecificationModel):
+    """Runtime versions advertised to the agent."""
+
+    python: str | None = None
+    r: str | None = None
+    shell: str | None = None
+
+
+class PackageSpecification(SpecificationModel):
+    """Installed scientific package families available in the environment."""
+
+    python: list[str] = Field(default_factory=list)
+    r: list[str] = Field(default_factory=list)
+    system: list[str] = Field(default_factory=list)
+
+
+class EnvironmentDataSpecification(SpecificationModel):
+    """One dataset or support file materialized into the agent workspace."""
+
+    id: str
+    path: str = Field(min_length=1)
+    format: str | None = None
+    read_only: bool = True
+    description: str | None = None
+
+    _identifier = field_validator("id")(_validate_identifier)
+
+
+class EnvironmentDeliverableSpecification(SpecificationModel):
+    """A publishable artifact path the environment asks the agent to produce."""
+
+    artifact_id: str
+    path: str = Field(min_length=1)
+    artifact_type: str = Field(min_length=1)
+    format: str = Field(min_length=1)
+    required: bool = False
+    description: str | None = None
+
+    _identifier = field_validator("artifact_id")(_validate_identifier)
+
+
 class EnvironmentSpecification(SpecificationModel):
     """A workspace a free-execution agent may bring its own workflow into.
 
@@ -459,12 +500,23 @@ class EnvironmentSpecification(SpecificationModel):
     backend: EnvironmentBackend = EnvironmentBackend.LOCAL
     image: str | None = None
     languages: list[str] = Field(default_factory=lambda: ["python"])
+    runtime: RuntimeSpecification = Field(default_factory=RuntimeSpecification)
+    working_directory: str = "/workspace"
+    data: list[EnvironmentDataSpecification] = Field(default_factory=list)
+    writable_paths: list[str] = Field(default_factory=list)
+    packages: PackageSpecification = Field(default_factory=PackageSpecification)
+    compute: dict[str, Any] = Field(default_factory=dict)
+    limits: dict[str, Any] = Field(default_factory=dict)
+    deliverables: list[EnvironmentDeliverableSpecification] = Field(default_factory=list)
+    hidden_reference_boundaries: list[str] = Field(default_factory=list)
+    inspection_utilities: list[str] = Field(default_factory=list)
+    agent_instructions: list[str] = Field(default_factory=list)
 
     _identifier = field_validator("id")(_validate_identifier)
 
     @model_validator(mode="after")
     def validate_backend(self) -> Self:
-        """Reject an under-specified container tier and an empty language list."""
+        """Reject under-specified or misleading environment declarations."""
         if not self.languages:
             raise ValueError(
                 f"environment '{self.id}' must declare at least one language; "
@@ -481,7 +533,40 @@ class EnvironmentSpecification(SpecificationModel):
                 f"environment '{self.id}' names an 'image' but requests the local "
                 "backend, which ignores it; the declaration would misdescribe the run"
             )
+        roots = self.writable_paths or [self.working_directory]
+        for deliverable in self.deliverables:
+            if not _path_is_under_any(deliverable.path, roots):
+                raise ValueError(
+                    f"deliverable '{deliverable.artifact_id}' path "
+                    f"'{deliverable.path}' is outside writable paths"
+                )
         return self
+
+
+def _path_is_under_any(path: str, roots: Sequence[str]) -> bool:
+    """Conservatively check POSIX-like benchmark paths without touching the host."""
+    normalized = _normalize_spec_path(path)
+    for root in roots:
+        candidate = _normalize_spec_path(root)
+        if normalized == candidate or normalized.startswith(f"{candidate}/"):
+            return True
+    return False
+
+
+def _normalize_spec_path(path: str) -> str:
+    """Normalize declaration paths while keeping them platform-neutral strings."""
+    parts: list[str] = []
+    absolute = path.startswith("/")
+    for part in path.replace("\\", "/").split("/"):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    prefix = "/" if absolute else ""
+    return prefix + "/".join(parts)
 
 
 class TerminationCondition(SpecificationModel):
@@ -881,6 +966,69 @@ class BenchmarkSpecification(SpecificationModel):
         required = {artifact.id for artifact in self.artifacts if artifact.required}
         return required.intersection(task.artifacts)
 
+    def validate_publishable(self) -> list[str]:
+        """Return paper-artifact readiness problems beyond schema validity.
+
+        This is intentionally a diagnostic rather than a constructor-time guard:
+        draft benchmarks should still load while authors iterate, but a benchmark
+        described as publishable needs a frozen scoring profile and hard run
+        limits so results are reproducible and bounded.
+        """
+        problems: list[str] = []
+        if not self.metric_groups:
+            problems.append("declares no metric_groups")
+        if self.cutoff.max_steps is None:
+            problems.append("cutoff.max_steps is required")
+        if self.cutoff.max_wall_time_seconds is None:
+            problems.append("cutoff.max_wall_time_seconds is required")
+        if not self.tasks:
+            problems.append("declares no tasks")
+        if not self.artifacts:
+            problems.append("declares no artifacts")
+
+        environment_ids = {environment.id for environment in self.environments}
+        free_execution_actions = {
+            action.id for action in self.actions if action.kind is ActionKind.FREE_EXECUTION
+        }
+        for task in self.tasks:
+            if not task.termination:
+                problems.append(f"task '{task.id}' declares no termination condition")
+            if not task.metrics:
+                problems.append(f"task '{task.id}' declares no task metrics")
+            if not task.artifacts:
+                problems.append(f"task '{task.id}' declares no task artifacts")
+            if free_execution_actions.intersection(task.allowed_actions):
+                if task.environment is None:
+                    problems.append(
+                        f"task '{task.id}' allows free execution but declares no environment"
+                    )
+                    continue
+                if task.environment not in environment_ids:
+                    problems.append(
+                        f"task '{task.id}' references unknown environment '{task.environment}'"
+                    )
+
+        for environment in self.environments:
+            missing = []
+            if not any([environment.runtime.python, environment.runtime.r, environment.runtime.shell]):
+                missing.append("runtime")
+            if not environment.data:
+                missing.append("data")
+            if not environment.writable_paths:
+                missing.append("writable_paths")
+            if not any([environment.packages.python, environment.packages.r, environment.packages.system]):
+                missing.append("packages")
+            if not environment.deliverables:
+                missing.append("deliverables")
+            if not environment.hidden_reference_boundaries:
+                missing.append("hidden_reference_boundaries")
+            if missing:
+                problems.append(
+                    f"environment '{environment.id}' is missing publishable field(s): "
+                    f"{', '.join(missing)}"
+                )
+        return problems
+
     def evaluator_executes_task_actions(self, task: TaskSpecification) -> bool:
         """Whether SCAIB itself runs any action this task allows.
 
@@ -977,6 +1125,8 @@ __all__ = [
     "DecisionEvaluationSpecification",
     "Direction",
     "EnvironmentBackend",
+    "EnvironmentDataSpecification",
+    "EnvironmentDeliverableSpecification",
     "EnvironmentSpec",
     "EnvironmentSpecification",
     "EstimatedCost",
@@ -996,6 +1146,8 @@ __all__ = [
     "RewardComponent",
     "RewardSpec",
     "RewardSpecification",
+    "PackageSpecification",
+    "RuntimeSpecification",
     "ScoringSpecification",
     "TaskSpec",
     "TaskSpecification",

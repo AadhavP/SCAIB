@@ -76,6 +76,55 @@ environments:
     # than a violation.
     backend: local
     languages: [python, shell]
+    runtime:
+      python: "3.12"
+      shell: powershell/bash
+    working_directory: /workspace
+    data:
+      - id: pbmc_input
+        path: /workspace/inputs/pbmc.h5ad
+        format: h5ad
+        read_only: true
+        description: Sanitized PBMC AnnData object with evaluator-only reference labels withheld.
+    writable_paths:
+      - /workspace
+      - /workspace/results
+      - /workspace/scripts
+    packages:
+      python: [anndata, numpy, pandas, scanpy, scipy, scikit-learn]
+      system: [python]
+    compute:
+      cpu_cores: 4
+      memory_gb: 16
+      gpu: false
+    limits:
+      wall_time_seconds: 1800
+      max_processes: 32
+      max_disk_gb: 20
+    deliverables:
+      - artifact_id: cell-labels
+        path: /workspace/results/cell_labels.csv
+        artifact_type: table
+        format: csv
+        required: false
+        description: One predicted cell-type label per retained cell keyed by barcode.
+      - artifact_id: analysis-object
+        path: /workspace/results/final.h5ad
+        artifact_type: anndata
+        format: h5ad
+        required: false
+        description: Optional persisted AnnData analysis state.
+    hidden_reference_boundaries:
+      - reference cell-type labels
+      - reference marker rankings
+    inspection_utilities:
+      - workspace file listing
+      - sanitized AnnData summary
+      - stdout/stderr capture
+    agent_instructions:
+      - Do not prescribe an analysis pipeline; choose methods from the visible data and task objective.
+      - Do not claim an operation was performed unless the resulting files or state prove it.
+      - Write declared deliverables under /workspace/results when they are produced.
 observations:
   - id: workspace-tree
     name: Workspace tree

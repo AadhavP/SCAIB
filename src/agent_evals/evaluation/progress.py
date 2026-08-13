@@ -383,6 +383,28 @@ class ScientificProgressReport:
         """Human-readable description of how ``value`` was produced."""
         return f"{NEUTRAL_PROGRESS:g} + mean(comparable_delta_S) / 2"
 
+    def to_step_rows(self) -> list[dict[str, object]]:
+        """Serialize per-step scientific state evidence for reports.
+
+        These rows are evaluator-side evidence only. They explain how the
+        trajectory score used scientific progress without exposing hidden
+        reference-derived metrics to the agent during the run.
+        """
+        return [
+            {
+                "step": signal.step,
+                "stage": None if signal.stage is None else signal.stage.value,
+                "scientific_state": signal.scientific_state,
+                "delta": signal.delta,
+                "comparable_metrics": list(signal.comparable_metrics),
+                "previous_state_on_comparable": signal.previous_state_on_comparable,
+                "current_state_on_comparable": signal.current_state_on_comparable,
+                "scored_metrics": list(signal.scored_metrics),
+                "limitations": list(signal.limitations),
+            }
+            for signal in self.signals
+        ]
+
 
 def summarize_progress(
     signals: Sequence[ProgressSignal],

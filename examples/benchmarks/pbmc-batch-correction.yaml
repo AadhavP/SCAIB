@@ -60,6 +60,23 @@ metrics:
   - {id: embedding-validity, name: Embedding validity, description: Finite embedding with positive dimensions and observations., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
   - {id: batch_silhouette, name: Batch silhouette, description: Batch mixing score derived from silhouette in the corrected representation., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
   - {id: cell_type_silhouette, name: Cell-type silhouette, description: Biological structure conservation derived from cell-type silhouette., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
+metric_groups:
+  - group_id: batch_removal
+    aggregation: weighted_geometric_mean
+    minimum_required: 2
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: batch-mixing, weight: 0.55, role: primary}
+      - {metric_id: batch_silhouette, weight: 0.30, role: secondary}
+      - {metric_id: embedding-validity, weight: 0.15, role: gate}
+  - group_id: biology_conservation
+    aggregation: weighted_geometric_mean
+    minimum_required: 2
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: biology-conservation, weight: 0.55, role: primary}
+      - {metric_id: cell_type_silhouette, weight: 0.25, role: secondary}
+      - {metric_id: cell-retention, weight: 0.20, role: gate}
 rewards:
   - id: integration-reward
     name: Integration utility reward
@@ -72,6 +89,10 @@ artifacts:
   - {id: corrected-embedding, name: Corrected embedding, description: Integrated coordinates used for downstream analysis, kind: embedding, format: parquet, produced_by: [harmony], validation: [{name: finite-coordinates, description: Coordinates are finite, rule: all embedding values are finite}]}
   - {id: corrected-embedding-figure, name: Corrected embedding figure, description: Visualization showing batch and biological labels, kind: figure, format: png, produced_by: [neighborhood-graph]}
 constraints: {cpu_only: true, internet_access: false, max_runtime_seconds: 2400, max_memory_mb: 32768, allowed_python_packages: [anndata, harmonypy, numpy, pandas, scanpy], deterministic: true, random_seed: 7}
+cutoff:
+  max_steps: 16
+  max_wall_time_seconds: 3600
+  max_consecutive_failures: 3
 tasks:
   - id: batch-correction
     name: Correct PBMC batch effects

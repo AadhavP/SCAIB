@@ -155,6 +155,7 @@ class ScientificEvaluation(BaseModel):
     method_evaluations: list[MethodEvaluation] = Field(default_factory=list)
     method_selection_evaluations: list[MethodScore] = Field(default_factory=list)
     local_decision_rewards: list[dict[str, Any]] = Field(default_factory=list)
+    scientific_progress_steps: list[dict[str, Any]] = Field(default_factory=list)
     trajectory: TrajectoryEvaluation
     scientific_outcome_score: float | None = Field(default=None, ge=0, le=1)
     #: How the domains above were combined into :attr:`scientific_outcome_score`,

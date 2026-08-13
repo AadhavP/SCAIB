@@ -63,6 +63,22 @@ metrics:
   - {id: precision_at_k, name: Marker precision@K, description: Fraction of top-K reported genes in the declared reference marker set., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
   - {id: auroc, name: Marker AUROC, description: Ranking quality for positive reference markers versus other ranked genes., direction: higher_is_better, expected_range: {minimum: 0, maximum: 1}, normalization: identity}
   - {id: runtime, name: Wall-clock runtime, description: Elapsed analysis time., direction: lower_is_better, expected_range: {minimum: 0}, aggregation: sum, normalization: log_scale, unit: seconds, contributes_to_reward: true}
+metric_groups:
+  - group_id: marker_recovery
+    aggregation: weighted_geometric_mean
+    minimum_required: 2
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: marker-recovery-precision, weight: 0.40, role: primary}
+      - {metric_id: marker_overlap, weight: 0.25, role: primary}
+      - {metric_id: precision_at_k, weight: 0.20, role: primary}
+      - {metric_id: auroc, weight: 0.15, role: secondary}
+  - group_id: statistical_calibration
+    aggregation: weighted_geometric_mean
+    minimum_required: 1
+    contributes_to_primary: true
+    metrics:
+      - {metric_id: effect-size-calibration, weight: 1.0, role: primary}
 rewards:
   - id: de-reward
     name: Differential-expression utility reward
@@ -75,6 +91,10 @@ artifacts:
   - {id: de-table, name: Differential-expression table, description: "Gene-level effect sizes, test statistics, adjusted p-values, and provenance.", kind: table, format: parquet, required: true, produced_by: [differential-expression], validation: [{name: required-columns, description: Statistical result columns are present, rule: "columns include gene,effect_size,p_value,q_value"}]}
   - {id: de-report, name: Differential-expression report, description: Human-readable summary of the prespecified contrast., kind: report, format: html, produced_by: [report]}
 constraints: {cpu_only: true, internet_access: false, max_runtime_seconds: 1800, max_memory_mb: 16384, allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, statsmodels], deterministic: true, random_seed: 13}
+cutoff:
+  max_steps: 18
+  max_wall_time_seconds: 3600
+  max_consecutive_failures: 3
 tasks:
   - id: differential-expression
     name: Characterize cell populations by differential expression

@@ -331,6 +331,24 @@ class AgentScientificRun(BaseModel):
                     f"- Recommended improvement: {', '.join(evaluation.trajectory.recommended_improvements) or 'none recorded'}",
                 ]
             )
+            if evaluation.scientific_progress_steps:
+                lines.extend(
+                    [
+                        "",
+                        "### Scientific state progress",
+                        "",
+                        "| Step | Stage | S_t | dS_t | Comparable metrics | Limitations |",
+                        "| ---: | --- | ---: | ---: | --- | --- |",
+                    ]
+                )
+                lines.extend(
+                    f"| {item.get('step', '-')} | {item.get('stage') or '-'} | "
+                    f"{_score_cell(_optional_float(item.get('scientific_state')))} | "
+                    f"{_score_cell(_optional_float(item.get('delta')))} | "
+                    f"{', '.join(item.get('comparable_metrics', [])) or '-'} | "
+                    f"{'; '.join(item.get('limitations', [])) or '-'} |"
+                    for item in evaluation.scientific_progress_steps
+                )
             lines.extend(
                 [
                     "",
@@ -1050,6 +1068,7 @@ class ScientificLoop:
             method_evaluations=methods,
             method_selection_evaluations=selection_scores,
             local_decision_rewards=local_decision_rewards,
+            scientific_progress_steps=progress.to_step_rows(),
             trajectory=trajectory,
             scientific_outcome_score=scientific_score,
             scientific_outcome_formula=scientific.formula,
@@ -1238,6 +1257,13 @@ def _score_cell(value: float | None) -> str:
     those apart.
     """
     return "unmeasured" if value is None else f"{value:.3f}"
+
+
+def _optional_float(value: Any) -> float | None:
+    """Read optional numeric values from JSON-like report rows."""
+    if value is None:
+        return None
+    return float(value)
 
 
 __all__ = [
