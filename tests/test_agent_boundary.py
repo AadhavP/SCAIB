@@ -66,8 +66,13 @@ from agent_evals.benchmarks.schema import (
 )
 from agent_evals.core.artifact_rules import RuleKind, parse_validation_rule
 from agent_evals.core.reference_columns import RESERVED_REFERENCE_COLUMNS
+from agent_evals.datasets.redaction import (
+    partition_reference_columns,
+    write_reference_store,
+)
 from agent_evals.environment.cutoff import CutoffDecision, CutoffReason
 from agent_evals.environment.episode import Episode
+from agent_evals.environment.execution.container import docker_runtime_available
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionStatus,
@@ -84,6 +89,7 @@ from agent_evals.evaluation.candidates import (
     UNASSIGNED_LABEL,
     UNJOINABLE_CANDIDATE_GAP,
     build_metric_inputs,
+    build_workspace_metric_inputs,
 )
 from agent_evals.evaluation.profiles.pbmc_annotation import pbmc_annotation_profile
 from agent_evals.evaluation.progress import ProgressSignal, ScientificProgressTracker
@@ -429,6 +435,10 @@ def test_omitting_only_the_candidate_still_manufactures_a_zero() -> None:
     assert not results[0].status.excluded_from_scoring
 
 
+@pytest.mark.skipif(
+    not docker_runtime_available(image="agent-evals:latest"),
+    reason="requires the configured scientific container",
+)
 async def test_the_free_tier_disclosure_is_checked_against_behaviour(
     tmp_path: Path,
 ) -> None:
@@ -446,32 +456,76 @@ async def test_the_free_tier_disclosure_is_checked_against_behaviour(
     assert environment is not None
     adata = _adata()
     provisioned = await provision_environment(
-        specification, environment, adata, run_root=tmp_path
+        specification, environment, adata, run_root=tmp_path, task=task
     )
     try:
         disclosure = " ".join(provisioned.limitations())
     finally:
         await provisioned.backend.close()
 
-    assert "unmeasured rather than as zero" in disclosure
+    assert "confirmed copied candidate labels" in disclosure
     assert specification.evaluator_executes_task_actions(task) is False
-    inputs = build_metric_inputs(
-        adata,
-        prediction_column=None,
-        cluster_column=None,
-        evaluator_observes_predictions=(
-            specification.evaluator_executes_task_actions(task)
-        ),
+
+
+def test_workspace_prediction_is_joined_to_the_withheld_reference(tmp_path: Path) -> None:
+    adata = _adata()
+    partition = partition_reference_columns(adata)
+    reference_dir = write_reference_store(partition, tmp_path / "reference")
+    table = pd.DataFrame(
+        {
+            "barcode": list(adata.obs_names),
+            "predicted_label": [
+                f"candidate-{index % 3}" for index in range(adata.n_obs)
+            ],
+        }
     )
-    results = _evaluate(inputs, adata)
-    assert [result.status for result in results] == [MetricStatus.INELIGIBLE] * 3
-    profile = pbmc_annotation_profile()
-    domain = WeightedGeometricAggregator().aggregate(
-        "biology",
-        profile.metric_groups["biology"],
-        [MetricScoreInput.from_metric_result(result) for result in results],
+    path = tmp_path / "cell-labels.csv"
+    table.to_csv(path, index=False)
+    inputs = build_workspace_metric_inputs(
+        {
+            "cell-labels": ArtifactRecord(
+                artifact_id="cell-labels",
+                kind="table",
+                format="csv",
+                uri=path.as_uri(),
+            )
+        },
+        reference_dir,
     )
-    assert aggregate_domains([domain]).value is None
+
+    assert inputs.prediction is not None
+    assert inputs.reference_artifacts["labels"].shape[0] == adata.n_obs
+    assert inputs.reference_join_gap is None
+
+
+def test_workspace_prediction_copy_is_rejected(tmp_path: Path) -> None:
+    adata = _adata()
+    partition = partition_reference_columns(adata)
+    reference_dir = write_reference_store(partition, tmp_path / "reference")
+    path = tmp_path / "cell-labels.csv"
+    pd.DataFrame(
+        {
+            "barcode": list(adata.obs_names),
+            "predicted_label": adata.obs["bulk_labels"].astype(str).tolist(),
+        }
+    ).to_csv(path, index=False)
+
+    inputs = build_workspace_metric_inputs(
+        {
+            "cell-labels": ArtifactRecord(
+                artifact_id="cell-labels",
+                kind="table",
+                format="csv",
+                uri=path.as_uri(),
+            )
+        },
+        reference_dir,
+    )
+
+    assert inputs.prediction is None
+    assert inputs.reference_join_gap is not None
+    assert "copying" in inputs.reference_join_gap
+    assert inputs.leakage_findings
 
 
 # --------------------------------------------------------------------------- #
@@ -783,7 +837,7 @@ def test_requiredness_comes_from_the_artifact_not_from_the_task_list(
         assert resolved == required_ids & set(task.artifacts)
 
 
-def test_the_free_benchmark_requires_nothing_by_design() -> None:
+def test_the_free_benchmark_requires_only_its_primary_deliverable() -> None:
     """The case that made the empty-set guard below reachable at all.
 
     Recorded as its own fact because it is a deliberate design choice, not an
@@ -795,7 +849,7 @@ def test_the_free_benchmark_requires_nothing_by_design() -> None:
     typed_specification, typed_task = _typed_task()
 
     assert free_task.artifacts, "the benchmark still describes what it accepts"
-    assert free_specification.required_task_artifacts(free_task) == set()
+    assert free_specification.required_task_artifacts(free_task) == {"cell-labels"}
     assert typed_specification.required_task_artifacts(typed_task)
 
 
@@ -814,7 +868,7 @@ def _environment(
         (CutoffReason.STAGNATION, RuntimeVerdict.STAGNATED),
     ],
 )
-def test_a_cutoff_run_requiring_no_artifacts_is_not_recorded_as_completed(
+def test_a_cutoff_run_missing_the_primary_artifact_is_not_recorded_as_completed(
     reason: CutoffReason, expected: RuntimeVerdict
 ) -> None:
     """The vacuous subset test, which only a benchmark requiring nothing reaches.
@@ -832,7 +886,7 @@ def test_a_cutoff_run_requiring_no_artifacts_is_not_recorded_as_completed(
         _environment(specification, task),
     )
 
-    assert specification.required_task_artifacts(task) == set()
+    assert specification.required_task_artifacts(task) == {"cell-labels"}
     assert termination.verdict is expected
     assert termination.failure_kind is not None
     assert "the step budget ran out" in termination.reason
@@ -853,7 +907,12 @@ async def test_a_cutoff_run_that_met_its_contract_is_still_credited() -> None:
     environment.episode.record_outputs(
         [],
         [
-            ArtifactRecord(artifact_id=artifact_id, kind="table", format="csv")
+            ArtifactRecord(
+                artifact_id=artifact_id,
+                kind="table",
+                format="csv",
+                validated=True,
+            )
             for artifact_id in sorted(required)
         ],
     )

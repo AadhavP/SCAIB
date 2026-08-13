@@ -41,6 +41,11 @@ class AgentContext(BaseModel):
     workspace: str
     tools: list[dict[str, Any]] = Field(default_factory=list)
     constraints: dict[str, Any] = Field(default_factory=dict)
+    #: The public scientific brief assembled from the validated benchmark. It is
+    #: separate from ``metadata`` so provider runtimes can rely on one stable
+    #: location and arbitrary operator metadata cannot accidentally masquerade as
+    #: part of the task contract.
+    task_package: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -73,6 +78,7 @@ class AgentPlan(BaseModel):
     goal: str = Field(min_length=1)
     steps: list[str] = Field(default_factory=list)
     success_criteria: list[str] = Field(default_factory=list)
+    stopping_criteria: list[str] = Field(default_factory=list)
     adaptation_policy: str | None = None
 
 
@@ -84,6 +90,10 @@ class AgentAction(BaseModel):
     action_type: str = Field(min_length=1)
     parameters: dict[str, Any] = Field(default_factory=dict)
     reasoning_metadata: dict[str, Any] = Field(default_factory=dict)
+    #: Optional observable update to the working plan. Scientific work is
+    #: iterative; asking for replanning in prose while offering no protocol field
+    #: made the initial plan effectively immutable.
+    plan_update: AgentPlan | None = None
 
 
 class FinalSubmission(BaseModel):

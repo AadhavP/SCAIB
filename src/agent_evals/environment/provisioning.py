@@ -49,6 +49,7 @@ from agent_evals.datasets.redaction import (
     write_reference_store,
 )
 from agent_evals.environment.execution import (
+    ContainerBackend,
     IsolationOutcome,
     IsolationReport,
     LocalProcessBackend,
@@ -136,13 +137,12 @@ class ProvisionedEnvironment:
             if report.outcome
             in {IsolationOutcome.UNENFORCEABLE, IsolationOutcome.FAILED}
         ]
-        gaps.append(
-            "artifacts the agent writes in the workspace are recorded and "
-            "checksummed but are not yet joined back onto the evaluator's "
-            "reference, so reference-consuming metrics are structurally "
-            "ineligible on this tier and the scientific outcome is reported as "
-            "unmeasured rather than as zero"
-        )
+        if self.environment.backend is EnvironmentBackend.LOCAL:
+            gaps.append(
+                "local workspace artifacts are scored only with an explicit "
+                "reference join, but the process is not filesystem- or network-"
+                "confined; use the container backend for benchmark-grade results"
+            )
         if self.retained_analysis_keys:
             # A shortcut, not a leak: nothing listed here was computed from a
             # withheld column, so no leakage finding would fire on it and none
@@ -160,9 +160,8 @@ class ProvisionedEnvironment:
             )
         gaps.append(
             f"the reference store at '{REFERENCE_STORE_DIRNAME}/"
-            f"{REFERENCE_MANIFEST_FILENAME}' records what was withheld, but no "
-            "leakage scan reads it back yet; it is evidence for a later audit, "
-            "not a live detector"
+            f"{REFERENCE_MANIFEST_FILENAME}' is evaluator-only; confirmed copied "
+            "candidate labels are rejected during the evaluation join"
         )
         return gaps
 
@@ -198,16 +197,9 @@ async def provision_environment(
     adata: Any,
     *,
     run_root: Path,
+    task: TaskSpecification | None = None,
 ) -> ProvisionedEnvironment:
     """Materialize a sanitized workspace and the executor that runs code in it."""
-    if environment.backend is not EnvironmentBackend.LOCAL:
-        raise EnvironmentProvisionError(
-            f"environment '{environment.id}' requests the "
-            f"'{environment.backend.value}' backend, which this build cannot "
-            "provide: no scientific container image is published yet, so the "
-            "interpreter the agent would need is not guaranteed to exist inside "
-            "it. Run 'agent-evals env list' to see the providable tiers."
-        )
     workspace_root = run_root / WORKSPACE_DIRNAME
     dataset_path = workspace_root / WORKSPACE_INPUT_DIRNAME / SANITIZED_DATASET_FILENAME
     partition = _materialize_dataset(adata, dataset_path)
@@ -215,10 +207,23 @@ async def provision_environment(
         partition,
         run_root / EVALUATOR_DIRNAME / REFERENCE_STORE_DIRNAME,
     )
-    backend = LocalProcessBackend(
-        workspace_root,
-        isolation=isolation_from_constraints(specification.constraints),
-    )
+    constraints = (
+        task.constraints if task is not None else None
+    ) or specification.constraints
+    isolation_request = isolation_from_constraints(constraints)
+    if environment.backend is EnvironmentBackend.CONTAINER:
+        if not environment.image:
+            raise EnvironmentProvisionError(
+                f"environment '{environment.id}' requests a container but has no image"
+            )
+        backend: WorkspaceBackend = ContainerBackend(
+            workspace_root,
+            image=environment.image,
+            isolation=isolation_request,
+            input_dir=dataset_path.parent,
+        )
+    else:
+        backend = LocalProcessBackend(workspace_root, isolation=isolation_request)
     isolation = await backend.start()
     return ProvisionedEnvironment(
         environment=environment,
@@ -227,6 +232,7 @@ async def provision_environment(
         executor=WorkspaceActionExecutor(
             backend,
             dataset_observer=H5adDatasetObserver(dataset_path),
+            allowed_python_packages=constraints.allowed_python_packages,
         ),
         backend=backend,
         isolation=isolation,

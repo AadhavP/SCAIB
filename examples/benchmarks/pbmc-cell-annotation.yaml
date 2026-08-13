@@ -56,11 +56,13 @@ observations:
     schema: {layers: [X], obs: [cell_id], var: [gene_id]}
   - id: qc-statistics
     name: Quality-control statistics
-    description: Per-cell counts, detected genes, and mitochondrial fraction.
+    description: >-
+      Compact distribution summaries before filtering and a per-cell QC table
+      recording retained/rejected status and filter reason after filtering.
     type: table
     source: qc action output
     required: true
-    schema: {columns: [total_counts, n_genes_by_counts, pct_counts_mt]}
+    schema: {columns: [total_counts, n_genes_by_counts, pct_counts_mt, qc_pass, qc_fail_reason]}
   - id: pipeline-history
     name: Pipeline history
     description: Ordered record of accepted actions, parameters, and artifact references.
@@ -76,8 +78,17 @@ observations:
 actions:
   - id: qc
     name: Quality control
-    purpose: Calculate and apply declared cell and gene quality filters.
+    purpose: Select and apply a reproducible cell- and gene-level quality-control strategy.
     parameters:
+      - name: method
+        description: >-
+          QC strategy. fixed_threshold uses explicit cutoffs; mitochondrial_filter
+          focuses on high mitochondrial content; adaptive_quantile derives cutoffs
+          from this dataset; mad_outlier removes robust distributional outliers.
+        type: enum
+        required: false
+        default: fixed_threshold
+        choices: [fixed_threshold, mitochondrial_filter, adaptive_quantile, mad_outlier]
       - name: min_genes
         description: Minimum number of detected genes per cell.
         type: integer
@@ -91,6 +102,37 @@ actions:
         default: 0.2
         minimum: 0
         maximum: 1
+      - name: max_genes
+        description: Optional maximum number of detected genes per cell, useful for doublet-like outliers.
+        type: integer
+        required: false
+        minimum: 0
+      - name: min_cells
+        description: Minimum number of retained cells in which a gene must be detected.
+        type: integer
+        required: false
+        default: 0
+        minimum: 0
+      - name: min_genes_quantile
+        description: Lower quantile used by adaptive_quantile for detected genes.
+        type: number
+        required: false
+        default: 0.05
+        minimum: 0
+        maximum: 1
+      - name: max_mito_quantile
+        description: Upper quantile used by adaptive_quantile for mitochondrial percentage.
+        type: number
+        required: false
+        default: 0.95
+        minimum: 0
+        maximum: 1
+      - name: mad_multiplier
+        description: Robust MAD multiplier used by mad_outlier.
+        type: number
+        required: false
+        default: 3
+        minimum: 0
     required_inputs: [current-anndata]
     expected_outputs: [qc-table]
     estimated_cost: {cpu_seconds: 30, memory_mb: 2048, complexity: linear_in_cells}
@@ -112,7 +154,6 @@ actions:
         description: "Library-size target per cell; permitted only with library_size_log1p."
         type: number
         required: false
-        default: 10000
         minimum: 1
       - name: inplace
         description: Keep the normalized AnnData object as the current pipeline state.
@@ -170,6 +211,12 @@ actions:
     name: Annotate cell types
     purpose: Assign a cell-type label to every retained cell with supporting evidence.
     parameters:
+      - name: method
+        description: Annotation strategy represented by the supplied marker evidence.
+        type: enum
+        required: false
+        default: marker_based
+        choices: [marker_based]
       - name: label_vocabulary
         description: Controlled vocabulary of permitted cell-type labels.
         type: list[string]
@@ -373,29 +420,24 @@ metric_groups:
       - {metric_id: cell_annotation.ece, weight: 1.0, role: secondary}
 decision_evaluation:
   qc_strategy:
-    allowed_methods: [qc_filter, mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+    allowed_methods: [fixed_threshold, mitochondrial_filter, adaptive_quantile, mad_outlier]
     expected_inputs: [current-anndata, qc-statistics]
-    alternatives: [mitochondrial_filter, adaptive_filter, scrublet, emptyDrops]
+    alternatives: [mitochondrial_filter, adaptive_quantile, mad_outlier]
     metrics: [artifact_removal, biological_retention, rare_population_preservation]
     parameter_ranges:
       min_genes: {minimum: 0, maximum: 2000}
       max_mito_fraction: {minimum: 0, maximum: 1}
   normalization:
-    allowed_methods: [normalize, log_normalize, scran]
+    allowed_methods: [library_size_log1p, median_counts_log1p]
     expected_inputs: [current-anndata, qc-statistics]
-    alternatives: [normalize, log_normalize, scran]
+    alternatives: [median_counts_log1p]
     metrics: [library_size_stability, downstream_separation]
     parameter_ranges:
       target_sum: {minimum: 1, maximum: 1000000}
-  integration:
-    allowed_methods: [harmony, scanorama, scvi]
-    expected_inputs: [normalized-anndata, batch-labels]
-    alternatives: [harmony, scanorama, scvi]
-    metrics: [batch_removal, biology_preservation]
   annotation:
-    allowed_methods: [marker_based, reference_mapping, supervised_classifier]
+    allowed_methods: [marker_based]
     expected_inputs: [normalized-anndata, marker-table]
-    alternatives: [marker_based, reference_mapping, supervised_classifier]
+    alternatives: []
     metrics: [macro_f1, rare_recall, calibration]
 rewards:
   - id: annotation-reward
@@ -409,12 +451,12 @@ rewards:
 artifacts:
   - id: qc-table
     name: Quality-control table
-    description: Per-cell and per-gene QC statistics with filtering decisions.
+    description: Per-cell QC statistics, filtering decisions, selected method, and derived thresholds.
     kind: table
     format: parquet
     produced_by: [qc]
     validation:
-      - {name: required-columns, description: QC columns are present, rule: "columns include total_counts,n_genes_by_counts,pct_counts_mt"}
+      - {name: required-columns, description: QC columns and filtering decisions are present, rule: "columns include total_counts,n_genes_by_counts,pct_counts_mt,qc_pass,qc_fail_reason"}
   - id: normalized-anndata
     name: Normalized AnnData
     description: Filtered and normalized expression object used by annotation.
@@ -495,6 +537,7 @@ tasks:
   - id: cell-annotation
     name: PBMC cell-type annotation
     objective: Recover biologically meaningful cell types from PBMC expression profiles.
+    end_goal: Produce a reproducible, biologically defensible cell-type assignment for the retained cells, supported by marker evidence and a validated final object.
     description: >-
       Starting from the public PBMC expression matrix and declared observations,
       produce a fully labeled AnnData object with marker-based evidence.

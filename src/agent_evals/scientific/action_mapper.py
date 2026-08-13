@@ -60,6 +60,24 @@ class ScientificActionMapper:
             ),
             None,
         )
+        # A scientific method is often a choice inside a typed operation rather
+        # than its own action ID (for example ``adaptive_quantile`` inside
+        # ``qc``). Resolve that shape here so legacy structured decisions and
+        # universal AgentAction requests expose the same decision space.
+        if method_action is None and decision.method is not None:
+            method_action = next(
+                (
+                    action.id
+                    for action in specification.actions
+                    if action.id in task.allowed_actions
+                    and any(
+                        parameter.name == "method"
+                        and decision.method in parameter.choices
+                        for parameter in action.parameters
+                    )
+                ),
+                None,
+            )
         if decision.method is not None and method_action is None:
             raise ActionMappingError(
                 f"decision selects an unknown or disallowed method '{decision.method}'"
@@ -84,9 +102,21 @@ class ScientificActionMapper:
                 f"decision does not select an allowed declared action: "
                 f"method={decision.method!r}, category={decision.action_category!r}"
             )
+        parameters = dict(decision.parameters)
+        if method_action is not None and decision.method is not None:
+            action_method_parameter = next(
+                (
+                    parameter
+                    for parameter in declared[action_id].parameters
+                    if parameter.name == "method"
+                ),
+                None,
+            )
+            if action_method_parameter is not None and decision.method in action_method_parameter.choices:
+                parameters.setdefault("method", decision.method)
         intent = ActionIntent(
             action_id=action_id,
-            parameters=decision.parameters,
+            parameters=parameters,
             rationale=decision.rationale,
             metadata={
                 **decision.metadata,

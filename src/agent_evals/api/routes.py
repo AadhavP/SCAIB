@@ -148,7 +148,24 @@ async def benchmark_details(benchmark_id: str) -> dict[str, Any]:
         "version": specification.metadata.version,
         "tags": specification.metadata.tags,
         "datasets": [item.model_dump(mode="json") for item in specification.datasets],
-        "tasks": [item.model_dump(mode="json") for item in specification.tasks],
+        "tasks": [
+            {
+                **item.model_dump(mode="json"),
+                "end_goal": item.end_goal
+                or (
+                    f"Complete '{item.name}' and produce the strongest defensible "
+                    "result supported by the available observations and required artifacts."
+                ),
+                "required_artifacts": sorted(
+                    specification.required_task_artifacts(item)
+                ),
+                "stopping_criteria": [
+                    condition.model_dump(mode="json")
+                    for condition in item.termination
+                ],
+            }
+            for item in specification.tasks
+        ],
         "actions": [item.model_dump(mode="json") for item in specification.actions],
         "metrics": [item.model_dump(mode="json") for item in specification.metrics],
     }

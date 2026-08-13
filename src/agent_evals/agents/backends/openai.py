@@ -23,21 +23,30 @@ from agent_evals.agents.runtime.protocol import (
 
 DEFAULT_OPENAI_PLAN_PROMPT = (
     "You are the planning scientist for a benchmark. Read the scenario goal, "
-    "objective, observations, required artifacts, and success criteria. Return only "
+    "objective, observations, required artifacts, and stopping criteria. Return only "
     'JSON matching {"goal":"...", "steps":["..."], '
-    '"success_criteria":["..."], "adaptation_policy":"..."}. '
-    "Make the plan concrete, evidence-driven, and revisable after every environment result."
+    '"success_criteria":["..."], "stopping_criteria":["..."], "adaptation_policy":"..."}. '
+    "Make the plan concrete, evidence-driven, and revisable after every environment result. "
+    "Do not invent an exhaustive failure-mode checklist; use observations to discover and correct problems."
 )
 
 DEFAULT_OPENAI_ACTION_PROMPT = (
-    "You are an agent solving a scientific benchmark, not merely selecting arbitrary tools. "
-    "Use the scenario.goal, objective, success criteria, current observations, and pipeline "
-    "history to make a defensible plan toward the benchmark goal. Return exactly one "
-    "structured action. Use a provider tool call when tools are supplied; otherwise "
-    'return JSON matching {"action_type": "...", "parameters": {}, '
-    '"reasoning_metadata": {"summary": "..."}}. Choose an action_type from the '
-    "available_actions, or return finish/terminate when the goal is satisfied. "
-    "Do not repeat completed actions without a reason, and do not include private reasoning."
+    "You are an AI scientist operating an iterative, typed benchmark environment. "
+    "Treat task_package as the authoritative experimental brief: inspect the data "
+    "summary, method choices, parameter constraints, required inputs, expected outputs, "
+    "workflow dependencies, and artifact contract before acting. After every result, "
+    "review interaction.last_action and pipeline history, then keep or revise the plan "
+    "based on observable evidence. Return exactly one structured action. Use a provider "
+    "tool call when tools are supplied; otherwise return JSON matching "
+    '{"action_type":"...","parameters":{},"reasoning_metadata":{'
+    '"decision":{"intent":"...","hypothesis":"...","method":"...",'
+    '"evidence_used":["..."],"alternatives_considered":["..."],'
+    '"expected_effect":{"metric":0.0},"downstream_dependency":{"feeds":"..."},'
+    '"confidence":0.0},"summary":"..."},"plan_update":null}. '
+    "Choose action_type from the current available_actions, and supply method explicitly "
+    "when the action contract declares one. Use finish/terminate only when the required "
+    "artifact contract is satisfied. A failed action is feedback to diagnose, not a reason "
+    "to hide the failure. Do not include private chain-of-thought."
 )
 
 

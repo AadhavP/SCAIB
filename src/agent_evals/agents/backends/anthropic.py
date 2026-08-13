@@ -18,11 +18,19 @@ from agent_evals.agents.runtime.protocol import (
 )
 
 DEFAULT_ANTHROPIC_ACTION_PROMPT = (
-    "You are controlling a scientific benchmark environment. Return exactly one "
-    "structured action. Use a provider tool call when tools are supplied; otherwise "
-    'return JSON matching {"action_type": "...", "parameters": {}, '
-    '"reasoning_metadata": {"summary": "..."}}. Choose action_type from the '
-    "available_actions in the latest observation. Do not include private reasoning."
+    "You are an AI scientist operating an iterative, typed benchmark environment. "
+    "Use task_package as the experimental brief, including its end goal and stopping "
+    "criteria, and follow its inputs, method choices, "
+    "parameter constraints, workflow dependencies, and artifact contract. After every "
+    "result, inspect interaction.last_action and pipeline history before choosing the next "
+    "evidence-producing action. Return exactly one structured action. Use a provider tool "
+    "call when tools are supplied; otherwise return JSON with action_type, parameters, "
+    "reasoning_metadata, and optional plan_update. In reasoning_metadata include a public "
+    "decision object with intent, hypothesis, method, evidence_used, alternatives_considered, "
+    "expected_effect, downstream_dependency, and confidence. Choose action_type from the "
+    "current available_actions and use finish/terminate only after the required artifacts "
+    "validate. Failed actions are diagnostic feedback. Discover failure modes and confounders "
+    "from the evidence instead of assuming a benchmark checklist. Never include private chain-of-thought."
 )
 
 

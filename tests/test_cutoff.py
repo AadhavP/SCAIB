@@ -115,7 +115,11 @@ class ScriptedRuntime(AgentRuntime):
         return FinalSubmission(summary="completed")
 
 
-def make_environment(cutoff: CutoffSpecification | None = None) -> ScientificEnvironment:
+def make_environment(
+    cutoff: CutoffSpecification | None = None,
+    *,
+    validated_artifacts: bool = False,
+) -> ScientificEnvironment:
     """The mock-executor environment, optionally with a declared cutoff block."""
     specification = SPECIFICATION
     if cutoff is not None:
@@ -123,7 +127,7 @@ def make_environment(cutoff: CutoffSpecification | None = None) -> ScientificEnv
     return ScientificEnvironment(
         specification,
         task_id="cell-annotation",
-        executor=MockActionExecutor(),
+        executor=MockActionExecutor(validated_artifacts=validated_artifacts),
         observation_builder=MockObservationBuilder(),
     )
 
@@ -805,7 +809,7 @@ async def test_the_observation_exposes_hard_budgets_and_no_progress_state() -> N
 
 
 @pytest.mark.asyncio
-async def test_a_mock_run_measures_no_progress_and_is_not_stopped_for_it() -> None:
+async def test_a_mock_run_without_validated_artifacts_is_not_reported_complete() -> None:
     """The end-to-end form of the unmeasured-progress rule.
 
     The mock executor produces no comparable metrics, so every delta is ``None``.
@@ -821,7 +825,7 @@ async def test_a_mock_run_measures_no_progress_and_is_not_stopped_for_it() -> No
         seed=3,
     )
 
-    assert result.termination_status == "completed"
+    assert result.termination_status == "incomplete"
     assert result.cutoff is not None
     assert not result.cutoff.stopped
     assert (
@@ -831,7 +835,7 @@ async def test_a_mock_run_measures_no_progress_and_is_not_stopped_for_it() -> No
 
 
 @pytest.mark.asyncio
-async def test_exhausting_the_step_budget_after_producing_everything_completes() -> None:
+async def test_exhausting_the_step_budget_after_producing_validated_artifacts_completes() -> None:
     """Preserves what the loop's old ``while``/``else`` clause meant.
 
     A run that produced every required artifact and then ran out of steps
@@ -841,7 +845,7 @@ async def test_exhausting_the_step_budget_after_producing_everything_completes()
     """
     result = await AgentRuntimeManager().run(
         ScriptedRuntime(),
-        make_environment(),
+        make_environment(validated_artifacts=True),
         context(),
         seed=3,
         max_steps=len(COMPLETE_WORKFLOW) - 1,

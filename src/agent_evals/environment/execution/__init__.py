@@ -32,6 +32,10 @@ from agent_evals.environment.execution.backend import (
     environment_allowlist,
     interpreter_argv,
 )
+from agent_evals.environment.execution.container import (
+    ContainerBackend,
+    docker_runtime_available,
+)
 from agent_evals.environment.execution.executor import (
     EXECUTION_PARAMETERS,
     WorkspaceActionExecutor,
@@ -83,6 +87,7 @@ __all__ = [
     "ActionKindRouter",
     "CommandOutcome",
     "CommandRequest",
+    "ContainerBackend",
     "DigestMethod",
     "FileFingerprint",
     "IsolationControl",
@@ -101,6 +106,7 @@ __all__ = [
     "declared_artifacts",
     "describe_process_limits",
     "deterministic_environment",
+    "docker_runtime_available",
     "environment_allowlist",
     "fingerprint_file",
     "fingerprint_workspace",

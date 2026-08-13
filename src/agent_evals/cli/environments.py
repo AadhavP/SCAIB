@@ -33,6 +33,7 @@ from agent_evals.benchmarks.schema import (
 from agent_evals.cli.references import resolve_benchmark_path
 from agent_evals.environment.execution import (
     IsolationOutcome,
+    docker_runtime_available,
     free_execution_action_ids,
     isolation_from_constraints,
     local_isolation_controls,
@@ -53,7 +54,22 @@ CONTAINER_BINARY = "docker"
 
 def _container_available() -> bool:
     """Whether the container tier could be provided on this host."""
-    return shutil.which(CONTAINER_BINARY) is not None
+    return docker_runtime_available(CONTAINER_BINARY)
+
+
+def _environment_status(environment: EnvironmentSpecification) -> str:
+    """Return the host status for one declared environment, including its image."""
+    if environment.backend is EnvironmentBackend.LOCAL:
+        return "available"
+    if shutil.which(CONTAINER_BINARY) is None:
+        return f"unavailable ('{CONTAINER_BINARY}' not on PATH)"
+    if not docker_runtime_available(CONTAINER_BINARY):
+        return "unavailable (Docker daemon is stopped or inaccessible)"
+    if environment.image and not docker_runtime_available(
+        CONTAINER_BINARY, image=environment.image
+    ):
+        return f"unavailable (image '{environment.image}' is not available)"
+    return "available"
 
 
 def backend_availability() -> dict[EnvironmentBackend, str]:
@@ -63,7 +79,11 @@ def backend_availability() -> dict[EnvironmentBackend, str]:
         EnvironmentBackend.CONTAINER: (
             "available"
             if _container_available()
-            else f"unavailable ('{CONTAINER_BINARY}' not on PATH)"
+            else (
+                f"unavailable ('{CONTAINER_BINARY}' not on PATH)"
+                if shutil.which(CONTAINER_BINARY) is None
+                else "unavailable (Docker daemon is stopped or inaccessible)"
+            )
         ),
     }
 
@@ -174,7 +194,7 @@ def _print_environment(
     detail.add_row("backend", environment.backend.value)
     detail.add_row("image", environment.image or "-")
     detail.add_row("languages", ", ".join(environment.languages))
-    detail.add_row("host status", backend_availability()[environment.backend])
+    detail.add_row("host status", _environment_status(environment))
     tasks = sorted(
         task.id for task in specification.tasks if task.environment == environment.id
     )
@@ -182,7 +202,15 @@ def _print_environment(
     free_actions = sorted(free_execution_action_ids(specification))
     detail.add_row("free-execution actions", ", ".join(free_actions) or "(none)")
     console.print(detail)
-    _print_isolation(specification.constraints, environment.backend)
+    task_constraints = next(
+        (
+            task.constraints or specification.constraints
+            for task in specification.tasks
+            if task.environment == environment.id
+        ),
+        specification.constraints,
+    )
+    _print_isolation(task_constraints, environment.backend)
 
 
 def _print_isolation(
@@ -214,7 +242,7 @@ def _print_isolation(
             "(all)",
             "see constraints",
             "undetermined",
-            "resolved against the container runtime at run time",
+            "resolved against the Docker runtime at run time",
         )
         console.print(table)
         return
@@ -254,18 +282,21 @@ def env_validate_command(
     one.
     """
     specification = _load(benchmark)
-    availability = backend_availability()
+    statuses = {spec.id: _environment_status(spec) for spec in specification.environments}
+    availability = {
+        spec.id: statuses[spec.id] for spec in specification.environments
+    }
     problems = [
         f"environment '{spec.id}' requests the "
-        f"'{spec.backend.value}' backend: {availability[spec.backend]}"
+        f"'{spec.backend.value}' backend: {statuses[spec.id]}"
         for spec in specification.environments
-        if availability[spec.backend] != "available"
+        if statuses[spec.id] != "available"
     ]
     unenforced = _unenforceable_controls(specification)
     for spec in specification.environments:
         console.print(
             f"[green]OK[/green] environment '{spec.id}' "
-            f"({spec.backend.value}) — {availability[spec.backend]}"
+            f"({spec.backend.value}) — {availability[spec.id]}"
         )
     if not specification.environments:
         console.print(

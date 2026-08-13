@@ -71,6 +71,43 @@ def docker_available(executable: str = "docker") -> bool:
     return shutil.which(executable) is not None
 
 
+def docker_runtime_available(
+    executable: str = "docker", *, image: str | None = None
+) -> bool:
+    """Whether Docker can answer locally and, optionally, has an image ready.
+
+    Checking only ``PATH`` is insufficient on desktop Docker installations:
+    the CLI can be present while the daemon is stopped or inaccessible to the
+    current user.  This probe is deliberately read-only and is used for
+    integration-test skips and operator preflight checks, not as a security
+    guarantee.
+    """
+    if not docker_available(executable):
+        return False
+    try:
+        daemon = subprocess.run(
+            [executable, "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+        if daemon.returncode != 0:
+            return False
+        if image is None:
+            return True
+        inspected = subprocess.run(
+            [executable, "image", "inspect", image],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+        return inspected.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def build_run_argv(
     *,
     image: str,

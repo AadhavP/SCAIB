@@ -126,6 +126,11 @@ class ScientificEnvironment:
                 observation=episode.snapshot(),
             )
 
+        # Execute exactly the parameter values the benchmark advertised. This
+        # also records implicit choices (for example QC method and thresholds)
+        # in the scientific trajectory rather than hiding them in executor
+        # defaults.
+        intent = self.validator.apply_defaults(intent, self.specification)
         episode.record_submission(intent)
         constraints = self.task.constraints or self.specification.constraints
         try:

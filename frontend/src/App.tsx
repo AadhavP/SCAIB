@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
   Activity, ArrowLeft, ArrowRight, Beaker, Bot, Check, CheckCircle2, ChevronRight, CircleDot,
-  Clock3, Code2, Database, FlaskConical, Gauge, Info, Layers3, MessageSquare, Play, RefreshCw,
-  RotateCw, ServerCog, ShieldCheck, Sparkles, TerminalSquare, TriangleAlert, UserRound, XCircle, Zap,
+  Clock3, Code2, Database, FileCheck2, FlaskConical, Gauge, Info, Layers3, ListChecks,
+  MessageSquare, Play, RefreshCw, RotateCw, ServerCog, ShieldCheck, Sparkles, Target,
+  TerminalSquare, TriangleAlert, UserRound, XCircle, Zap,
 } from 'lucide-react'
 import { Agent, ApiClient, BenchmarkAction, BenchmarkDetail, EvaluationEvent, EvaluationJob, JsonMap, RunResponse, createApiClient } from './api'
 import './styles.css'
+import './task-brief.css'
 
 type Props = { api?: ApiClient }
 type Screen = 'catalog' | 'configure' | 'run'
@@ -25,7 +27,7 @@ const fallbackDetails: Record<string, BenchmarkDetail> = {
     description: 'Recover biologically meaningful cell types from PBMC expression profiles with a reproducible analysis workflow.',
     version: '1.0.0', tags: ['single-cell', 'annotation', 'PBMC', 'transcriptomics'],
     datasets: [{ id: 'pbmc68k', name: '10x Genomics PBMC 68k', organism: 'Homo sapiens', modality: 'scRNA-seq', expected_observations: { cells: 68579, genes: 32738 } }],
-    tasks: [{ id: 'cell-annotation', name: 'PBMC cell-type annotation', description: 'Produce a fully labeled AnnData object with marker-based evidence.', allowed_actions: ['qc', 'normalize', 'marker-genes', 'annotate'], metrics: ['annotation-accuracy', 'annotation-macro-f1', 'runtime'] }],
+    tasks: [{ id: 'cell-annotation', name: 'PBMC cell-type annotation', objective: 'Recover biologically meaningful cell types from PBMC expression profiles.', end_goal: 'Produce a reproducible, biologically defensible cell-type assignment for the retained cells, supported by marker evidence and a validated final object.', description: 'Produce a fully labeled AnnData object with marker-based evidence.', allowed_actions: ['qc', 'normalize', 'marker-genes', 'annotate'], artifacts: ['qc-table', 'normalized-anndata', 'pca-embedding', 'cluster-table', 'marker-table', 'annotated-anndata'], required_artifacts: ['annotated-anndata'], termination: [{ name: 'successful-completion', description: 'All retained cells have valid labels and the required artifacts validate.', condition: 'required artifacts validate successfully' }], metrics: ['annotation-accuracy', 'annotation-macro-f1', 'runtime'] }],
     actions: [
       { id: 'qc', name: 'Quality control', purpose: 'Filter low-quality cells and calculate QC statistics.' },
       { id: 'normalize', name: 'Normalize expression', purpose: 'Create a comparable expression representation.' },
@@ -257,7 +259,9 @@ function App({ api = defaultApi }: Props) {
       <StepBar screen={screen} />
       {error && <div className="alert" role="alert"><TriangleAlert size={16} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><XCircle size={15} /></button></div>}
       {screen === 'catalog' && <Catalog benchmarks={benchmarks} details={details} selected={selectedBenchmark} onChoose={chooseBenchmark} loading={loadingDetails} recent={recent} />}
+      {screen === 'configure' && <TaskBrief task={task} />}
       {screen === 'configure' && <Configure benchmark={benchmark} agents={agents} selectedAgent={selectedAgent} setSelectedAgent={setSelectedAgent} model={model} setModel={setModel} provider={provider} setProvider={setProvider} testMode={testMode} setTestMode={setTestMode} seed={seed} setSeed={setSeed} maxCells={maxCells} setMaxCells={setMaxCells} maxSteps={maxSteps} setMaxSteps={setMaxSteps} starting={starting} onBack={resetToCatalog} onRun={() => void queue()} />}
+      {screen === 'run' && <div className="run-brief-wrap"><TaskBrief task={task} compact /></div>}
       {screen === 'run' && <RunWalkthrough benchmark={benchmark} task={task} job={jobDetail} events={liveEvents} streamConnected={streamConnected} state={state} isActive={isActive} agent={selectedAgentInfo} model={model} testMode={testMode} seed={seed} maxSteps={maxSteps} onBack={() => setScreen('configure')} onNew={resetToCatalog} />}
       <footer><span>© 2026 SCAIB</span><span>Scientific Agent Capability &amp; Intelligence Benchmark</span><span>API telemetry <CircleDot size={10} className="online" /></span></footer>
     </main>
@@ -272,6 +276,29 @@ function StepBar({ screen }: { screen: Screen }) {
 
 function Catalog({ benchmarks, details, selected, onChoose, loading, recent }: { benchmarks: string[]; details: Record<string, BenchmarkDetail>; selected: string; onChoose: (id: string) => void; loading: boolean; recent: EvaluationJob[] }) {
   return <section className="page catalog-page"><h1 className="sr-only">Evaluation console</h1><div className="page-heading"><div><div className="eyebrow"><span className="pulse" /> STEP 01 / BENCHMARK CATALOG</div><h1>What should we <em>measure?</em></h1><p>Choose a scientific benchmark. Each one is a complete, reproducible workflow with a dataset, observable decisions, and interpretable scores.</p></div><div className="heading-note"><Database size={16} /><span>{benchmarks.length} registered benchmarks<br /><small>Descriptions loaded from the API</small></span></div></div><div className="catalog-grid">{benchmarks.map((id, index) => { const item = details[id] ?? fallbackDetails[id]; return <article className={`benchmark-card ${id === selected ? 'selected' : ''}`} key={id}><div className="card-top"><span className="card-number">0{index + 1}</span><span className="version">v{text(item?.version, '1.0.0')}</span></div><div className="benchmark-icon"><Beaker size={20} /></div><span className="benchmark-id">{id}</span><h2>{text(item?.title, titleize(id))}</h2><p>{text(item?.description, 'A registered scientific evaluation benchmark.')}</p><div className="tag-row">{(item?.tags ?? ['scientific', 'reproducible']).slice(0, 4).map(tag => <span key={tag}>{tag}</span>)}</div><div className="card-meta"><span><Layers3 size={14} /> {item?.tasks.length ?? '—'} task{item?.tasks.length === 1 ? '' : 's'}</span><span><Gauge size={14} /> {item?.metrics.length ?? '—'} metrics</span></div><button className="card-action" aria-label="Configure benchmark" onClick={() => onChoose(id)}>Configure benchmark <ArrowRight size={15} /></button></article>})}</div><div className="catalog-bottom"><div className="info-strip"><Info size={16} /><span><strong>How scoring works</strong> Agents are scored on scientific outcomes, decision quality, trajectory quality, and reproducibility — not just the final answer.</span></div>{recent.length > 0 && <div className="recent-strip"><Clock3 size={15} /> {recent.length} recent run{recent.length === 1 ? '' : 's'} available in this session</div>}</div>{loading && <span className="loading-note">Syncing benchmark metadata…</span>}</section>
+}
+
+function TaskBrief({ task, compact = false }: { task: JsonMap; compact?: boolean }) {
+  const criteria = Array.isArray(task.stopping_criteria)
+    ? task.stopping_criteria
+    : Array.isArray(task.success_criteria)
+      ? task.success_criteria
+      : Array.isArray(task.termination)
+        ? task.termination
+        : []
+  const artifacts = Array.isArray(task.artifacts) ? task.artifacts.map(String) : []
+  const requiredArtifacts = Array.isArray(task.required_artifacts) ? task.required_artifacts.map(String) : []
+  const optionalArtifacts = artifacts.filter(artifact => !requiredArtifacts.includes(artifact))
+  const actions = Array.isArray(task.allowed_actions) ? task.allowed_actions.map(String) : []
+  const objective = text(task.objective, text(task.description, 'Complete the declared scientific task.'))
+  const endGoal = text(task.end_goal, 'Produce the strongest defensible result supported by the evidence.')
+  return <article className={`task-brief ${compact ? 'compact' : ''}`}>
+    <div className="task-brief-heading"><div><span className="micro-label">TASK BRIEF</span><h2>{text(task.name, 'Scientific task')}</h2></div><Target size={19} /></div>
+    <div className="task-brief-goal"><strong>End goal</strong><p>{endGoal}</p></div>
+    {!compact && <div className="task-brief-grid"><div><span className="brief-label">Scientific objective</span><p>{objective}</p></div><div><span className="brief-label">Stopping criteria</span>{criteria.length ? <ul>{criteria.map((item, index) => { const condition = item && typeof item === 'object' ? item as JsonMap : {}; return <li key={String(condition.name ?? index)}>{text(condition.description, text(condition.condition, String(item)))}</li> })}</ul> : <p>Stop when the required evidence is complete and further work is unlikely to improve the result.</p>}</div></div>}
+    <div className="task-brief-footer">{actions.length > 0 && <span><ListChecks size={14} /> {actions.length} declared action type{actions.length === 1 ? '' : 's'}; methods and parameters remain agent choices.</span>}{requiredArtifacts.length > 0 && <span><FileCheck2 size={14} /> {requiredArtifacts.length} required deliverable{requiredArtifacts.length === 1 ? '' : 's'}</span>}{optionalArtifacts.length > 0 && <span><FileCheck2 size={14} /> {optionalArtifacts.length} optional supporting artifact{optionalArtifacts.length === 1 ? '' : 's'}</span>}</div>
+    {!compact && <div className="task-brief-note"><Info size={14} /><span>Use observations to discover weak assumptions, confounders, and failure modes. They are not pre-supplied as a checklist.</span></div>}
+  </article>
 }
 
 function Configure({ benchmark, agents, selectedAgent, setSelectedAgent, model, setModel, provider, setProvider, testMode, setTestMode, seed, setSeed, maxCells, setMaxCells, maxSteps, setMaxSteps, starting, onBack, onRun }: { benchmark: BenchmarkDetail; agents: Agent[]; selectedAgent: string; setSelectedAgent: (value: string) => void; model: string; setModel: (value: string) => void; provider: string; setProvider: (value: string) => void; testMode: boolean; setTestMode: (value: boolean) => void; seed: number; setSeed: (value: number) => void; maxCells: string; setMaxCells: (value: string) => void; maxSteps: string; setMaxSteps: (value: string) => void; starting: boolean; onBack: () => void; onRun: () => void }) {

@@ -94,6 +94,7 @@ def no_container(monkeypatch: pytest.MonkeyPatch) -> None:
 def with_container(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the host look like one with a container runtime installed."""
     monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(env_module, "docker_runtime_available", lambda *args, **kwargs: True)
 
 
 # ---------------------------------------------------------------------------
@@ -321,19 +322,19 @@ def test_inspect_reports_the_declared_environment_and_its_tasks() -> None:
     assert "cell-annotation-free" in result.stdout
 
 
-def test_inspect_names_the_control_the_local_tier_cannot_impose() -> None:
-    """The row that was missing entirely, in the table headed for this host."""
+def test_inspect_reports_container_isolation_as_runtime_resolved() -> None:
+    """The free benchmark now requires the container tier for scored runs."""
     result = invoke("env", "inspect", "-b", FREE_BENCHMARK)
     assert result.exit_code == 0
-    assert "filesystem_scope" in result.stdout
-    assert "unenforceable" in result.stdout
+    assert "backend" in result.stdout
+    assert "container" in result.stdout
+    assert "undetermined" in result.stdout
 
 
 def test_inspect_reports_the_enforced_control_too() -> None:
     result = invoke("env", "inspect", "-b", FREE_BENCHMARK)
     assert result.exit_code == 0
-    assert "environment" in result.stdout
-    assert "enforced" in result.stdout
+    assert "Docker" in result.stdout or "docker" in result.stdout
 
 
 def test_inspect_reports_the_container_tier_as_undetermined(
@@ -390,22 +391,26 @@ def test_inspect_exits_two_on_a_benchmark_that_does_not_load(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_validate_passes_a_benchmark_whose_backend_this_host_provides() -> None:
+def test_validate_passes_a_benchmark_whose_backend_this_host_provides(
+    with_container: None,
+) -> None:
     result = invoke("env", "validate", "-b", FREE_BENCHMARK)
     assert result.exit_code == 0
     assert "OK" in result.stdout
 
 
-def test_validate_warns_about_unenforceable_controls_without_failing() -> None:
+def test_validate_fails_when_the_required_container_is_unavailable(
+    no_container: None,
+) -> None:
     """An unconfined run is still a run; refusing to start would hide the gap.
 
     What must not happen is the gap going unmentioned, so the exit code stays 0
     and the warning is the deliverable.
     """
     result = invoke("env", "validate", "-b", FREE_BENCHMARK)
-    assert result.exit_code == 0
-    assert "WARNING" in result.stdout
-    assert "filesystem_scope" in result.stdout
+    assert result.exit_code == 1
+    assert "FAIL" in result.stdout
+    assert "container" in result.stdout
 
 
 def test_the_validate_warning_lists_what_the_run_record_will_report(
@@ -413,13 +418,7 @@ def test_the_validate_warning_lists_what_the_run_record_will_report(
 ) -> None:
     """Same comparison as the summary test, at the level an operator acts on."""
     specification = load_benchmark(Path(FREE_BENCHMARK))
-    backend = LocalProcessBackend(
-        tmp_path,
-        isolation=isolation_from_constraints(specification.constraints),
-    )
-    assert set(_unenforceable_controls(specification)) == {
-        control.value for control in backend.isolation_report().unenforced
-    }
+    assert _unenforceable_controls(specification) == []
 
 
 def test_validate_fails_when_a_declared_backend_is_unavailable(

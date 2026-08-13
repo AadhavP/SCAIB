@@ -534,6 +534,10 @@ class TaskSpecification(SpecificationModel):
     id: str
     name: str = Field(min_length=1)
     objective: str = Field(min_length=1)
+    #: Optional human-facing hand-off statement. Kept separate from the
+    #: objective so a brief can say what "done" looks like without prescribing
+    #: the method used to get there.
+    end_goal: str | None = Field(default=None, min_length=1)
     description: str = Field(min_length=1)
     datasets: list[str] = Field(default_factory=list)
     observations: list[str] = Field(default_factory=list)

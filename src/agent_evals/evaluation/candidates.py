@@ -20,6 +20,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from agent_evals.core.de_evidence import DE_TABLE_ARTIFACT
 from agent_evals.core.reference_columns import REFERENCE_LABEL_COLUMNS
+from agent_evals.datasets.redaction import (
+    LeakageSeverity,
+    detect_reference_leakage,
+    read_reference_store,
+)
 
 #: Placeholder written when SCAIB ran the workflow and the agent still left no
 #: prediction column behind. A row per cell is emitted so the metric engine sees
@@ -223,6 +228,10 @@ class MetricInputs:
     #: Why the reference was withheld, threaded onto the metric context so the
     #: exclusion is recorded against its real cause.
     reference_join_gap: str | None = None
+    #: Confirmed copying is a benchmark violation, not merely a low-quality
+    #: prediction. Persist the finding so an operator can audit why scoring was
+    #: withheld.
+    leakage_findings: tuple[dict[str, Any], ...] = ()
 
     @property
     def limitations(self) -> tuple[str, ...]:
@@ -240,6 +249,121 @@ class MetricInputs:
         result's own status.
         """
         return () if self.reference_join_gap is None else (self.reference_join_gap,)
+
+
+def build_workspace_metric_inputs(
+    artifacts: Mapping[str, Any],
+    reference_store_path: Path,
+    *,
+    prediction_artifact_id: str = "cell-labels",
+) -> MetricInputs:
+    """Join a free-execution prediction table to evaluator-held references.
+
+    Workspace execution has no in-memory ``AnnData`` for the evaluator to read
+    back. The primary artifact is therefore loaded, checked for a barcode-keyed
+    prediction table, aligned to the evaluator's reference store, and only then
+    handed to the metric engine. This keeps the free and typed tiers on the same
+    scoring contract without exposing reference values to the agent.
+    """
+    import pandas as pd
+
+    artifact = artifacts.get(prediction_artifact_id)
+    path = _artifact_path(artifact)
+    table = _read_table(path) if path is not None else None
+    if table is None:
+        return _unjoinable_workspace(
+            f"required workspace artifact '{prediction_artifact_id}' was not readable"
+        )
+    required = {"barcode", CANDIDATE_LABEL_FIELD}
+    missing = sorted(required - {str(column) for column in table.columns})
+    if missing:
+        return _unjoinable_workspace(
+            f"workspace prediction artifact is missing required column(s): {', '.join(missing)}"
+        )
+    barcodes = table["barcode"].astype(str)
+    if barcodes.empty:
+        return _unjoinable_workspace("workspace prediction artifact contains no rows")
+    if barcodes.duplicated().any():
+        return _unjoinable_workspace("workspace prediction artifact contains duplicate barcodes")
+    try:
+        reference = read_reference_store(reference_store_path)
+    except Exception as error:
+        return _unjoinable_workspace(
+            f"evaluator reference store could not be read ({type(error).__name__}: {error})"
+        )
+    aligned = reference.align(barcodes.tolist())
+    if aligned.unknown_barcodes:
+        return _unjoinable_workspace(
+            f"workspace prediction artifact contains {len(aligned.unknown_barcodes)} unknown barcode(s)"
+        )
+    if not aligned.barcodes:
+        return _unjoinable_workspace("workspace prediction artifact did not join to the reference")
+    label_column = next(
+        (column for column in REFERENCE_LABEL_COLUMNS if column in aligned.columns),
+        None,
+    )
+    if label_column is None:
+        return _unjoinable_workspace("reference store contains no supported annotation label column")
+    candidate_values = table[CANDIDATE_LABEL_FIELD].astype(str).tolist()
+    findings = detect_reference_leakage(
+        {CANDIDATE_LABEL_FIELD: candidate_values}, aligned
+    )
+    # Exact cell-for-cell copying is a hard violation. A partition match under a
+    # relabeling is strong evidence, but a genuinely correct scientific result
+    # can be indistinguishable from it, so retain it for audit without voiding
+    # the score automatically.
+    confirmed = [
+        finding for finding in findings if finding.severity is LeakageSeverity.CONFIRMED
+    ]
+    if confirmed:
+        return MetricInputs(
+            candidate_artifacts={},
+            reference_artifacts={},
+            prediction=None,
+            reference_join_gap=(
+                "confirmed reference-label copying was detected in the workspace "
+                "prediction; the run is invalid rather than scored"
+            ),
+            leakage_findings=tuple(
+                finding.model_dump(mode="json") for finding in confirmed
+            ),
+        )
+    prediction = pd.DataFrame(
+        {
+            "cell_id": aligned.barcodes,
+            CANDIDATE_LABEL_FIELD: candidate_values,
+        }
+    )
+    reference_frame = pd.DataFrame(
+        {REFERENCE_LABEL_FIELD: aligned.columns[label_column]}
+    )
+    return MetricInputs(
+        candidate_artifacts={"prediction": prediction},
+        reference_artifacts={"labels": reference_frame},
+        prediction=prediction,
+        leakage_findings=tuple(
+            finding.model_dump(mode="json") for finding in findings
+            if finding.severity is not LeakageSeverity.CONFIRMED
+        ),
+    )
+
+
+def _artifact_path(artifact: Any) -> Path | None:
+    """Resolve an artifact URI without making free execution trust its path."""
+    if artifact is None:
+        return None
+    from agent_evals.scientific.artifacts.validation import artifact_path
+
+    return artifact_path(getattr(artifact, "uri", None))
+
+
+def _unjoinable_workspace(reason: str) -> MetricInputs:
+    return MetricInputs(
+        candidate_artifacts={},
+        reference_artifacts={},
+        prediction=None,
+        reference_join_gap=reason,
+    )
 
 
 def build_metric_inputs(
@@ -301,5 +425,6 @@ __all__ = [
     "build_metric_inputs",
     "build_prediction_frame",
     "build_reference_artifacts",
+    "build_workspace_metric_inputs",
     "load_de_table",
 ]

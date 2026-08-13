@@ -1,5 +1,6 @@
 """Universal runtime protocol and manager tests."""
 
+import asyncio
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from agent_evals.agents.runtime import (
     AgentContext,
     AgentManifest,
     AgentObservation,
+    AgentPlan,
     AgentRuntime,
     AgentRuntimeManager,
     AgentSession,
@@ -29,6 +31,7 @@ from agent_evals.agents.runtime import (
 from agent_evals.agents.tools import ToolDefinition, ToolExecutor, ToolRegistry
 from agent_evals.agents.trajectory import AgentConfiguration
 from agent_evals.benchmarks.io import load_benchmark
+from agent_evals.benchmarks.schema import CutoffSpecification
 from agent_evals.environment.runtime import ScientificEnvironment
 
 SPECIFICATION = load_benchmark(Path(__file__).parents[2] / "examples" / "benchmarks" / "pbmc-cell-annotation.yaml")
@@ -100,6 +103,14 @@ class CompleteRuntime(FakeRuntime):
     workflow = COMPLETE_WORKFLOW
 
 
+class SlowRuntime(CompleteRuntime):
+    """Runtime whose provider call must be stopped by the run wall clock."""
+
+    async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
+        await asyncio.sleep(0.2)
+        return await super().act(session, observation)
+
+
 @pytest.mark.asyncio
 async def test_runtime_manager_normalizes_actions_and_captures_full_trajectory() -> None:
     context = AgentContext(benchmark_id="pbmc-cell-annotation", task_id="cell-annotation", workspace=".")
@@ -117,6 +128,90 @@ async def test_runtime_manager_normalizes_actions_and_captures_full_trajectory()
     ]
     assert any(event.event_type.value == "environment_response" for event in result.trajectory.events)
     assert result.final_submission is not None
+    assert result.final_snapshot.state.actions[0].intent.parameters["method"] == "fixed_threshold"
+
+
+@pytest.mark.asyncio
+async def test_runtime_wall_clock_bounds_a_slow_provider_call() -> None:
+    specification = SPECIFICATION.model_copy(
+        update={"cutoff": CutoffSpecification(max_wall_time_seconds=0.05, max_steps=20)}
+    )
+    environment = ScientificEnvironment(
+        specification,
+        task_id="cell-annotation",
+        executor=MockActionExecutor(),
+        observation_builder=MockObservationBuilder(),
+    )
+    context = AgentContext(
+        benchmark_id="pbmc-cell-annotation", task_id="cell-annotation", workspace="."
+    )
+
+    result = await AgentRuntimeManager().run(
+        SlowRuntime(), environment, context, seed=3
+    )
+
+    assert result.termination_status == "timeout"
+    assert result.termination_reason is not None
+    assert "action" in result.termination_reason
+
+
+@pytest.mark.asyncio
+async def test_runtime_receives_task_package_and_revised_plan_is_recorded() -> None:
+    class RevisingRuntime(CompleteRuntime):
+        async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
+            del observation
+            index = int(session.state.get("index", 0))
+            session.state["index"] = index + 1
+            action_type, parameters = self.workflow[index]
+            return AgentAction(
+                action_type=action_type,
+                parameters=dict(parameters),
+                plan_update=(
+                    AgentPlan(
+                        goal="Adapt after QC evidence",
+                        steps=["Inspect QC result", "Continue with the least destructive valid path"],
+                        success_criteria=["Required artifacts validate"],
+                        adaptation_policy="Revise after each result",
+                    )
+                    if index == 1
+                    else None
+                ),
+            )
+
+    context = AgentContext(benchmark_id="pbmc-cell-annotation", task_id="cell-annotation", workspace=".")
+    result = await AgentRuntimeManager().run(
+        RevisingRuntime(),
+        make_environment(),
+        context,
+        seed=3,
+    )
+
+    assert result.termination_status == "completed"
+    assert any(event.event_type.value == "plan" and event.payload.get("goal") == "Adapt after QC evidence" for event in result.trajectory.events)
+    opening = result.trajectory.observations[0]
+    assert opening.metadata["task_package"]["actions"]
+    assert opening.metadata["task_package"]["interaction_protocol"]["replanning"]
+
+
+def test_evaluator_rewards_are_not_in_agent_visible_state() -> None:
+    from agent_evals.environment.models import (
+        EpisodeState,
+        RewardRecord,
+        agent_visible_state,
+    )
+
+    state = EpisodeState(
+        episode_id="e1",
+        benchmark_id="b",
+        benchmark_version="1.0.0",
+        task_id="t",
+        seed=0,
+        specification_digest="digest",
+        rewards=[RewardRecord(value=0.9, metric_values={"held_out_score": 0.9}, step=1)],
+    )
+
+    visible = agent_visible_state(state)
+    assert visible.rewards == []
 
 
 @pytest.mark.asyncio

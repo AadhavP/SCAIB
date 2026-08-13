@@ -261,10 +261,34 @@ class ScientificObservationBuilder:
 
     @staticmethod
     def _quality_metrics(obs: Any) -> dict[str, Any]:
-        """Extract QC summaries while tolerating missing metadata columns."""
+        """Extract diagnostic QC summaries while tolerating raw inputs.
+
+        A median alone is not enough for a scientist to choose a threshold. The
+        agent now receives compact distribution summaries (not per-cell answer
+        data), so it can distinguish a long tail, a bimodal population, and a
+        uniformly poor input before committing to an irreversible filter.
+        """
+        import numpy as np
+
         counts = obs.get("total_counts", obs.get("n_counts"))
         genes = obs.get("n_genes_by_counts", obs.get("n_genes"))
         pct_mt = obs.get("pct_counts_mt", obs.get("percent_mito"))
+        def summary(values: Any) -> dict[str, float] | None:
+            if values is None:
+                return None
+            numeric = np.asarray(values, dtype=float)
+            if numeric.size == 0:
+                return None
+            return {
+                "min": float(np.nanmin(numeric)),
+                "q01": float(np.nanquantile(numeric, 0.01)),
+                "q05": float(np.nanquantile(numeric, 0.05)),
+                "median": float(np.nanmedian(numeric)),
+                "q95": float(np.nanquantile(numeric, 0.95)),
+                "q99": float(np.nanquantile(numeric, 0.99)),
+                "max": float(np.nanmax(numeric)),
+            }
+
         if pct_mt is not None:
             values = pct_mt.astype(float)
             mean_pct_mt = float(values.mean() * (100 if float(values.mean()) <= 1 else 1))
@@ -277,6 +301,18 @@ class ScientificObservationBuilder:
             "median_genes": float(genes.median()) if genes is not None else None,
             "mean_pct_mt": mean_pct_mt,
             "low_quality_fraction": low_quality_fraction,
+            "counts_distribution": summary(counts),
+            "detected_genes_distribution": summary(genes),
+            "mitochondrial_distribution": summary(
+                pct_mt.astype(float) * (100 if pct_mt is not None and float(pct_mt.mean()) <= 1 else 1)
+                if pct_mt is not None
+                else None
+            ),
+            "inspection_guidance": [
+                "Compare lower and upper tails before selecting fixed thresholds.",
+                "Record whether thresholds are explicit, data-adaptive, or robust-outlier based.",
+                "Check cell retention and gene retention after QC before continuing downstream.",
+            ],
         }
 
     @staticmethod

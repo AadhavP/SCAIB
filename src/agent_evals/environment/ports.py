@@ -210,6 +210,28 @@ class DeclarativeActionValidator:
         return ActionValidationResult(valid=not errors, errors=errors)
 
     @staticmethod
+    def apply_defaults(
+        intent: ActionIntent,
+        specification: BenchmarkSpecification,
+    ) -> ActionIntent:
+        """Materialize declared parameter defaults before execution.
+
+        Defaults used to be documentation only: validation accepted an omitted
+        value, but the executor saw its own unrelated fallback. That makes a
+        benchmark's advertised method/threshold contract different from the
+        experiment that actually ran. Materializing them once at the boundary
+        keeps the submitted intent, execution, and trajectory aligned.
+        """
+        action = next((item for item in specification.actions if item.id == intent.action_id), None)
+        if action is None:
+            return intent
+        parameters = dict(intent.parameters)
+        for parameter in action.parameters:
+            if parameter.name not in parameters and parameter.default is not None:
+                parameters[parameter.name] = parameter.default
+        return intent.model_copy(update={"parameters": parameters})
+
+    @staticmethod
     def _validate_inputs(
         action: ActionSpecification,
         snapshot: EpisodeSnapshot,

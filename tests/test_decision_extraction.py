@@ -533,11 +533,13 @@ def test_free_execution_example_declares_a_workspace_and_no_fixed_outputs() -> N
     assert action.kind is ActionKind.FREE_EXECUTION
     assert action.expected_outputs == []
     assert EXECUTION_PARAMETERS <= {parameter.name for parameter in action.parameters}
-    assert environment.backend is EnvironmentBackend.LOCAL
-    assert environment.languages == ["python", "shell"]
-    # Artifacts stay optional: a required one would dictate the pipeline shape
-    # this benchmark exists to leave open.
-    assert not any(artifact.required for artifact in FREE_SPECIFICATION.artifacts)
+    assert environment.backend is EnvironmentBackend.CONTAINER
+    assert environment.image
+    assert environment.languages == ["python", "bash"]
+    # The primary deliverable is required; intermediate artifacts remain optional
+    # so the benchmark leaves the workflow shape open.
+    assert any(artifact.id == "cell-labels" and artifact.required for artifact in FREE_SPECIFICATION.artifacts)
+    assert all(artifact.required is False for artifact in FREE_SPECIFICATION.artifacts if artifact.id != "cell-labels")
 
 
 def test_free_execution_action_may_not_declare_fixed_expected_outputs() -> None:

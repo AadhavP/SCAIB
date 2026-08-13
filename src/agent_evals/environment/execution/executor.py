@@ -28,7 +28,9 @@ left half-written files behind, and that is evidence, not noise.
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -73,6 +75,15 @@ from agent_evals.environment.ports import ExecutionContext
 #: whole episode. A single command may not consume the entire episode budget,
 #: or one runaway step leaves the agent no chance to recover from it.
 _COMMAND_TIMEOUT_FRACTION = 0.5
+
+_IMPORT_NAME_ALIASES = {
+    "scikit-learn": "sklearn",
+    "scikit-image": "skimage",
+    "beautifulsoup4": "bs4",
+    "pillow": "PIL",
+    "opencv-python": "cv2",
+    "umap-learn": "umap",
+}
 
 #: Ids of the observations one execution emits. Named constants because
 #: :mod:`agent_evals.environment.execution.observations` reads the first three
@@ -199,6 +210,43 @@ def _checksum(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _validate_python_imports(
+    source: str, allowed_packages: frozenset[str] | None
+) -> None:
+    """Reject static imports outside the benchmark's declared package set.
+
+    This is a contract check, not a security boundary: dynamic imports remain
+    possible and are contained by the benchmark's execution backend. Keeping
+    the check at request construction gives the agent an immediate, actionable
+    error and prevents a benchmark's dependency declaration from becoming
+    decorative metadata.
+    """
+    if not allowed_packages:
+        return
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return
+    allowed_imports = {
+        _IMPORT_NAME_ALIASES.get(package, package).split(".", 1)[0]
+        for package in allowed_packages
+    }
+    allowed_imports.update(sys.stdlib_module_names)
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(alias.name.split(".", 1)[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.add(node.module.split(".", 1)[0])
+    disallowed = sorted(name for name in imports if name not in allowed_imports)
+    if disallowed:
+        declared = ", ".join(sorted(allowed_packages))
+        raise WorkspaceExecutionError(
+            "Python import(s) are outside the benchmark package allowlist: "
+            f"{', '.join(disallowed)}; declared packages: {declared}"
+        )
+
+
 def observed_delta(
     *,
     files_before: WorkspaceFingerprint | None,
@@ -244,6 +292,7 @@ class WorkspaceActionExecutor:
         *,
         max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES,
         dataset_observer: DatasetObserver | None = None,
+        allowed_python_packages: list[str] | tuple[str, ...] | None = None,
     ) -> None:
         self.backend = backend
         self.max_output_bytes = max_output_bytes
@@ -251,6 +300,11 @@ class WorkspaceActionExecutor:
         #: figures has no dataset to watch. When absent the delta reports the
         #: dataset as unobserved rather than as unchanged.
         self.dataset_observer = dataset_observer
+        self.allowed_python_packages = (
+            None
+            if allowed_python_packages is None
+            else frozenset(str(package) for package in allowed_python_packages)
+        )
 
     async def execute(
         self,
@@ -308,10 +362,13 @@ class WorkspaceActionExecutor:
                 f"action '{intent.action_id}' requires a non-empty "
                 f"'{CODE_PARAMETER}' parameter holding the source to run"
             )
+        language = _resolve_language(intent)
+        if language is Language.PYTHON:
+            _validate_python_imports(source, self.allowed_python_packages)
         constraints = context.constraints
         return CommandRequest(
             command=source,
-            language=_resolve_language(intent),
+            language=language,
             timeout_seconds=command_timeout(constraints),
             env=deterministic_environment(constraints),
             max_output_bytes=self.max_output_bytes,

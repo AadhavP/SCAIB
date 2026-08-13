@@ -58,7 +58,7 @@ def default_decision_ontology() -> DecisionOntology:
     ontology = DecisionOntology()
     definitions = {
         DecisionCategory.QC_STRATEGY: (
-            ["mitochondrial_filter", "adaptive_filter", "scrublet", "emptyDrops"],
+            ["fixed_threshold", "mitochondrial_filter", "adaptive_quantile", "mad_outlier"],
             ["current-anndata", "qc-statistics"],
             # Spelled to match ``LocalRewardEvaluator._WEIGHTS`` and the benchmark
             # YAML, which both say ``rare_population_preservation``. This field
@@ -66,7 +66,7 @@ def default_decision_ontology() -> DecisionOntology:
             ["artifact_removal", "biological_retention", "rare_population_preservation"],
         ),
         DecisionCategory.NORMALIZATION: (
-            ["normalize", "log_normalize", "scran"],
+            ["library_size_log1p", "median_counts_log1p"],
             ["current-anndata", "qc-statistics"],
             ["library_size_stability", "downstream_separation"],
         ),
@@ -81,7 +81,7 @@ def default_decision_ontology() -> DecisionOntology:
             ["ari", "rare_cell_recovery", "stability"],
         ),
         DecisionCategory.ANNOTATION: (
-            ["marker_based", "reference_mapping", "supervised_classifier"],
+            ["marker_based"],
             ["normalized-anndata", "marker-table"],
             ["macro_f1", "rare_recall", "calibration"],
         ),

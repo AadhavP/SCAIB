@@ -17,6 +17,7 @@ the implementation could look finished while being wrong:
 from __future__ import annotations
 
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +41,7 @@ from agent_evals.environment.execution.container import (
     build_exec_argv,
     build_run_argv,
     docker_available,
+    docker_runtime_available,
 )
 from agent_evals.environment.execution.executor import (
     WorkspaceActionExecutor,
@@ -81,7 +83,26 @@ from agent_evals.environment.ports import ActionExecutor, ExecutionContext
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
-HAS_BASH = shutil.which("bash") is not None
+
+
+def usable_bash() -> bool:
+    """Whether the host's ``bash`` launcher can actually execute a command."""
+    if shutil.which("bash") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["bash", "-c", "exit 0"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+HAS_BASH = usable_bash()
 
 
 def make_context(**constraints: object) -> ExecutionContext:
@@ -602,6 +623,43 @@ async def test_shell_source_also_runs_from_standard_input(tmp_path: Path) -> Non
     assert (tmp_path / "from-shell.txt").exists()
 
 
+async def test_python_imports_are_checked_against_the_declared_package_allowlist(
+    tmp_path: Path,
+) -> None:
+    executor = WorkspaceActionExecutor(
+        await started_backend(tmp_path),
+        allowed_python_packages=["numpy"],
+    )
+    result = await executor.execute(
+        ActionIntent(
+            action_id="analyze",
+            parameters={"code": "import pandas\nprint('no')"},
+        ),
+        make_context(),
+    )
+
+    assert result.status is ActionStatus.FAILED
+    assert "outside the benchmark package allowlist" in (result.error or "")
+
+
+async def test_stdlib_and_declared_imports_remain_available(
+    tmp_path: Path,
+) -> None:
+    executor = WorkspaceActionExecutor(
+        await started_backend(tmp_path),
+        allowed_python_packages=["scikit-learn"],
+    )
+    result = await executor.execute(
+        ActionIntent(
+            action_id="analyze",
+            parameters={"code": "import json\nfrom sklearn import metrics"},
+        ),
+        make_context(),
+    )
+
+    assert result.status is ActionStatus.SUCCEEDED
+
+
 async def test_a_memory_error_under_a_limit_is_classified_as_oom(
     tmp_path: Path,
 ) -> None:
@@ -1085,7 +1143,10 @@ def test_docker_availability_is_probed_rather_than_assumed() -> None:
     assert isinstance(docker_available(), bool)
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is not installed")
+@pytest.mark.skipif(
+    not docker_runtime_available(image="python:3.12-slim"),
+    reason="Docker daemon or test image is unavailable",
+)
 @pytest.mark.skipif(sys.platform == "win32", reason="needs a Linux container host")
 async def test_a_real_container_runs_code_and_enforces_its_network_denial(
     tmp_path: Path,

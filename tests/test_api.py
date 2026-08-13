@@ -47,6 +47,10 @@ def test_api_returns_benchmark_metadata() -> None:
     assert data["id"] == "pbmc-cell-annotation"
     assert data["tasks"]
     assert data["actions"]
+    task = data["tasks"][0]
+    assert task["end_goal"]
+    assert task["required_artifacts"]
+    assert task["stopping_criteria"][0]["condition"]
 
 
 def test_api_job_manager_tracks_successful_result(monkeypatch: pytest.MonkeyPatch) -> None:

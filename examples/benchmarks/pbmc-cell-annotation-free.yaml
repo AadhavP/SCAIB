@@ -58,24 +58,25 @@ datasets:
     recommended_tasks: [cell-annotation-free]
 environments:
   - id: local-python
-    name: Local Python workspace
+    name: Containerized Python workspace
     description: >-
-      A writable working directory with the sanitized dataset under `inputs/`.
-      Source is passed to the interpreter on stdin and runs with the working
-      directory pinned to the workspace root; anything written outside it is not
-      accounted for. scanpy, anndata, numpy, pandas, scipy and scikit-learn are
-      importable. This environment is declared offline: do not rely on network
-      access. stdout, stderr and the exit status of every execution are returned
-      so failures can be debugged and retried.
-    # "declared offline" rather than "the network is unavailable", because the
-    # local tier cannot actually deny a subprocess the network -- `agent-evals
-    # env inspect` reports that control as unenforceable on every host. Stating
-    # the enforcement as a fact would make the benchmark's own documentation the
-    # dishonest claim the isolation report exists to prevent, and would let a
-    # leakage attempt via an external fetch look like a harness fault rather
-    # than a violation.
-    backend: local
-    languages: [python, shell]
+      A writable working directory with the sanitized dataset under `inputs/`,
+      executed inside the declared Docker image. Source is passed to the
+      interpreter on stdin with the working directory pinned to the workspace
+      root; anything written outside it is not part of the candidate workspace.
+      scanpy, anndata, numpy, pandas, scipy and scikit-learn are importable.
+      This environment is offline by contract: do not rely on network access.
+      stdout, stderr and the exit status of every execution are returned so
+      failures can be diagnosed and retried.
+    # Free execution is scored only inside a container. A local subprocess can
+    # read the evaluator's withheld reference store and reach the network, which
+    # would make a high score ambiguous between scientific work and leakage.
+    backend: container
+    # Reuse the scientific runtime image built by the repository Dockerfile.
+    # Keeping the image name tied to the documented build avoids a free tier
+    # that references an image no local setup can produce.
+    image: agent-evals:latest
+    languages: [python, bash]
 observations:
   - id: workspace-tree
     name: Workspace tree
@@ -119,7 +120,7 @@ actions:
         type: string
         required: false
         default: python
-        choices: [python, shell]
+        choices: [python, bash]
       - name: produces
         description: >-
           Artifact contract for this invocation, as a list of workspace-relative
@@ -258,16 +259,15 @@ rewards:
       - {metric: runtime, weight: -0.10, transform: normalized_penalty}
     aggregation: weighted_sum
 artifacts:
-  # All optional: which files exist depends on the workflow the agent chose, and
-  # a required artifact would let the benchmark dictate the pipeline shape it is
-  # supposed to be measuring. Per-invocation enforcement happens through the
-  # action's 'produces' parameter instead.
+  # The primary deliverable is required. Supporting files remain optional so
+  # the benchmark evaluates the agent's workflow rather than forcing a fixed
+  # sequence of intermediate methods.
   - id: cell-labels
     name: Cell-type label table
     description: One cell-type label per retained cell, keyed by cell barcode.
     kind: table
     format: csv
-    required: false
+    required: true
     produced_by: [analyze]
     validation:
       # 'predicted_label', not 'cell_type': the latter is a reserved reference
@@ -334,11 +334,14 @@ tasks:
   - id: cell-annotation-free
     name: PBMC cell-type annotation with an agent-authored workflow
     objective: Recover biologically meaningful cell types from PBMC expression profiles.
+    end_goal: Produce a per-cell label table for the retained cells that is reproducible, biologically defensible, and supported by the evidence the workflow generates.
     description: >-
       Starting from the sanitized PBMC expression matrix in the workspace, design
       and implement an annotation workflow and write a per-cell label table keyed
       by cell barcode. The workflow, its methods, and its parameters are yours to
-      choose; declare each step's outputs so they can be verified.
+      choose; declare each step's outputs so they can be verified. Diagnose weak
+      evidence, unexpected results, and confounding factors from the observations
+      as they arise rather than relying on a predefined failure-mode checklist.
     datasets: [pbmc68k]
     environment: local-python
     observations: [workspace-tree, dataset-summary, execution-output, pipeline-history]

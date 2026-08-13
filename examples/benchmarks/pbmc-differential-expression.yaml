@@ -79,6 +79,7 @@ tasks:
   - id: differential-expression
     name: Characterize cell populations by differential expression
     objective: Resolve the cell populations present and identify the genes that distinguish each one, with calibrated statistical evidence.
+    end_goal: Produce a reproducible, ranked differential-expression result and report that make the declared population contrasts scientifically defensible.
     description: Use only the visible data to resolve populations, then produce a ranked, validated differential-expression table and report over the populations you defined.
     datasets: [pbmc68k-de]
     observations: [current-anndata, comparison-definition, pipeline-history]

@@ -34,7 +34,11 @@ pytest.importorskip("anndata")
 import anndata
 
 from agent_evals.benchmarks.io import load_benchmark
-from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
+from agent_evals.benchmarks.schema import (
+    BenchmarkSpecification,
+    EnvironmentBackend,
+    TaskSpecification,
+)
 from agent_evals.datasets.preflight import (
     DatasetContractError,
     describe_readiness,
@@ -43,6 +47,7 @@ from agent_evals.datasets.preflight import (
 from agent_evals.environment.execution import (
     ActionKindRouter,
     WorkspaceObservationBuilder,
+    docker_runtime_available,
 )
 from agent_evals.environment.models import ActionIntent
 from agent_evals.environment.ports import (
@@ -147,11 +152,17 @@ async def _environment(
         workspace=run_root,
     )
     selected = select_environment(specification, task)
+    if (
+        selected is not None
+        and selected.backend is EnvironmentBackend.CONTAINER
+        and not docker_runtime_available(image=selected.image)
+    ):
+        pytest.skip("declared container backend or image is unavailable")
     provisioned = (
         None
         if selected is None
         else await provision_environment(
-            specification, selected, adata, run_root=run_root
+            specification, selected, adata, run_root=run_root, task=task
         )
     )
     return _Provisioned(

@@ -101,8 +101,11 @@ class CompleteScientificRuntime(FakeScientificRuntime):
             (
                 "annotate",
                 {
-                    "label_vocabulary": sorted(FAKE_MARKERS),
-                    "markers": FAKE_MARKERS,
+                    # Keep this fixture's output contract valid on every reduced
+                    # PBMC slice: the scientific choice under test is the
+                    # universal-runtime bridge, not marker quality.
+                    "label_vocabulary": ["unassigned"],
+                    "markers": {"unassigned": ["MS4A1"]},
                 },
             ),
             ("finish", {}),
@@ -177,6 +180,34 @@ async def test_action_mapper_accepts_valid_and_rejects_invalid_decisions(tmp_pat
             environment.task,
             snapshot,
         )
+
+
+@pytest.mark.asyncio
+async def test_action_mapper_resolves_granular_qc_method_inside_qc_action(tmp_path: Path) -> None:
+    environment = await _environment(tmp_path)
+    snapshot = await environment.reset(seed=0, dataset_id="pbmc68k")
+    mapper = ScientificActionMapper(DeclarativeActionValidator())
+    decision = ScientificDecision(
+        decision_id="decision-adaptive-qc",
+        episode_id=snapshot.state.episode_id,
+        step_id="step-1",
+        order=0,
+        decision_type="method_selection",
+        action_category="quality_control",
+        method="adaptive_quantile",
+        parameters={"min_genes_quantile": 0.1, "max_mito_quantile": 0.9},
+        timestamp=snapshot.state.created_at,
+    )
+
+    intent = mapper.to_action_intent(
+        decision,
+        environment.specification,
+        environment.task,
+        snapshot,
+    )
+
+    assert intent.action_id == "qc"
+    assert intent.parameters["method"] == "adaptive_quantile"
 
 
 @pytest.mark.asyncio
@@ -263,6 +294,8 @@ async def test_annotation_score_requires_an_agent_produced_prediction(
         max_steps=4,
     )
 
-    # The PBMC object ships `bulk_labels` and `louvain`; neither may produce a score.
-    assert run.global_reward.value is None
-    assert run.global_reward.status == "unavailable"
+    # The PBMC object ships `bulk_labels` and `louvain`; neither may produce a
+    # prediction. Missing typed candidate inputs are therefore charged at the
+    # metric failure score rather than treated as an unmeasured free-tier join.
+    assert run.global_reward.value == 0.0
+    assert run.global_reward.status == "succeeded"

@@ -1,5 +1,6 @@
 """Benchmark execution abstractions and the declarative specification language."""
 
+from agent_evals.benchmarks.agent_package import build_agent_task_package
 from agent_evals.benchmarks.base import BaseBenchmark
 from agent_evals.benchmarks.io import (
     benchmark_from_dict,
@@ -60,6 +61,7 @@ __all__ = [
     "benchmark_from_dict",
     "benchmark_registry",
     "benchmark_spec_registry",
+    "build_agent_task_package",
     "dump_benchmark",
     "load_benchmark",
     "schema_migrations",

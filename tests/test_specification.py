@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from agent_evals.benchmarks.agent_package import build_agent_task_package
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.registry import BenchmarkSpecificationRegistry
 from agent_evals.benchmarks.schema import (
@@ -12,6 +13,8 @@ from agent_evals.benchmarks.schema import (
     BenchmarkSpecification,
     TaskSpecification,
 )
+from agent_evals.environment.models import ActionIntent
+from agent_evals.environment.ports import DeclarativeActionValidator
 
 EXAMPLES = Path(__file__).parents[1] / "examples" / "benchmarks"
 
@@ -91,4 +94,38 @@ def test_json_semantics_round_trip(tmp_path: Path) -> None:
     output = tmp_path / "annotation.json"
     dump_benchmark(specification, output)
     assert load_benchmark(output).model_dump() == specification.model_dump()
+
+
+def test_agent_task_package_contains_executable_scientific_contract() -> None:
+    """The opening brief must remove contract guessing from the agent loop."""
+    specification = load_benchmark(EXAMPLES / "pbmc-cell-annotation.yaml")
+    package = build_agent_task_package(specification, specification.tasks[0])
+
+    assert package["task"]["objective"]
+    qc = next(action for action in package["actions"] if action["id"] == "qc")
+    assert {parameter["name"] for parameter in qc["parameters"]} >= {
+        "method",
+        "min_genes",
+        "max_mito_fraction",
+        "min_cells",
+    }
+    assert "adaptive_quantile" in next(
+        parameter["choices"]
+        for parameter in qc["parameters"]
+        if parameter["name"] == "method"
+    )
+    assert package["artifacts"]
+    assert package["interaction_protocol"]["failure_recovery"]
+
+
+def test_declared_defaults_are_materialized_at_the_environment_boundary() -> None:
+    specification = load_benchmark(EXAMPLES / "pbmc-cell-annotation.yaml")
+    intent = DeclarativeActionValidator.apply_defaults(
+        ActionIntent(action_id="qc"),
+        specification,
+    )
+
+    assert intent.parameters["method"] == "fixed_threshold"
+    assert intent.parameters["min_genes"] == 200
+    assert intent.parameters["max_mito_fraction"] == 0.2
 

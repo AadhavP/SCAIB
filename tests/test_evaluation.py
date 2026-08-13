@@ -34,7 +34,9 @@ def make_environment() -> ScientificEnvironment:
     return ScientificEnvironment(
         SPECIFICATION,
         task_id="batch-correction",
-        executor=MockActionExecutor(),
+        # This evaluator fixture intentionally produces records without files;
+        # artifact validity must therefore remain unearned.
+        executor=MockActionExecutor(validated_artifacts=False),
         observation_builder=MockObservationBuilder(),
     )
 

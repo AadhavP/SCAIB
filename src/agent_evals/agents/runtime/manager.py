@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
@@ -21,6 +22,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentContext,
     AgentObservation,
     AgentPlan,
+    AgentSession,
     FinalSubmission,
 )
 from agent_evals.agents.tools import ToolExecutor
@@ -30,6 +32,7 @@ from agent_evals.agents.tools import ToolExecutor
 # dependencies, and the status tables below have to be module-level constants to
 # read as the mapping they are.
 from agent_evals.agents.trajectory import FailureKind, RunTerminationStatus
+from agent_evals.benchmarks.agent_package import build_agent_task_package
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
 from agent_evals.core.progress_keys import PROGRESS_DELTA_KEY
 from agent_evals.environment.cutoff import (
@@ -76,6 +79,10 @@ class RuntimeVerdict(StrEnum):
     #: argument that put ``ExecutionStatus`` beside ``ActionStatus`` instead of
     #: widening it.
     STAGNATED = "stagnated"
+
+
+class _RuntimeWallTimeout(TimeoutError):
+    """A provider call exceeded the run's declared wall-clock budget."""
 
 
 class RuntimeRun(BaseModel):
@@ -141,6 +148,18 @@ class AgentRuntimeManager:
     ) -> RuntimeRun:
         """Run a universal runtime while preserving partial trajectories."""
         started_at = datetime.now(UTC)
+        # Make the public scientific brief available from initialization onward,
+        # not only after the first environment observation. This gives every
+        # runtime the same contract and lets a custom agent inspect it before it
+        # implements its first call.
+        context = context.model_copy(
+            update={
+                "task_package": build_agent_task_package(
+                    environment.specification,
+                    environment.task,
+                )
+            }
+        )
         # Built here rather than accepted as a parameter so every existing call
         # site -- including ``RuntimeAgentAdapter``, which constructs this manager
         # itself -- gets controller-owned stopping without being changed.
@@ -177,7 +196,28 @@ class AgentRuntimeManager:
         )
         trajectory.observations.append(observation)
         trajectory.record(AgentEventType.OBSERVATION, observation.model_dump(mode="json"))
-        session = await runtime.initialize(context)
+        try:
+            session = await _await_with_wall_budget(
+                runtime.initialize(context), controller, run_origin, "initialization"
+            )
+        except _RuntimeWallTimeout as error:
+            trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
+            environment.terminate(status=EpisodeStatus.FAILED, reason=str(error))
+            final_snapshot = await environment.observe()
+            return RuntimeRun(
+                agent_id=runtime.agent_id,
+                benchmark_id=final_snapshot.state.benchmark_id,
+                task_id=final_snapshot.state.task_id,
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                termination_status=RuntimeVerdict.TIMEOUT,
+                termination_reason=str(error),
+                step_count=0,
+                trajectory=trajectory,
+                final_submission=None,
+                final_snapshot=final_snapshot,
+                cutoff=controller.report(),
+            )
         await self._emit(
             {
                 "type": "agent_planning",
@@ -185,9 +225,16 @@ class AgentRuntimeManager:
                 "message": "Asking the agent for an overall scientific plan.",
             }
         )
+        plan_timeout: _RuntimeWallTimeout | None = None
         try:
-            plan = await runtime.plan(context, observation)
+            plan = await _await_with_wall_budget(
+                runtime.plan(context, observation), controller, run_origin, "planning"
+            )
             plan_source = "agent"
+        except _RuntimeWallTimeout as error:
+            plan = None
+            plan_source = f"timeout: {error}"
+            plan_timeout = error
         except Exception as error:
             plan = None
             plan_source = f"benchmark_fallback: {type(error).__name__}"
@@ -203,6 +250,11 @@ class AgentRuntimeManager:
                 success_criteria=[
                     str(item.get("description", item.get("condition", "")))
                     for item in metadata.get("scenario", {}).get("success_criteria", [])
+                    if isinstance(item, dict)
+                ],
+                stopping_criteria=[
+                    str(item.get("description", item.get("condition", "")))
+                    for item in metadata.get("scenario", {}).get("stopping_criteria", [])
                     if isinstance(item, dict)
                 ],
                 adaptation_policy="After every result, keep, revise, or end the plan based on the new evidence.",
@@ -231,12 +283,14 @@ class AgentRuntimeManager:
             }
         )
         trajectory.record(AgentEventType.PLAN, plan.model_dump(mode="json"))
-        status = RuntimeVerdict.COMPLETED
-        reason = "agent runtime completed"
+        status = RuntimeVerdict.TIMEOUT if plan_timeout is not None else RuntimeVerdict.COMPLETED
+        reason = str(plan_timeout) if plan_timeout is not None else "agent runtime completed"
         submission: FinalSubmission | None = None
         steps = 0
         try:
             while True:
+                if status is RuntimeVerdict.TIMEOUT:
+                    break
                 cutoff = controller.decide(elapsed_seconds=monotonic() - run_origin)
                 if cutoff.stop:
                     termination = cutoff_termination(cutoff, environment)
@@ -272,7 +326,21 @@ class AgentRuntimeManager:
                         "message": "Waiting for the agent to return its next action.",
                     }
                 )
-                raw_action = await runtime.act(session, observation)
+                try:
+                    raw_action = await _await_with_wall_budget(
+                        runtime.act(session, observation),
+                        controller,
+                        run_origin,
+                        "action",
+                    )
+                except _RuntimeWallTimeout as error:
+                    status = RuntimeVerdict.TIMEOUT
+                    reason = str(error)
+                    trajectory.record(AgentEventType.FAILURE, {"error": reason})
+                    await self._emit(
+                        {"type": "run_cutoff", "step": steps, "message": reason}
+                    )
+                    break
                 action = AgentAction.model_validate(raw_action)
                 await self._emit(
                     {
@@ -293,6 +361,26 @@ class AgentRuntimeManager:
                     AgentEventType.ACTION,
                     action.model_dump(mode="json"),
                 )
+                if action.plan_update is not None:
+                    # A plan is an observable working hypothesis, not private
+                    # chain-of-thought. Persist revisions so the trajectory can
+                    # distinguish a scientist adapting to evidence from one
+                    # repeating an obsolete opening plan.
+                    plan = action.plan_update
+                    session.state["plan"] = plan.model_dump(mode="json")
+                    trajectory.record(
+                        AgentEventType.PLAN,
+                        plan.model_dump(mode="json"),
+                        parent_event_id=action_event.event_id,
+                    )
+                    await self._emit(
+                        {
+                            "type": "agent_plan_revision",
+                            "step": current_step,
+                            "message": "Agent revised the working scientific plan.",
+                            "plan": plan.model_dump(mode="json"),
+                        }
+                    )
                 if action.reasoning_metadata.get("summary"):
                     trajectory.record(
                         AgentEventType.REASONING_SUMMARY,
@@ -306,10 +394,15 @@ class AgentRuntimeManager:
                         parent_event_id=action_event.event_id,
                     )
                     try:
-                        tool_result = await self.tool_executor.execute(
-                            action.action_type,
-                            action.parameters,
-                            context=session,
+                        tool_result = await _await_with_wall_budget(
+                            self.tool_executor.execute(
+                                action.action_type,
+                                action.parameters,
+                                context=session,
+                            ),
+                            controller,
+                            run_origin,
+                            "tool call",
                         )
                         trajectory.record(
                             AgentEventType.TOOL_RESULT,
@@ -330,6 +423,18 @@ class AgentRuntimeManager:
                                 StepObservation(step=steps, succeeded=True)
                             )
                             continue
+                    except _RuntimeWallTimeout as error:
+                        status = RuntimeVerdict.TIMEOUT
+                        reason = str(error)
+                        trajectory.record(
+                            AgentEventType.FAILURE,
+                            {"tool": action.action_type, "error": reason},
+                            parent_event_id=action_event.event_id,
+                        )
+                        await self._emit(
+                            {"type": "run_cutoff", "step": steps, "message": reason}
+                        )
+                        break
                     except Exception as error:
                         trajectory.record(
                             AgentEventType.FAILURE,
@@ -346,7 +451,7 @@ class AgentRuntimeManager:
                     # Accepting it unverified lets an agent score "completed" by
                     # finishing immediately without producing any artifact.
                     missing = _missing_required_artifacts(environment)
-                    submission = await runtime.terminate(session, observation)
+                    submission = await _terminate_with_grace(runtime, session, observation)
                     trajectory.final_submission = submission
                     trajectory.record(
                         AgentEventType.FINAL_SUBMISSION,
@@ -419,7 +524,7 @@ class AgentRuntimeManager:
                     parent_event_id=action_event.event_id,
                 )
             if submission is None:
-                submission = await runtime.terminate(session, observation)
+                submission = await _terminate_with_grace(runtime, session, observation)
                 trajectory.final_submission = submission
                 trajectory.record(
                     AgentEventType.FINAL_SUBMISSION,
@@ -430,7 +535,7 @@ class AgentRuntimeManager:
             reason = str(error)
             trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
             try:
-                submission = await runtime.terminate(session, observation)
+                submission = await _terminate_with_grace(runtime, session, observation)
                 trajectory.final_submission = submission
             except Exception as termination_error:
                 trajectory.record(AgentEventType.FAILURE, {"error": str(termination_error)})
@@ -519,14 +624,19 @@ def cutoff_termination(
     from ``required_task_artifacts``, which is empty for a free-execution
     benchmark whose artifacts are all optional by design.
     """
-    produced = (
-        set(environment.episode.snapshot().state.artifacts)
+    artifacts = (
+        environment.episode.snapshot().state.artifacts
         if environment.episode
-        else set()
+        else {}
     )
     required = environment.specification.required_task_artifacts(environment.task)
     detail = cutoff.detail or "a run cutoff fired"
-    if required and required.issubset(produced):
+    validated = {
+        artifact_id
+        for artifact_id, artifact in artifacts.items()
+        if artifact.validated
+    }
+    if required and required.issubset(validated):
         verdict, reason = (
             RuntimeVerdict.COMPLETED,
             f"required benchmark artifacts were produced before the run stopped: {detail}",
@@ -749,9 +859,16 @@ def _observation_from_snapshot(
         key: value.model_dump(mode="json")
         for key, value in agent_visible_observations(snapshot.state.observations).items()
     }
+    scientific_payload = visible.get("scientific-observation", {}).get("value", {})
+    available_actions = (
+        list(scientific_payload.get("available_actions", []))
+        if isinstance(scientific_payload, dict)
+        else []
+    ) or list(task.allowed_actions)
+    package = build_agent_task_package(specification, task) if specification is not None else {}
     return AgentObservation(
         state=agent_visible_state(snapshot.state).model_dump(mode="json"),
-        available_actions=list(task.allowed_actions),
+        available_actions=available_actions,
         artifacts=[artifact.model_dump(mode="json") for artifact in snapshot.state.artifacts.values()],
         metadata={
             "episode_id": snapshot.state.episode_id,
@@ -759,6 +876,8 @@ def _observation_from_snapshot(
             "scenario": _scenario(task, specification),
             "goal": task.objective,
             "observations": visible,
+            "task_package": package,
+            "interaction": _interaction_feedback(snapshot),
         },
     )
 
@@ -784,9 +903,21 @@ def _scenario(
     line the environment documentation is meant to hold -- specify the
     environment and the contract, never the method.
     """
-    scenario: dict[str, Any] = {
+    scenario: dict[str, Any] = build_agent_task_package(specification, task) if specification is not None else {
+        "task": {
+            "id": task.id,
+            "name": task.name,
+            "objective": task.objective,
+            "description": task.description,
+        },
+    }
+    # Keep these short aliases for existing runtimes and reports. The richer
+    # package above is the canonical contract; the aliases avoid breaking
+    # consumers that already read ``scenario.success_criteria``.
+    scenario.update({
         "name": task.name,
         "objective": task.objective,
+        "end_goal": scenario.get("task", {}).get("end_goal", task.objective),
         "description": task.description,
         "success_criteria": [
             {
@@ -796,9 +927,18 @@ def _scenario(
             }
             for condition in task.termination
         ],
+        "stopping_criteria": [
+            {
+                "name": condition.name,
+                "description": condition.description,
+                "condition": condition.condition,
+                "terminal": condition.terminal,
+            }
+            for condition in task.termination
+        ],
         "declared_artifacts": list(task.artifacts),
         "required_metrics": list(task.metrics),
-    }
+    })
     if specification is None:
         return scenario
     required = specification.required_task_artifacts(task)
@@ -828,6 +968,34 @@ def _scenario(
     return scenario
 
 
+def _interaction_feedback(snapshot: EpisodeSnapshot) -> dict[str, Any]:
+    """Expose the last observable result in a compact, decision-ready form."""
+    if not snapshot.state.actions:
+        return {
+            "phase": "initial_observation",
+            "message": "Inspect the supplied data summary and task package before selecting the first action.",
+            "last_action": None,
+        }
+    record = snapshot.state.actions[-1]
+    result = record.result
+    delta = result.observed_state_delta
+    return {
+        "phase": "post_action_review",
+        "message": "Review this result, update the working plan if needed, and select the next evidence-producing action.",
+        "last_action": {
+            "step": record.step,
+            "action": record.intent.action_id,
+            "parameters": dict(record.intent.parameters),
+            "status": result.status.value,
+            "execution_status": result.execution_status.value if result.execution_status else None,
+            "error": result.error,
+            "outputs": dict(result.outputs),
+            "artifacts": [artifact.artifact_id for artifact in result.artifacts],
+            "state_delta": delta.summary() if delta is not None else None,
+        },
+    }
+
+
 def _action_to_intent(
     action: AgentAction,
     specification: BenchmarkSpecification,
@@ -848,6 +1016,16 @@ def _action_to_intent(
         (item for item in specification.actions if item.id == action_id),
         None,
     )
+    parameter_method = parameters.get("method")
+    if parameter_method is None and declared_action is not None:
+        parameter_method = next(
+            (
+                parameter.default
+                for parameter in declared_action.parameters
+                if parameter.name == "method" and parameter.default is not None
+            ),
+            None,
+        )
     reasoning = action.reasoning_metadata
     rationale = (
         reasoning.get("explanation") or reasoning.get("summary") or reasoning.get("rationale")
@@ -861,6 +1039,13 @@ def _action_to_intent(
         "runtime_action_type": action.action_type,
         **extracted.metadata,
     }
+    selected_method = extracted.metadata.get("method") or parameter_method
+    if selected_method is not None:
+        # A method declared as an action parameter is still a scientific method
+        # choice. Without this bridge the evaluator recorded the coarse action
+        # id (``qc``) and silently ignored the agent's granular QC selection.
+        metadata["method"] = selected_method
+        metadata["method_id"] = selected_method
     if declared_action is not None:
         metadata.update(
             {
@@ -897,12 +1082,59 @@ def _missing_required_artifacts(environment: ScientificEnvironment) -> set[str]:
     required = environment.specification.required_task_artifacts(environment.task)
     if not required:
         return set()
-    produced = (
-        set(environment.episode.snapshot().state.artifacts)
+    artifacts = (
+        environment.episode.snapshot().state.artifacts
         if environment.episode is not None
-        else set()
+        else {}
     )
-    return required - produced
+    return {
+        artifact_id
+        for artifact_id in required
+        if artifact_id not in artifacts or not artifacts[artifact_id].validated
+    }
+
+
+async def _await_with_wall_budget(
+    awaitable: Awaitable[Any],
+    controller: CutoffController,
+    run_origin: float,
+    label: str,
+) -> Any:
+    """Bound provider work by the same wall clock the controller reports."""
+    limit = controller.budget.max_wall_time_seconds
+    if limit is None:
+        return await awaitable
+    remaining = limit - (monotonic() - run_origin)
+    if remaining <= 0:
+        close = getattr(awaitable, "close", None)
+        if callable(close):
+            close()
+        raise _RuntimeWallTimeout(
+            f"{label} could not start because the {limit:g}s wall-clock budget was exhausted"
+        )
+    try:
+        return await asyncio.wait_for(awaitable, timeout=remaining)
+    except TimeoutError as error:
+        raise _RuntimeWallTimeout(
+            f"{label} exceeded the remaining {remaining:.2f}s of the "
+            f"{limit:g}s wall-clock budget"
+        ) from error
+
+
+async def _terminate_with_grace(
+    runtime: AgentRuntime,
+    session: AgentSession,
+    observation: AgentObservation | None,
+) -> FinalSubmission:
+    """Do not let cleanup hang after a provider has exhausted the run budget."""
+    try:
+        return await asyncio.wait_for(
+            runtime.terminate(session, observation), timeout=5.0
+        )
+    except TimeoutError:
+        return FinalSubmission(
+            metadata={"termination": "agent termination exceeded 5s grace period"}
+        )
 
 
 def _is_registered_tool(executor: ToolExecutor, name: str) -> bool:

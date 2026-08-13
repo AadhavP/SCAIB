@@ -68,6 +68,7 @@ from agent_evals.evaluation import (
 from agent_evals.evaluation.candidates import (
     build_metric_inputs,
     build_reference_artifacts,
+    build_workspace_metric_inputs,
     load_de_table,
 )
 from agent_evals.evaluation.methods import method_score
@@ -96,18 +97,14 @@ from agent_evals.evaluation.scoring import (
 )
 from agent_evals.evaluation.stage_rewards import StageAwareRewardEvaluator
 from agent_evals.evaluation.taxonomy import DecisionProfile, decision_ontology
-from agent_evals.evaluators.models import MetricResult
 from agent_evals.evaluators.rewards import GlobalReward, RewardEvaluator
 from agent_evals.metrics import MetricGroup, MetricWeight
 from agent_evals.metrics.context import ScientificMetricContext
+from agent_evals.metrics.results import MetricResult
 from agent_evals.scientific.artifacts.storage import LocalArtifactStore
 from agent_evals.scientific.artifacts.validation import ArtifactRuleValidator
 from agent_evals.scientific.context import ScientificContext
 from agent_evals.scientific.executor.scanpy import ScanpyExecutor
-from agent_evals.scientific.metrics import (
-    aggregate_objective_score,
-    compute_objective_metrics,
-)
 from agent_evals.scientific.observations import ScientificObservationBuilder
 
 DEFAULT_RUNTIME_MAX_STEPS = 12
@@ -227,7 +224,7 @@ class AgentScientificRun(BaseModel):
         )
         lines.extend(
             f"| {metric.metric_name} ({metric.metric_id}) | {metric.status.value} | "
-            f"{metric.normalized_score if metric.normalized_score is not None else '-'} |"
+            f"{metric.normalized_value if metric.normalized_value is not None else '-'} |"
             for metric in self.final_metrics
         )
         if self.evaluation is not None:
@@ -554,6 +551,7 @@ class ScientificLoop:
                 selected_environment,
                 adata,
                 run_root=pending_root,
+                task=task,
             )
         )
         if provisioned is not None:
@@ -642,26 +640,6 @@ class ScientificLoop:
             # anything under it is still open. Nothing is deleted -- the workspace
             # and its artifacts are evidence and outlive the run.
             await provisioned.backend.close()
-        pipeline_parameters: dict[str, Any] = {}
-        metrics = await asyncio.to_thread(
-            compute_objective_metrics,
-            specification.metadata.id,
-            context.adata,
-            pipeline_parameters,
-            set(context.agent_produced_columns),
-        )
-        global_reward = GlobalReward(
-            value=aggregate_objective_score(specification.metadata.id, metrics),
-            components={
-                metric.metric_id: float(metric.normalized_score)
-                for metric in metrics
-                if metric.normalized_score is not None
-            },
-            metric_ids=[metric.metric_id for metric in metrics],
-            status="succeeded"
-            if aggregate_objective_score(specification.metadata.id, metrics) is not None
-            else "unavailable",
-        )
         trace = getattr(adapter, "decision_trace", [])
         if not trace:
             trace = [
@@ -686,6 +664,20 @@ class ScientificLoop:
             context,
             store,
             reward_evaluator.signals,
+            provisioned,
+        )
+        metrics = evaluation.metric_results
+        global_reward = GlobalReward(
+            value=evaluation.scientific_outcome_score,
+            components={
+                metric.metric_id: float(metric.normalized_value)
+                for metric in metrics
+                if metric.normalized_value is not None
+            },
+            metric_ids=[metric.metric_id for metric in metrics],
+            status="succeeded"
+            if evaluation.scientific_outcome_score is not None
+            else "unavailable",
         )
         final_root = Path(output_dir) / agent_run.run_id
         final_root.parent.mkdir(parents=True, exist_ok=True)
@@ -780,6 +772,7 @@ class ScientificLoop:
         context: ScientificContext,
         store: LocalArtifactStore,
         progress_signals: Sequence[ProgressSignal] = (),
+        provisioned: Any | None = None,
     ) -> ScientificEvaluation:
         """Run versioned evaluation on hidden reference data and visible outputs."""
         adata = context.adata
@@ -791,18 +784,30 @@ class ScientificLoop:
         # outcome and the per-step ``S_t`` see the same artifacts. Assembled
         # separately they could disagree for reasons that are the harness's, not
         # the agent's, and the progress signal would measure that disagreement.
-        candidate_inputs = build_metric_inputs(
-            adata,
-            prediction_column=prediction_column,
-            cluster_column=context.agent_cluster_column(),
-            evaluator_observes_predictions=(
-                specification.evaluator_executes_task_actions(task)
-            ),
-            # Read off the artifact the agent archived itself, never from
-            # ``adata.uns`` -- pbmc68k ships ``rank_genes_groups`` precomputed over
-            # the reference labels, so the shortcut reads the answer key.
-            de_table=load_de_table(context.artifacts),
-        )
+        if (
+            provisioned is not None
+            and not specification.evaluator_executes_task_actions(task)
+        ):
+            candidate_inputs = build_workspace_metric_inputs(
+                {
+                    artifact.artifact_id: artifact
+                    for artifact in agent_run.generated_artifacts
+                },
+                provisioned.reference_store,
+            )
+        else:
+            candidate_inputs = build_metric_inputs(
+                adata,
+                prediction_column=prediction_column,
+                cluster_column=context.agent_cluster_column(),
+                evaluator_observes_predictions=(
+                    specification.evaluator_executes_task_actions(task)
+                ),
+                # Read off the artifact the agent archived itself, never from
+                # ``adata.uns`` -- pbmc68k ships ``rank_genes_groups`` precomputed over
+                # the reference labels, so the shortcut reads the answer key.
+                de_table=load_de_table(context.artifacts),
+            )
         prediction = candidate_inputs.prediction
         candidate_artifacts = candidate_inputs.candidate_artifacts
         reference_artifacts = candidate_inputs.reference_artifacts
@@ -859,6 +864,11 @@ class ScientificLoop:
             reference_artifacts=reference_artifacts,
             metadata={
                 **context.metadata,
+                **(
+                    {"leakage_findings": list(candidate_inputs.leakage_findings)}
+                    if candidate_inputs.leakage_findings
+                    else {}
+                ),
                 # Which of the agent's own groups the DE ranking is read from.
                 # Resolved by overlap with the hidden reference population rather
                 # than by name, because the agent chose its own class names.

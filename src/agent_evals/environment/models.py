@@ -474,9 +474,15 @@ def agent_visible_state(state: EpisodeState) -> EpisodeState:
     adding an observation-bearing field to any of these models is a type error
     here instead of a silent leak wherever it is dumped.
     """
+    # Reward records are evaluator-owned. In the scientific loop they may carry
+    # reference-derived metrics and stage progress, neither of which is visible
+    # to a real scientist working from the supplied data. Returning them here
+    # leaked the answer channel through ``AgentObservation.state.rewards`` even
+    # though the same values were correctly marked absent from observations.
     return state.model_copy(
         update={
             "observations": agent_visible_observations(state.observations),
+            "rewards": [],
             "actions": [
                 record.model_copy(
                     update={
