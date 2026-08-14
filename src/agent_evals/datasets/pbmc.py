@@ -22,6 +22,47 @@ class PBMCMetadata(BaseModel):
     source: str = "scanpy.datasets.pbmc68k_reduced"
 
 
+class AnnDataDataset:
+    """Load a benchmark-configured local AnnData file without guessing its identity.
+
+    This provider is deliberately explicit: a batch-correction benchmark must be
+    pointed at the real multi-batch collection, not silently run on the PBMC68k
+    annotation fixture because both happen to use the ``h5ad`` format.
+    """
+
+    def __init__(self, local_path: Path | str, *, source: str | None = None) -> None:
+        self.local_path = Path(local_path)
+        self.source = source or f"local file: {self.local_path}"
+        self._metadata: PBMCMetadata | None = None
+
+    def load(self, *, max_cells: int | None = None) -> Any:
+        """Read the configured file and optionally take a deterministic prefix."""
+        import anndata as ad
+
+        if not self.local_path.is_file():
+            raise FileNotFoundError(f"configured AnnData file does not exist: {self.local_path}")
+        adata = ad.read_h5ad(self.local_path)
+        PBMCDataset.validate_schema(adata)
+        if max_cells is not None:
+            if max_cells < 1:
+                raise ValueError("max_cells must be positive")
+            adata = adata[:max_cells].copy()
+        self._metadata = PBMCMetadata(
+            cells=int(adata.n_obs),
+            genes=int(adata.n_vars),
+            metadata_columns=[str(column) for column in adata.obs.columns],
+            source=self.source,
+        )
+        return adata
+
+    @property
+    def metadata(self) -> PBMCMetadata:
+        """Return metadata from the last successful load."""
+        if self._metadata is None:
+            raise RuntimeError("load() must be called before metadata is available")
+        return self._metadata
+
+
 class PBMCDataset:
     """Load, validate, and cache the public Scanpy PBMC reduced dataset.
 
@@ -83,4 +124,4 @@ class PBMCDataset:
         return self._metadata
 
 
-__all__ = ["PBMCDataset", "PBMCMetadata"]
+__all__ = ["AnnDataDataset", "PBMCDataset", "PBMCMetadata"]

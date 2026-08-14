@@ -7,6 +7,9 @@ services:
         UV_EXTRAS: "--extra science --extra providers"
     image: agent-evals:latest
     container_name: agent-evals-api
+    # Development bind mounts are commonly owned by the host user; keep the
+    # hot-reload profile writable. The production override runs as UID 10001.
+    user: "0:0"
     # The app also reads `AGENT_EVALS_*` settings from its own `.env` file.
     env_file:
       - path: .env
@@ -26,11 +29,20 @@ services:
     # Compose uses this health check before starting the frontend, avoiding
     # transient proxy failures while Uvicorn is still booting.
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/v1/ready')"]
       interval: 5s
       timeout: 5s
       start_period: 5s
       retries: 12
+    # Reduce blast radius if an evaluation process is compromised.
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=512m
+    stop_grace_period: 30s
     restart: unless-stopped
 
   frontend:

@@ -6,11 +6,13 @@ from typing import Any
 
 import numpy as np
 
+from agent_evals.metrics.backends import scib_metrics
 from agent_evals.metrics.backends.sklearn import adjusted_rand, silhouette
 from agent_evals.metrics.builtin._helpers import (
     embedding,
     failed,
     labels,
+    reference_labels,
     unavailable,
 )
 from agent_evals.metrics.context import ScientificMetricContext
@@ -53,70 +55,122 @@ def _definition(
 
 
 def _batch_and_embedding(context: ScientificMetricContext) -> tuple[Any, Any] | None:
-    adata = context.adata
+    """Resolve a candidate representation and batch vector from either tier."""
     representation = embedding(context)
-    if adata is None or representation is None:
+    if representation is None:
         return None
-    key = next((item for item in ("batch", "batch_id", "batch_labels") if item in adata.obs), None)
-    if key is None:
-        return None
-    return representation, adata.obs[key].astype(str).to_numpy()
+    adata = context.adata
+    if adata is not None:
+        key = next(
+            (item for item in ("batch", "batch_id", "batch_labels") if item in adata.obs),
+            None,
+        )
+        if key is not None:
+            return representation, adata.obs[key].astype(str).to_numpy()
+    # Workspace evaluators do not have an in-memory AnnData object. They can still
+    # provide a verified batch vector alongside the embedding artifact; keeping
+    # this fallback in the metric context makes the typed and black-box tiers use
+    # the same backend rather than silently making the free tier unmeasurable.
+    for key in ("batch", "batch_labels", "batch_id"):
+        values = context.candidate_artifacts.get(key)
+        if values is None:
+            values = context.metadata.get(f"{key}_values")
+        if values is not None and not isinstance(values, str):
+            return representation, np.asarray(values).astype(str)
+    return None
+
+
+def _scib_missing() -> MetricComputation:
+    """Keep an optional authoritative backend gap out of the agent's score."""
+    return unavailable(
+        "scib-metrics is not installed; install the pinned science extra to "
+        "compute the authoritative integration metric"
+    )
+
+
+def _scib_parameters(context: ScientificMetricContext) -> dict[str, int]:
+    """Read deterministic neighbor settings from evaluator configuration."""
+    return {
+        "n_neighbors": max(2, int(context.metadata.get("integration_n_neighbors", 30))),
+        "random_state": int(context.metadata.get("integration_random_state", 0)),
+        "n_jobs": int(context.metadata.get("integration_n_jobs", 1)),
+    }
 
 
 def _ilis(context: ScientificMetricContext) -> MetricComputation:
+    if not scib_metrics.available():
+        return _scib_missing()
     values = _batch_and_embedding(context)
     if values is None:
         return failed("batch labels and embedding unavailable")
     representation, batches = values
-    from sklearn.neighbors import NearestNeighbors
-
-    k = min(30, len(batches) - 1)
+    parameters = _scib_parameters(context)
+    k = min(parameters["n_neighbors"], len(batches) - 1)
     if k < 2 or len(set(batches)) < 2:
         return failed("at least two batches and two neighbors are required")
-    neighbors = NearestNeighbors(n_neighbors=k + 1).fit(representation).kneighbors(return_distance=False)[:, 1:]
-    scores = []
-    batch_count = len(set(batches))
-    for row in neighbors:
-        counts = np.bincount(
-            np.asarray([sorted(set(batches)).index(batches[index]) for index in row]),
-            minlength=batch_count,
+    try:
+        value, metadata = scib_metrics.ilisi_knn(
+            representation,
+            batches,
+            n_neighbors=k,
+            random_state=parameters["random_state"],
+            n_jobs=parameters["n_jobs"],
         )
-        probabilities = counts / counts.sum()
-        scores.append(1 / np.square(probabilities).sum())
-    return MetricComputation(float(np.mean(scores) / batch_count), metadata={"k": k, "implementation": "local_inverse_simpson_knn"})
+    except ImportError as error:
+        return unavailable(f"scib-metrics neighbor backend is unavailable: {error}")
+    return MetricComputation(value, metadata=metadata)
 
 
 def _kbet(context: ScientificMetricContext) -> MetricComputation:
-    """Report the missing backend rather than scoring the agent for it.
-
-    Both branches were ``failed(...)``, which carries the metric's failure score
-    of 0.0 -- so an agent with flawless batch integration was charged a zero for
-    a metric SCAIB has never implemented. Neither branch depends on anything the
-    agent did, which is the tell.
-    """
-    from agent_evals.metrics.backends.scib_metrics import available
-
-    if not available():
-        return unavailable("scib-metrics is not installed")
-    return unavailable("no kBET adapter is wired to the installed scib-metrics")
+    """Compute kBET per label through the pinned scib-metrics backend."""
+    if not scib_metrics.available():
+        return _scib_missing()
+    values = _batch_and_embedding(context)
+    biological = reference_labels(context)
+    if values is None or biological is None:
+        return failed("batch labels, biological labels, and embedding unavailable")
+    representation, batches = values
+    parameters = _scib_parameters(context)
+    k = min(parameters["n_neighbors"], len(batches) - 1)
+    if k < 2 or len(set(batches)) < 2:
+        return failed("at least two batches and two neighbors are required")
+    try:
+        value, metadata = scib_metrics.kbet_per_label(
+            representation,
+            batches,
+            biological,
+            n_neighbors=k,
+            random_state=parameters["random_state"],
+            n_jobs=parameters["n_jobs"],
+        )
+    except ImportError as error:
+        return unavailable(f"scib-metrics neighbor backend is unavailable: {error}")
+    return MetricComputation(value, metadata=metadata)
 
 
 def _bras(context: ScientificMetricContext) -> MetricComputation:
-    """See :func:`_kbet`: a harness gap, reported as one."""
-    from agent_evals.metrics.backends.scib_metrics import available
-
-    if not available():
-        return unavailable("scib-metrics is not installed")
-    return unavailable("no BRAS adapter is wired to the installed scib-metrics")
+    """Compute BRAS through the pinned scib-metrics backend."""
+    if not scib_metrics.available():
+        return _scib_missing()
+    values = _batch_and_embedding(context)
+    biological = reference_labels(context)
+    if values is None or biological is None:
+        return failed("batch labels, biological labels, and embedding unavailable")
+    representation, batches = values
+    try:
+        value, metadata = scib_metrics.bras(representation, biological, batches)
+    except ImportError as error:
+        return unavailable(f"scib-metrics is unavailable: {error}")
+    return MetricComputation(value, metadata=metadata)
 
 
 def cell_type_asw(context: ScientificMetricContext) -> MetricComputation:
-    values = labels(context)
+    biological = reference_labels(context)
     representation = embedding(context)
     return (
-        failed("cell-type labels and embedding unavailable")
-        if values is None or representation is None
-        else MetricComputation((silhouette(representation, values[0]) + 1) / 2)
+        failed("biological labels and embedding unavailable")
+        if biological is None or representation is None
+        else MetricComputation((silhouette(representation, biological) + 1) / 2)
     )
 
 
@@ -138,19 +192,28 @@ def pcr_batch_variance(context: ScientificMetricContext) -> MetricComputation:
 
 
 def graph_connectivity(context: ScientificMetricContext) -> MetricComputation:
-    adata = context.adata
-    values = labels(context)
-    if adata is None or values is None or "connectivities" not in adata.obsp:
-        return failed("connectivity graph and labels unavailable")
-    graph = adata.obsp["connectivities"]
-    scores = []
-    for label in sorted(set(values[0])):
-        indices = np.flatnonzero(values[0] == label)
-        if len(indices) < 2:
-            continue
-        subgraph = graph[indices][:, indices]
-        scores.append(float((subgraph.sum(axis=1) > 0).mean()))
-    return MetricComputation(float(np.mean(scores)) if scores else None)
+    if not scib_metrics.available():
+        return _scib_missing()
+    values = _batch_and_embedding(context)
+    biological = reference_labels(context)
+    if values is None or biological is None:
+        return failed("embedding and biological labels unavailable")
+    representation, _ = values
+    parameters = _scib_parameters(context)
+    k = min(parameters["n_neighbors"], len(biological) - 1)
+    if k < 2:
+        return failed("at least two neighbors are required")
+    try:
+        value, metadata = scib_metrics.graph_connectivity(
+            representation,
+            biological,
+            n_neighbors=k,
+            random_state=parameters["random_state"],
+            n_jobs=parameters["n_jobs"],
+        )
+    except ImportError as error:
+        return unavailable(f"scib-metrics neighbor backend is unavailable: {error}")
+    return MetricComputation(value, metadata=metadata)
 
 
 def batch_asw(context: ScientificMetricContext) -> MetricComputation:
@@ -171,7 +234,7 @@ def integration_definitions() -> list[tuple[MetricDefinition, Any]]:
         (_definition("biological_conservation.cell_type_asw", "Cell-type ASW", MetricRole.PRIMARY, category=MetricCategory.BIOLOGICAL_CONSERVATION), cell_type_asw),
         (_definition("biological_conservation.ari", "Label conservation ARI", MetricRole.PRIMARY, category=MetricCategory.BIOLOGICAL_CONSERVATION), label_conservation_ari),
         (_definition("batch_integration.pcr", "PCR batch variance reduction", MetricRole.SECONDARY), pcr_batch_variance),
-        (_definition("batch_integration.graph_connectivity", "Graph connectivity", MetricRole.SECONDARY), graph_connectivity),
+        (_definition("biological_conservation.graph_connectivity", "Graph connectivity", MetricRole.PRIMARY, category=MetricCategory.BIOLOGICAL_CONSERVATION), graph_connectivity),
         (_definition("batch_integration.batch_asw", "Batch ASW", MetricRole.DIAGNOSTIC), batch_asw),
     ]
 

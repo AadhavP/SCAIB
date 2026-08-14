@@ -34,6 +34,7 @@ from agent_evals.agents.trajectory import (
     RunTerminationStatus,
     decision_cascade_from_episode,
 )
+from agent_evals.benchmarks.agent_package import build_agent_task_package
 from agent_evals.benchmarks.io import benchmark_from_dict, load_benchmark
 from agent_evals.benchmarks.schema import (
     ActionKind,
@@ -532,6 +533,10 @@ def test_free_execution_example_declares_a_workspace_and_no_fixed_outputs() -> N
 
     assert action.kind is ActionKind.FREE_EXECUTION
     assert action.expected_outputs == []
+    package = build_agent_task_package(FREE_SPECIFICATION, task)
+    analyze = next(item for item in package["actions"] if item["id"] == "analyze")
+    assert analyze["execution_owner"] == "agent_workspace"
+    assert "workspace_fingerprint" in analyze["verification"]
     assert EXECUTION_PARAMETERS <= {parameter.name for parameter in action.parameters}
     assert environment.backend is EnvironmentBackend.CONTAINER
     assert environment.image

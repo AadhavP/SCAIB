@@ -20,6 +20,7 @@ const fallbackAgents: Agent[] = [
   { id: 'mock', type: 'deterministic adapter', capabilities: ['reproducible', 'offline'], available: true },
   { id: 'openai', type: 'model runtime', capabilities: ['tool use', 'reasoning'], available: true },
   { id: 'anthropic', type: 'model runtime', capabilities: ['tool use', 'reasoning'], available: true },
+  { id: 'http-step', type: 'external endpoint', capabilities: ['black-box', 'URL'], available: true },
 ]
 const fallbackDetails: Record<string, BenchmarkDetail> = {
   'pbmc-cell-annotation': {
@@ -68,11 +69,19 @@ const statusOf = (value?: string): RunState => {
 const resultObject = (job: EvaluationJob | null): JsonMap => job?.result && typeof job.result === 'object' ? job.result : {}
 const scoreOf = (job: EvaluationJob | null) => {
   const result = resultObject(job)
+  const qualification = result.qualification as JsonMap | undefined
+  // A non-certified result may still contain useful diagnostic numbers, but the
+  // UI must not present them as comparable benchmark scores. Older reports do
+  // not have qualification metadata, so they retain the previous display path.
+  if (qualification && qualification.score_comparable !== true) return null
   const reward = result.global_reward as JsonMap | undefined
   const evaluation = result.evaluation as JsonMap | undefined
-  return number(reward?.value) ?? number(evaluation?.global_agent_score) ?? number(evaluation?.benchmark_score)
+  // ``global_reward`` is the scientific outcome O; the headline score must be
+  // the combined benchmark score so O does not masquerade as O × D × T.
+  return number(evaluation?.global_agent_score) ?? number(evaluation?.benchmark_score) ?? number(reward?.value)
 }
 const listOf = (value: unknown): JsonMap[] => Array.isArray(value) ? value.filter(item => Boolean(item) && typeof item === 'object') as JsonMap[] : []
+const newIdempotencyKey = () => `scaib-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`
 
 function App({ api = defaultApi }: Props) {
   const [screen, setScreen] = useState<Screen>('catalog')
@@ -80,9 +89,11 @@ function App({ api = defaultApi }: Props) {
   const [details, setDetails] = useState<Record<string, BenchmarkDetail>>(fallbackDetails)
   const [agents, setAgents] = useState<Agent[]>(fallbackAgents)
   const [selectedBenchmark, setSelectedBenchmark] = useState(fallbackBenchmarks[0])
+  const [selectedTaskId, setSelectedTaskId] = useState(fallbackDetails[fallbackBenchmarks[0]].tasks[0]?.id ?? '')
   const [selectedAgent, setSelectedAgent] = useState('mock')
   const [model, setModel] = useState('')
   const [provider, setProvider] = useState('')
+  const [agentEndpoint, setAgentEndpoint] = useState('')
   const [testMode, setTestMode] = useState(false)
   const [starting, setStarting] = useState(false)
   const [seed, setSeed] = useState(42)
@@ -98,7 +109,7 @@ function App({ api = defaultApi }: Props) {
   const [loadingDetails, setLoadingDetails] = useState(false)
 
   const benchmark = details[selectedBenchmark] ?? fallbackDetails[selectedBenchmark] ?? fallbackDetails[fallbackBenchmarks[0]]
-  const task = benchmark.tasks[0] ?? {}
+  const task = benchmark.tasks.find(item => item.id === selectedTaskId) ?? benchmark.tasks[0] ?? {}
   const selectedAgentInfo = agents.find(agent => agent.id === selectedAgent)
   const state = statusOf(jobDetail?.status ?? job?.status)
   const isActive = state === 'PENDING' || state === 'RUNNING'
@@ -128,7 +139,10 @@ function App({ api = defaultApi }: Props) {
     let cancelled = false
     setLoadingDetails(true)
     void api.benchmark(selectedBenchmark).then(detail => {
-      if (!cancelled) setDetails(previous => ({ ...previous, [selectedBenchmark]: detail }))
+      if (!cancelled) {
+        setDetails(previous => ({ ...previous, [selectedBenchmark]: detail }))
+        setSelectedTaskId(current => detail.tasks.some(item => item.id === current) ? current : (detail.tasks[0]?.id ?? ''))
+      }
     }).catch(() => { /* The built-in summary remains usable when metadata is unavailable. */ }).finally(() => {
       if (!cancelled) setLoadingDetails(false)
     })
@@ -194,7 +208,9 @@ function App({ api = defaultApi }: Props) {
   }, [api, job?.job_id])
 
   const chooseBenchmark = (id: string) => {
+    const nextBenchmark = details[id] ?? fallbackDetails[id] ?? fallbackDetails[fallbackBenchmarks[0]]
     setSelectedBenchmark(id)
+    setSelectedTaskId(nextBenchmark.tasks[0]?.id ?? '')
     setError('')
     setScreen('configure')
   }
@@ -208,19 +224,31 @@ function App({ api = defaultApi }: Props) {
       setError(`${selectedAgentInfo.id} is unavailable. Choose another agent or enable GLM test mode.`)
       return
     }
+    if (selectedAgent === 'http-step' && !agentEndpoint.trim()) {
+      setError('Provide an HTTPS agent endpoint before starting a black-box run.')
+      return
+    }
+    if (selectedAgent === 'http-step' && testMode) {
+      setError('Black-box endpoint runs and GLM test mode are separate runtime choices.')
+      return
+    }
     setStarting(true)
     setError('')
     try {
       const queued = await api.run({
         benchmark_id: selectedBenchmark,
+        task_id: typeof task.id === 'string' ? task.id : undefined,
+        dataset_id: typeof (benchmark.datasets[0] ?? {}).id === 'string' ? String((benchmark.datasets[0] ?? {}).id) : undefined,
         agent_id: selectedAgent,
         model: model || undefined,
         provider: provider || undefined,
+        agent_endpoint: agentEndpoint || undefined,
         test_mode: testMode,
         seed,
         max_cells: maxCells ? Number(maxCells) : undefined,
         max_steps: maxSteps ? Number(maxSteps) : undefined,
         config_override: {},
+        idempotency_key: newIdempotencyKey(),
       })
       setJob(queued)
       setLiveEvents([])
@@ -260,7 +288,7 @@ function App({ api = defaultApi }: Props) {
       {error && <div className="alert" role="alert"><TriangleAlert size={16} /><span>{error}</span><button aria-label="Dismiss error" onClick={() => setError('')}><XCircle size={15} /></button></div>}
       {screen === 'catalog' && <Catalog benchmarks={benchmarks} details={details} selected={selectedBenchmark} onChoose={chooseBenchmark} loading={loadingDetails} recent={recent} />}
       {screen === 'configure' && <TaskBrief task={task} />}
-      {screen === 'configure' && <Configure benchmark={benchmark} agents={agents} selectedAgent={selectedAgent} setSelectedAgent={setSelectedAgent} model={model} setModel={setModel} provider={provider} setProvider={setProvider} testMode={testMode} setTestMode={setTestMode} seed={seed} setSeed={setSeed} maxCells={maxCells} setMaxCells={setMaxCells} maxSteps={maxSteps} setMaxSteps={setMaxSteps} starting={starting} onBack={resetToCatalog} onRun={() => void queue()} />}
+      {screen === 'configure' && <Configure benchmark={benchmark} task={task} taskId={selectedTaskId} setTaskId={setSelectedTaskId} agents={agents} selectedAgent={selectedAgent} setSelectedAgent={setSelectedAgent} model={model} setModel={setModel} provider={provider} setProvider={provider => setProvider(provider)} agentEndpoint={agentEndpoint} setAgentEndpoint={setAgentEndpoint} testMode={testMode} setTestMode={setTestMode} seed={seed} setSeed={setSeed} maxCells={maxCells} setMaxCells={setMaxCells} maxSteps={maxSteps} setMaxSteps={setMaxSteps} starting={starting} onBack={resetToCatalog} onRun={() => void queue()} />}
       {screen === 'run' && <div className="run-brief-wrap"><TaskBrief task={task} compact /></div>}
       {screen === 'run' && <RunWalkthrough benchmark={benchmark} task={task} job={jobDetail} events={liveEvents} streamConnected={streamConnected} state={state} isActive={isActive} agent={selectedAgentInfo} model={model} testMode={testMode} seed={seed} maxSteps={maxSteps} onBack={() => setScreen('configure')} onNew={resetToCatalog} />}
       <footer><span>© 2026 SCAIB</span><span>Scientific Agent Capability &amp; Intelligence Benchmark</span><span>API telemetry <CircleDot size={10} className="online" /></span></footer>
@@ -301,9 +329,11 @@ function TaskBrief({ task, compact = false }: { task: JsonMap; compact?: boolean
   </article>
 }
 
-function Configure({ benchmark, agents, selectedAgent, setSelectedAgent, model, setModel, provider, setProvider, testMode, setTestMode, seed, setSeed, maxCells, setMaxCells, maxSteps, setMaxSteps, starting, onBack, onRun }: { benchmark: BenchmarkDetail; agents: Agent[]; selectedAgent: string; setSelectedAgent: (value: string) => void; model: string; setModel: (value: string) => void; provider: string; setProvider: (value: string) => void; testMode: boolean; setTestMode: (value: boolean) => void; seed: number; setSeed: (value: number) => void; maxCells: string; setMaxCells: (value: string) => void; maxSteps: string; setMaxSteps: (value: string) => void; starting: boolean; onBack: () => void; onRun: () => void }) {
-  const task = benchmark.tasks[0] ?? {}
-  return <section className="page configure-page"><div className="page-heading compact"><div><div className="eyebrow"><span className="pulse" /> STEP 02 / RUN CONFIGURATION</div><h1>Set up your <em>scientist.</em></h1><p>Everything below is saved with the run, so a score always has a traceable configuration.</p></div></div><div className="configuration-layout"><div className="config-main"><div className="selected-benchmark"><div className="benchmark-icon"><Beaker size={20} /></div><div><span className="micro-label">SELECTED BENCHMARK</span><h2>{benchmark.title}</h2><p>{benchmark.description}</p></div><span className="version">v{benchmark.version}</span></div><div className="form-panel"><div className="section-heading"><div><span className="micro-label">01 / MODEL RUNTIME</span><h2>Who is doing the work?</h2></div><ServerCog size={20} /></div><div className="agent-grid">{agents.map(agent => <button className={`agent-option ${agent.id === selectedAgent ? 'selected' : ''}`} disabled={!agent.available} onClick={() => setSelectedAgent(agent.id)} key={agent.id}><span className="agent-radio">{agent.id === selectedAgent && <Check size={12} />}</span><span><strong>{agent.id}</strong><small>{agent.type}{agent.available ? '' : ' · unavailable'}</small></span><span className="agent-capabilities">{agent.capabilities.slice(0, 2).join(' · ') || 'provider neutral'}</span></button>)}</div><div className="form-grid"><label>Model name<input aria-label="Model" value={model} onChange={event => setModel(event.target.value)} placeholder="e.g. gpt-4.1 or local-model" /><small>Leave blank to use the adapter default.</small></label><label>Provider<input aria-label="Provider" value={provider} onChange={event => setProvider(event.target.value)} placeholder="e.g. openai, anthropic" /><small>Optional runtime/provider hint.</small></label></div><div className="test-mode-card"><label className="toggle-label"><input aria-label="GLM test mode" type="checkbox" checked={testMode} onChange={event => setTestMode(event.target.checked)} /><span className="toggle-switch"><span /></span><span><strong><Zap size={14} /> Use GLM test mode</strong><small>Uses the backend .env credentials and calls the configured GLM/OpenAI-compatible endpoint.</small></span></label></div></div><div className="form-panel"><div className="section-heading"><div><span className="micro-label">02 / REPRODUCIBILITY</span><h2>Control the experiment</h2></div><ShieldCheck size={20} /></div><div className="form-grid three"><label>Random seed<input aria-label="Seed" type="number" min="0" value={seed} onChange={event => setSeed(Number(event.target.value) || 0)} /></label><label>Max cells<input aria-label="Max cells" type="number" min="1" value={maxCells} onChange={event => setMaxCells(event.target.value)} placeholder="All" /><small>Useful for a fast smoke test.</small></label><label>Max steps<input aria-label="Max steps" type="number" min="1" value={maxSteps} onChange={event => setMaxSteps(event.target.value)} placeholder="Default: 12 turns" /></label></div><div className="config-summary"><span><Database size={14} /> {text((benchmark.datasets[0] ?? {}).name, 'Benchmark dataset')}</span><span><TerminalSquare size={14} /> {Array.isArray(task.allowed_actions) ? task.allowed_actions.length : benchmark.actions.length} observable workflow stages</span><span><ShieldCheck size={14} /> Deterministic seed {seed}</span></div></div><div className="action-row"><button className="secondary" onClick={onBack}><ArrowLeft size={15} /> Choose another</button><button className="primary" aria-label="Queue evaluation" disabled={starting} onClick={onRun}>{starting ? <RotateCw size={16} className="spin" /> : <Play size={16} fill="currentColor" />} {starting ? 'Starting…' : 'Start evaluation'} <ArrowRight size={15} /></button></div></div><aside className="workflow-preview"><div className="micro-label">WHAT WILL HAPPEN</div><h2>Evaluation walkthrough</h2><p>The run view will follow each declared stage and reveal the evidence behind every score.</p><div className="preview-list">{benchmark.actions.map((action, index) => <div className="preview-step" key={String(action.id ?? index)}><span>{index + 1}</span><div><strong>{text(action.name, titleize(text(action.id, `Stage ${index + 1}`)))}</strong><small>{text(action.purpose, 'Observable benchmark action')}</small></div></div>)}</div><div className="preview-note"><Sparkles size={15} /><span>Scores appear as soon as the API returns the completed trajectory.</span></div></aside></div></section>
+function Configure({ benchmark, task, taskId, setTaskId, agents, selectedAgent, setSelectedAgent, model, setModel, provider, setProvider, agentEndpoint, setAgentEndpoint, testMode, setTestMode, seed, setSeed, maxCells, setMaxCells, maxSteps, setMaxSteps, starting, onBack, onRun }: { benchmark: BenchmarkDetail; task: JsonMap; taskId: string; setTaskId: (value: string) => void; agents: Agent[]; selectedAgent: string; setSelectedAgent: (value: string) => void; model: string; setModel: (value: string) => void; provider: string; setProvider: (value: string) => void; agentEndpoint: string; setAgentEndpoint: (value: string) => void; testMode: boolean; setTestMode: (value: boolean) => void; seed: number; setSeed: (value: number) => void; maxCells: string; setMaxCells: (value: string) => void; maxSteps: string; setMaxSteps: (value: string) => void; starting: boolean; onBack: () => void; onRun: () => void }) {
+  return <section className="page configure-page"><div className="page-heading compact"><div><div className="eyebrow"><span className="pulse" /> STEP 02 / RUN CONFIGURATION</div><h1>Set up your <em>scientist.</em></h1><p>Everything below is saved with the run, so a score always has a traceable configuration.</p></div></div><div className="configuration-layout"><div className="config-main"><div className="selected-benchmark"><div className="benchmark-icon"><Beaker size={20} /></div><div><span className="micro-label">SELECTED BENCHMARK</span><h2>{benchmark.title}</h2><p>{benchmark.description}</p></div><span className="version">v{benchmark.version}</span></div>{benchmark.tasks.length > 1 && <div className="form-panel task-selector-panel"><div className="section-heading"><div><span className="micro-label">TASK SELECTION</span><h2>Which scientific objective?</h2></div><Target size={20} /></div><label>Benchmark task<select aria-label="Benchmark task" value={taskId} onChange={event => setTaskId(event.target.value)}>{benchmark.tasks.map(item => <option key={String(item.id)} value={String(item.id)}>{text(item.name, text(item.id, 'Scientific task'))}</option>)}</select><small>The task, dataset, and scoring profile are persisted with the run.</small></label></div>}<div className="form-panel"><div className="section-heading"><div><span className="micro-label">01 / MODEL RUNTIME</span><h2>Who is doing the work?</h2></div><ServerCog size={20} /></div>
+<div className="agent-grid">{agents.map(agent =><button className={`agent-option ${agent.id === selectedAgent ? 'selected' : ''}`} disabled={!agent.available} onClick={() => { setSelectedAgent(agent.id); if (agent.id === 'http-step') setTestMode(false) }} key={agent.id}>
+<span className="agent-radio">{agent.id === selectedAgent && <Check size={12} />}</span><span><strong>{agent.id}</strong><small>{agent.type}{agent.available ? '' : ' · unavailable'}</small></span><span className="agent-capabilities">{agent.capabilities.slice(0, 2).join(' · ') || 'provider neutral'}</span></button>)}</div><div className="form-grid"><label>Model name<input aria-label="Model" value={model} onChange={event => setModel(event.target.value)} placeholder="e.g. gpt-4.1 or local-model" /><small>Leave blank to use the adapter default.</small></label><label>Provider<input aria-label="Provider" value={provider} onChange={event => setProvider(event.target.value)} placeholder="e.g. openai, anthropic" /><small>Optional runtime/provider hint.</small></label></div>{selectedAgent === 'http-step' && <label className="endpoint-field">Agent endpoint<input aria-label="Agent endpoint" type="url" value={agentEndpoint} onChange={event => setAgentEndpoint(event.target.value)} placeholder="https://agent.example/step" required /><small>The endpoint receives public observations and returns one action per turn. Authentication stays on the SCAIB worker.</small></label>}<div className="test-mode-card">
+<label className="toggle-label"><input aria-label="GLM test mode" type="checkbox" checked={testMode} onChange={event => setTestMode(event.target.checked)} /><span className="toggle-switch"><span /></span><span><strong><Zap size={14} /> Use GLM test mode</strong><small>Uses the backend .env credentials and calls the configured GLM/OpenAI-compatible endpoint.</small></span></label></div></div><div className="form-panel"><div className="section-heading"><div><span className="micro-label">02 / REPRODUCIBILITY</span><h2>Control the experiment</h2></div><ShieldCheck size={20} /></div><div className="form-grid three"><label>Random seed<input aria-label="Seed" type="number" min="0" value={seed} onChange={event => setSeed(Number(event.target.value) || 0)} /></label><label>Max cells<input aria-label="Max cells" type="number" min="1" value={maxCells} onChange={event => setMaxCells(event.target.value)} placeholder="All" /><small>Useful for a fast smoke test.</small></label><label>Max steps<input aria-label="Max steps" type="number" min="1" value={maxSteps} onChange={event => setMaxSteps(event.target.value)} placeholder="Default: 12 turns" /></label></div><div className="config-summary"><span><Database size={14} /> {text((benchmark.datasets[0] ?? {}).name, 'Benchmark dataset')}</span><span><TerminalSquare size={14} /> {Array.isArray(task.allowed_actions) ? task.allowed_actions.length : benchmark.actions.length} observable workflow stages</span><span><ShieldCheck size={14} /> Deterministic seed {seed}</span></div></div><div className="action-row"><button className="secondary" onClick={onBack}><ArrowLeft size={15} /> Choose another</button><button className="primary" aria-label="Queue evaluation" disabled={starting} onClick={onRun}>{starting ? <RotateCw size={16} className="spin" /> : <Play size={16} fill="currentColor" />} {starting ? 'Starting…' : 'Start evaluation'} <ArrowRight size={15} /></button></div></div><aside className="workflow-preview"><div className="micro-label">WHAT WILL HAPPEN</div><h2>Evaluation walkthrough</h2><p>The run view will follow each declared stage and reveal the evidence behind every score.</p><div className="preview-list">{benchmark.actions.map((action, index) => <div className="preview-step" key={String(action.id ?? index)}><span>{index + 1}</span><div><strong>{text(action.name, titleize(text(action.id, `Stage ${index + 1}`)))}</strong><small>{text(action.purpose, 'Observable benchmark action')}</small></div></div>)}</div><div className="preview-note"><Sparkles size={15} /><span>Scores appear as soon as the API returns the completed trajectory.</span></div></aside></div></section>
 }
 
 function RunWalkthrough({ benchmark, task, job, events, streamConnected, state, isActive, agent, model, testMode, seed, maxSteps, onBack, onNew }: { benchmark: BenchmarkDetail; task: JsonMap; job: EvaluationJob | null; events: EvaluationEvent[]; streamConnected: boolean; state: RunState; isActive: boolean; agent?: Agent; model: string; testMode: boolean; seed: number; maxSteps: string; onBack: () => void; onNew: () => void }) {
@@ -318,6 +348,8 @@ function RunWalkthrough({ benchmark, task, job, events, streamConnected, state, 
   const progressValue = number(job?.progress) ?? (state === 'COMPLETED' ? 100 : state === 'RUNNING' ? 45 : 8)
   const metrics = listOf(result.final_metrics)
   const evaluation = result.evaluation as JsonMap | undefined
+  const qualification = result.qualification as JsonMap | undefined
+  const qualificationStatus = text(qualification?.status, state === 'COMPLETED' ? 'legacy' : 'pending')
   const domainScores = listOf(evaluation?.domain_scores)
   const score = scoreOf(job)
   const actionTrace = (action: BenchmarkAction) => trajectory.find(step => {
@@ -330,8 +362,17 @@ function RunWalkthrough({ benchmark, task, job, events, streamConnected, state, 
   // Trust the seed the backend recorded for this job; the local form value can
   // drift from what actually ran once a job is queued.
   const reportedSeed = number((job as JsonMap | null)?.seed) ?? seed
+  const agentRun = result.agent_run as JsonMap | undefined
+  const tokenUsage = agentRun?.token_usage as JsonMap | undefined
+  const dimensions = [
+    { key: 'scientific_outcome_score', label: 'Outcome', short: 'O', value: number(evaluation?.scientific_outcome_score) },
+    { key: 'decision_quality_score', label: 'Decisions', short: 'D', value: number(evaluation?.decision_quality_score) },
+    { key: 'trajectory_score', label: 'Trajectory', short: 'T', value: number(evaluation?.trajectory_score) },
+  ]
   return <section className="page run-page"><div className="run-header">
-<div><div className="eyebrow"><span className={`status-dot ${isActive ? 'active' : state === 'COMPLETED' ? 'complete' : 'failed'}`} /> STEP 03 / LIVE EVALUATION</div><h1>{state === 'COMPLETED' ? <>Evaluation <em>complete.</em></> : state === 'FAILED' ? <>Evaluation <em>stopped.</em></> : <>Your model is <em>working.</em></>}</h1><p>{state === 'COMPLETED' ? 'Review the scorecard and the observable evidence produced by this run.' : state === 'FAILED' ? 'The run stopped, but the failure details and server logs are preserved below.' : 'Follow the declared workflow as the agent inspects data, chooses actions, and earns evidence-backed scores.'}</p></div><div className={`run-status ${state.toLowerCase()}`}><span>{state === 'PENDING' ? 'QUEUED' : state}</span><strong>{Math.round(progressValue)}%</strong><small>{text(job?.current_stage, state === 'PENDING' ? 'Waiting for a worker' : 'Processing benchmark')}</small></div></div><div className="progress-track"><span style={{ width: `${Math.min(100, Math.max(4, progressValue))}%` }} /></div><div className="run-context"><span><Beaker size={14} /> {benchmark.title}</span><span><Sparkles size={14} /> {testMode ? 'GLM test mode' : `${agent?.id ?? job?.agent_id ?? 'agent'}${model ? ` · ${model}` : ''}`}</span><span><ShieldCheck size={14} /> Seed {reportedSeed}</span>{configuredStepLimit !== null && <span><Activity size={14} /> Up to {configuredStepLimit} agent turns</span>}<span className="run-id"><Code2 size={14} /> {job?.job_id ?? 'waiting for job id'}</span></div>{state === 'FAILED' && <div className="failure-card"><TriangleAlert size={20} /><div><strong>Run failed</strong><p>{job?.error ?? 'The server did not provide a failure reason.'}</p><small>Open the evidence panel below for the captured logs and request context.</small></div></div>}<div className="run-layout"><div className="timeline-panel"><div className="panel-title"><div><span className="micro-label">WORKFLOW TRACE</span><h2>What the model is doing</h2></div><span className="live-label"><span className="pulse" /> {streamConnected ? 'LIVE EVENTS' : isActive ? 'LIVE POLLING' : 'FINAL TRACE'}</span></div><div className="timeline">{workflow.map(({ action, trace, index }) => { const traceResult = trace?.result as JsonMap | undefined; const traceStatus = text(traceResult?.status, trace ? 'completed' : index === 0 && isActive ? 'running' : 'waiting'); const failed = traceStatus.toLowerCase().includes('fail'); return <div className={`timeline-item ${trace ? 'visited' : ''} ${failed ? 'failed' : ''}`} key={String(action.id ?? index)}><div className="timeline-marker">{trace ? failed ? <XCircle size={16} /> : <Check size={16} /> : text(activeActionId) === text(action.id) ? <RotateCw size={15} className="spin" /> : index === 0 && isActive ? <RotateCw size={15} className="spin" /> : <span>{index + 1}</span>}</div><div className="timeline-content"><div className="timeline-head"><div><span className="stage-number">STAGE {String(index + 1).padStart(2, '0')}</span><h3>{text(action.name, titleize(text(action.id, 'Workflow stage')))}</h3></div><span className={`stage-status ${trace ? failed ? 'bad' : 'good' : text(activeActionId) === text(action.id) ? 'working' : index === 0 && isActive ? 'working' : ''}`}>{trace ? traceStatus : text(activeActionId) === text(action.id) ? 'in progress' : index === 0 && isActive ? 'in progress' : 'waiting'}</span></div><p>{text(action.purpose, 'The agent will execute this declared benchmark action.')}</p>{trace && <div className="trace-detail"><span><CheckCircle2 size={13} /> observable decision recorded</span>{traceResult?.error ? <span className="trace-error">{text(traceResult.error)}</span> : null}{trace.reward ? <span>local reward {String((trace.reward as JsonMap).value ?? '—')}</span> : null}</div>}</div></div>})}</div>{trajectory.length === 0 && isActive && <div className="waiting-callout"><RotateCw size={17} className="spin" /><span>Waiting for the first observable action from the worker…</span></div>}</div><aside className="score-panel"><div className="panel-title"><div><span className="micro-label">SCORECARD</span><h2>How it is scoring</h2></div><Gauge size={18} /></div><div className="global-score"><span>GLOBAL BENCHMARK SCORE</span><strong>{score === null ? '—' : score.toFixed(3)}</strong><small>{score === null ? 'Available when evaluation completes' : 'combined outcome + decision quality'}</small></div>{domainScores.length > 0 && <div className="score-section"><span className="micro-label">EVALUATION DIMENSIONS</span>{domainScores.map((item, index) => <ScoreBar key={String(item.domain ?? item.name ?? index)} label={titleize(text(item.domain, `Dimension ${index + 1}`))} value={number(item.value)} />)}</div>}{metrics.length > 0 && <div className="score-section"><span className="micro-label">SCIENTIFIC METRICS</span>{metrics.slice(0, 8).map((item, index) => <ScoreBar key={String(item.metric_id ?? item.metric_name ?? index)} label={text(item.metric_name, text(item.metric_id, `Metric ${index + 1}`))} value={number(item.normalized_score) ?? number(item.normalized_value)} />)}</div>}{state === 'COMPLETED' && metrics.length === 0 && <div className="empty-score"><Info size={16} /> The run completed without normalized metric values.</div>}</aside></div><AgentConversation events={events} /><EvidencePanel job={job} logs={logs} task={task} result={result} /><div className="run-actions">{isActive ? <button className="secondary" onClick={onBack}><ArrowLeft size={15} /> Edit configuration</button> : <button className="secondary" onClick={onNew}><Beaker size={15} /> Run another benchmark</button>}{state === 'COMPLETED' && <span className="completion-note"><CheckCircle2 size={16} /> Results persisted with the run artifacts.</span>}</div></section>
+<div><div className="eyebrow"><span className={`status-dot ${isActive ? 'active' : state === 'COMPLETED' ? 'complete' : 'failed'}`} /> STEP 03 / LIVE EVALUATION</div><h1>{state === 'COMPLETED' ? <>Evaluation <em>complete.</em></> : state === 'FAILED' ? <>Evaluation <em>stopped.</em></> : <>Your model is <em>working.</em></>}</h1><p>{state === 'COMPLETED' ? 'Review the scorecard and the observable evidence produced by this run.' : state === 'FAILED' ? 'The run stopped, but the failure details and server logs are preserved below.' : 'Follow the declared workflow as the agent inspects data, chooses actions, and earns evidence-backed scores.'}</p></div><div className={`run-status ${state.toLowerCase()}`}><span>{state === 'PENDING' ? 'QUEUED' : state}</span><strong>{Math.round(progressValue)}%</strong><small>{text(job?.current_stage, state === 'PENDING' ? 'Waiting for a worker' : 'Processing benchmark')}</small></div></div><div className="progress-track"><span style={{ width: `${Math.min(100, Math.max(4, progressValue))}%` }} /></div><div className="run-context"><span><Beaker size={14} /> {benchmark.title}</span><span><Sparkles size={14} /> {testMode ? 'GLM test mode' : `${agent?.id ?? job?.agent_id ?? 'agent'}${model ? ` · ${model}` : ''}`}</span><span><ShieldCheck size={14} /> Seed {reportedSeed}</span>{configuredStepLimit !== null && <span><Activity size={14} /> Up to {configuredStepLimit} agent turns</span>}<span className="run-id"><Code2 size={14} /> {job?.job_id ?? 'waiting for job id'}</span></div>{state === 'FAILED' && <div className="failure-card"><TriangleAlert size={20} /><div><strong>Run failed</strong><p>{job?.error ?? 'The server did not provide a failure reason.'}</p><small>Open the evidence panel below for the captured logs and request context.</small></div></div>}<div className="run-layout"><div className="timeline-panel"><div className="panel-title"><div><span className="micro-label">WORKFLOW TRACE</span><h2>What the model is doing</h2></div><span className="live-label"><span className="pulse" /> {streamConnected ? 'LIVE EVENTS' : isActive ? 'LIVE POLLING' : 'FINAL TRACE'}</span></div><div className="timeline">{workflow.map(({ action, trace, index }) => { const traceResult = trace?.result as JsonMap | undefined; const traceStatus = text(traceResult?.status, trace ? 'completed' : index === 0 && isActive ? 'running' : 'waiting'); const failed = traceStatus.toLowerCase().includes('fail'); return <div className={`timeline-item ${trace ? 'visited' : ''} ${failed ? 'failed' : ''}`} key={String(action.id ?? index)}><div className="timeline-marker">{trace ? failed ? <XCircle size={16} /> : <Check size={16} /> : text(activeActionId) === text(action.id) ? <RotateCw size={15} className="spin" /> : index === 0 && isActive ? <RotateCw size={15} className="spin" /> : <span>{index + 1}</span>}</div><div className="timeline-content"><div className="timeline-head"><div><span className="stage-number">STAGE {String(index + 1).padStart(2, '0')}</span><h3>{text(action.name, titleize(text(action.id, 'Workflow stage')))}</h3></div><span className={`stage-status ${trace ? failed ? 'bad' : 'good' : text(activeActionId) === text(action.id) ? 'working' : index === 0 && isActive ? 'working' : ''}`}>{trace ? traceStatus : text(activeActionId) === text(action.id) ? 'in progress' : index === 0 && isActive ? 'in progress' : 'waiting'}</span></div><p>{text(action.purpose, 'The agent will execute this declared benchmark action.')}</p>{trace && <div className="trace-detail"><span><CheckCircle2 size={13} /> observable decision recorded</span>{traceResult?.error ? <span className="trace-error">{text(traceResult.error)}</span> : null}{trace.reward ? <span>local reward {String((trace.reward as JsonMap).value ?? '—')}</span> : null}</div>}</div></div>})}</div>{trajectory.length === 0 && isActive && <div className="waiting-callout"><RotateCw size={17} className="spin" /><span>Waiting for the first observable action from the worker…</span></div>}</div><aside className="score-panel"><div className="panel-title"><div><span className="micro-label">SCORECARD</span><h2>How it is scoring</h2></div><Gauge size={18} /></div><div className="global-score"><span>GLOBAL BENCHMARK SCORE</span><strong>{score === null ? '—' : score.toFixed(3)}</strong><small>{score === null ? (qualificationStatus === 'legacy' ? 'Available when evaluation completes' : `Not comparable · ${titleize(qualificationStatus)}`) : 'O × D × T · benchmark-defined aggregation'}</small></div><div className={`qualification-banner ${qualificationStatus}`}><ShieldCheck size={14} /><span><strong>{titleize(qualificationStatus)}</strong><small>{qualification?.score_comparable === true ? 'This score is eligible for comparison.' : qualificationStatus === 'legacy' ? 'Qualification metadata was not present in this archived report.' : 'Diagnostic evidence is retained, but this run is not a certified benchmark measurement.'}</small></span></div><div className="dimension-grid">
+{dimensions.map(dimension => <DimensionCard key={dimension.key} label={dimension.label} short={dimension.short} value={dimension.value} />)}</div><div className="run-telemetry"><div><span>STEPS</span><strong>{number(agentRun?.step_count) ?? trajectory.length}</strong></div><div><span>TOKENS</span><strong>{number(tokenUsage?.total_tokens) ?? '—'}</strong></div><div><span>WALL TIME</span><strong>{number(agentRun?.wall_clock_seconds) === null ? '—' : `${number(agentRun?.wall_clock_seconds)?.toFixed(1)}s`}</strong></div></div>{domainScores.length > 0 &&
+ <div className="score-section"><span className="micro-label">EVALUATION DIMENSIONS</span>{domainScores.map((item, index) => <ScoreBar key={String(item.domain ?? item.name ?? index)} label={titleize(text(item.domain, `Dimension ${index + 1}`))} value={number(item.value)} />)}</div>}{metrics.length > 0 && <div className="score-section"><span className="micro-label">SCIENTIFIC METRICS</span>{metrics.slice(0, 8).map((item, index) => <ScoreBar key={String(item.metric_id ?? item.metric_name ?? index)} label={text(item.metric_name, text(item.metric_id, `Metric ${index + 1}`))} value={number(item.normalized_score) ?? number(item.normalized_value)} />)}</div>}{state === 'COMPLETED' && metrics.length === 0 && <div className="empty-score"><Info size={16} /> The run completed without normalized metric values.</div>}</aside></div><AgentConversation events={events} /><EvidencePanel job={job} logs={logs} task={task} result={result} /><div className="run-actions">{isActive ? <button className="secondary" onClick={onBack}><ArrowLeft size={15} /> Edit configuration</button> : <button className="secondary" onClick={onNew}><Beaker size={15} /> Run another benchmark</button>}{state === 'COMPLETED' && <span className="completion-note"><CheckCircle2 size={16} /> Results persisted with the run artifacts.</span>}</div></section>
 }
 
 function AgentConversation({ events }: { events: EvaluationEvent[] }) {
@@ -373,6 +414,11 @@ function AgentConversation({ events }: { events: EvaluationEvent[] }) {
   </section>
 }
 
+function DimensionCard({ label, short, value }: { label: string; short: string; value: number | null }) {
+  const percent = value === null ? 0 : Math.max(0, Math.min(1, value)) * 100
+  return <div className="dimension-card"><div className="dimension-heading"><span>{short}</span><small>{label}</small></div><strong>{value === null ? '—' : value.toFixed(3)}</strong><div className="dimension-track"><span style={{ width: `${percent}%` }} /></div></div>
+}
+
 function ScoreBar({ label, value }: { label: string; value: number | null }) {
   const percent = value === null ? 0 : Math.max(0, Math.min(1, value)) * 100
   return <div className="score-bar"><div><span>{label}</span><strong>{value === null ? '—' : value.toFixed(3)}</strong></div><div className="bar-track"><span style={{ width: `${percent}%` }} /></div></div>
@@ -381,7 +427,34 @@ function ScoreBar({ label, value }: { label: string; value: number | null }) {
 function EvidencePanel({ job, logs, task, result }: { job: EvaluationJob | null; logs: string[]; task: JsonMap; result: JsonMap }) {
   const [open, setOpen] = useState(false)
   const trace = listOf(result.trajectory)
-  return <details className="evidence-panel" open={open} onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}><summary><div><TerminalSquare size={16} /><span><strong>Evidence, logs &amp; run details</strong><small>Inspect the exact request, worker messages, and observable trajectory</small></span></div><ChevronRight size={17} /></summary><div className="evidence-grid"><div><span className="micro-label">WORKER LOG</span><div className="log-box">{logs.length ? logs.map((line, index) => <div key={`${line}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span>{line}</div>) : <div className="muted-log">No server log lines were returned. The worker may still be starting.</div>}{job?.error && <div className="log-error">ERROR · {job.error}</div>}</div></div><div><span className="micro-label">RUN CONTEXT</span><pre className="json-box">{JSON.stringify({ job_id: job?.job_id, benchmark_id: job?.benchmark_id, agent_id: job?.agent_id, task_id: task.id, status: job?.status, started_at: job?.started_at, finished_at: job?.finished_at }, null, 2)}</pre></div><div className="trajectory-json"><span className="micro-label">OBSERVABLE TRAJECTORY ({trace.length} events)</span><pre className="json-box">{JSON.stringify(trace, null, 2)}</pre></div></div></details>
+  const provenance = result.provenance as JsonMap | undefined
+  const environment = result.environment as JsonMap | undefined
+  const limitations = Array.isArray(provenance?.limitations)
+    ? provenance.limitations.map(String)
+    : Array.isArray(environment?.limitations)
+      ? environment.limitations.map(String)
+      : []
+  const integrity = {
+    request_sha256: job?.request_sha256,
+    run_id: job?.run_id ?? result.run_id,
+    benchmark_specification_digest: provenance?.benchmark_specification_digest,
+    scoring_profile_sha256: provenance?.scoring_profile_sha256,
+    source_dataset_sha256: provenance?.source_dataset_sha256,
+    source_dataset_checksum_verified: provenance?.source_dataset_checksum_verified,
+    agent_dataset_sha256: provenance?.agent_dataset_sha256,
+    loaded_shape: `${provenance?.loaded_cells ?? 'unknown'} x ${provenance?.loaded_genes ?? 'unknown'}`,
+    declared_shape: `${provenance?.declared_cells ?? 'unknown'} x ${provenance?.declared_genes ?? 'unknown'}`,
+    dataset_shape_verified: provenance?.dataset_shape_verified,
+    environment_backend: provenance?.environment_backend ?? environment?.backend,
+    environment_image_digest: provenance?.environment_image_digest ?? environment?.image_digest,
+    isolation_report_sha256: provenance?.isolation_report_sha256,
+    archive_manifest_sha256: provenance?.archive_manifest_sha256,
+    archive_verification: result.archive_verification,
+    result_sha256: provenance?.result_sha256,
+    termination: job?.termination_reason ?? provenance?.termination_reason,
+    qualification: result.qualification,
+  }
+  return <details className="evidence-panel" open={open} onToggle={event => setOpen((event.currentTarget as HTMLDetailsElement).open)}><summary><div><TerminalSquare size={16} /><span><strong>Evidence, logs &amp; run details</strong><small>Inspect the exact request, worker messages, provenance hashes, and observable trajectory</small></span></div><ChevronRight size={17} /></summary><div className="evidence-grid"><div><span className="micro-label">WORKER LOG</span><div className="log-box">{logs.length ? logs.map((line, index) => <div key={`${line}-${index}`}><span>{String(index + 1).padStart(2, '0')}</span>{line}</div>) : <div className="muted-log">No server log lines were returned. The worker may still be starting.</div>}{job?.error && <div className="log-error">ERROR · {job.error}</div>}</div></div><div><span className="micro-label">RUN CONTEXT</span><pre className="json-box">{JSON.stringify({ job_id: job?.job_id, benchmark_id: job?.benchmark_id, agent_id: job?.agent_id, task_id: task.id, status: job?.status, request_sha256: job?.request_sha256, resolved_execution: job?.resolved_execution, started_at: job?.started_at, finished_at: job?.finished_at }, null, 2)}</pre></div><div><span className="micro-label">PROVENANCE &amp; INTEGRITY</span><pre className="json-box">{JSON.stringify(integrity, null, 2)}</pre>{limitations.length > 0 && <div className="limitation-list"><strong>Recorded limitations</strong>{limitations.slice(0, 8).map(limitation => <span key={limitation}><Info size={11} /> {limitation}</span>)}</div>}</div><div className="trajectory-json"><span className="micro-label">OBSERVABLE TRAJECTORY ({trace.length} events)</span><pre className="json-box">{JSON.stringify(trace, null, 2)}</pre></div></div></details>
 }
 
 export default App

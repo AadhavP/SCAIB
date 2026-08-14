@@ -121,15 +121,17 @@ def isolation_from_constraints(
 
     This function is the only place the execution layer meets the benchmark DSL,
     which is what keeps the backends reusable by anything that does not speak it.
-    It is also where four long-declared-but-inert constraint fields finally get a
-    consumer.
+    Wall-clock budgets remain controller concerns; only controls with a matching
+    backend mechanism are translated into the isolation request.
     """
     return IsolationRequest(
         network_access=constraints.internet_access,
         max_memory_mb=constraints.max_memory_mb,
-        max_cpu_seconds=constraints.max_runtime_seconds,
-        max_processes=None,
-        max_file_size_mb=None,
+        # Wall-clock and CPU budgets are separate benchmark declarations. Only an
+        # explicit CPU budget becomes RLIMIT_CPU/Docker ``--ulimit cpu``.
+        max_cpu_seconds=constraints.max_cpu_seconds,
+        max_processes=constraints.max_processes,
+        max_file_size_mb=constraints.max_file_size_mb,
     )
 
 

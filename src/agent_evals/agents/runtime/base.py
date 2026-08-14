@@ -42,5 +42,13 @@ class AgentRuntime(ABC):
     ) -> FinalSubmission:
         """Return the final observable submission and release resources."""
 
+    async def close(self) -> None:
+        """Release transport resources when a session cannot be terminated.
+
+        Runtimes that own a client (for example an HTTP endpoint adapter) override
+        this. The default keeps existing native runtimes source-compatible.
+        """
+        return None
+
 
 __all__ = ["AgentRuntime"]

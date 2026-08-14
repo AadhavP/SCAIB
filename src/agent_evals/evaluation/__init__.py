@@ -22,6 +22,11 @@ from agent_evals.evaluation.models import (
     ScientificEvaluation,
     TrajectoryEvaluation,
 )
+from agent_evals.evaluation.qualification import (
+    QualificationStatus,
+    RunQualification,
+    qualify_run,
+)
 from agent_evals.evaluation.scientific import ScientificMetricEngine
 from agent_evals.evaluation.trajectory import TrajectoryEvaluator
 
@@ -36,6 +41,8 @@ __all__ = [
     "MethodEvaluator",
     "MethodScore",
     "MethodSelectionEvaluator",
+    "QualificationStatus",
+    "RunQualification",
     "ScientificEvaluation",
     "ScientificMetricEngine",
     "ScoreConfidence",
@@ -45,4 +52,5 @@ __all__ = [
     "compute_global_agent_score",
     "compute_score_confidence",
     "describe_score",
+    "qualify_run",
 ]

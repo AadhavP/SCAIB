@@ -77,6 +77,7 @@ def build_agent_task_package(
             "artifacts": list(task.artifacts),
             "required_artifacts": sorted(specification.required_task_artifacts(task)),
             "metrics": list(task.metrics),
+            "execution_mode": specification.effective_execution_mode(task).value,
         },
         "datasets": selected_datasets,
         "observations": selected_observations,
@@ -130,6 +131,20 @@ def build_agent_task_package(
             if task.environment in environments
             else None
         ),
+        "execution": {
+            "mode": specification.effective_execution_mode(task).value,
+            "typed_actions": [
+                action["id"]
+                for action in selected_actions
+                if action["kind"] == ActionKind.TYPED.value
+            ],
+            "workspace_actions": [
+                action["id"]
+                for action in selected_actions
+                if action["kind"] == ActionKind.FREE_EXECUTION.value
+            ],
+            "state_authority": "SCAIB verifies environment state; agent claims are advisory",
+        },
         "interaction_protocol": {
             "turn": "The agent receives the current state and returns one action per turn.",
             "feedback": "After every accepted action, inspect execution status, outputs, state changes, and pipeline history before choosing the next action.",
@@ -186,6 +201,20 @@ def _action_contract(action: Any) -> dict[str, Any]:
         "name": action.name,
         "purpose": action.purpose,
         "kind": action.kind.value if isinstance(action.kind, ActionKind) else action.kind,
+        # Make execution ownership explicit at the boundary. Typed actions are
+        # executed by SCAIB's declared scientific implementation; free actions
+        # run agent-authored code in the provisioned workspace and are verified
+        # through files, artifacts, and state deltas.
+        "execution_owner": (
+            "scaib_environment"
+            if action.kind is ActionKind.TYPED
+            else "agent_workspace"
+        ),
+        "verification": (
+            "typed_result_and_artifacts"
+            if action.kind is ActionKind.TYPED
+            else "workspace_fingerprint_artifact_checksums_and_dataset_delta"
+        ),
         "parameters": [
             {
                 "name": parameter.name,

@@ -115,6 +115,8 @@ def test_agent_task_package_contains_executable_scientific_contract() -> None:
         if parameter["name"] == "method"
     )
     assert package["artifacts"]
+    assert qc["execution_owner"] == "scaib_environment"
+    assert qc["verification"] == "typed_result_and_artifacts"
     assert package["interaction_protocol"]["failure_recovery"]
 
 
@@ -128,4 +130,45 @@ def test_declared_defaults_are_materialized_at_the_environment_boundary() -> Non
     assert intent.parameters["method"] == "fixed_threshold"
     assert intent.parameters["min_genes"] == 200
     assert intent.parameters["max_mito_fraction"] == 0.2
+
+
+def test_parameter_validation_rejects_provider_coercion_for_scalar_types() -> None:
+    """A stringified threshold must not silently become a scientific number."""
+    specification = load_benchmark(EXAMPLES / "pbmc-cell-annotation.yaml")
+    action = next(item for item in specification.actions if item.id == "qc")
+
+    errors = DeclarativeActionValidator._validate_parameters(
+        action,
+        ActionIntent(
+            action_id="qc",
+            parameters={
+                "method": "fixed_threshold",
+                "min_genes": "200",
+                "max_mito_fraction": 0.2,
+                "min_cells": 1,
+            },
+        ),
+    )
+
+    assert any("min_genes" in error and "integer" in error for error in errors)
+
+
+def test_parameter_validation_checks_nested_collection_types() -> None:
+    """List-shaped scientific parameters must not accept a scalar by accident."""
+    specification = load_benchmark(EXAMPLES / "pbmc-differential-expression.yaml")
+    action = next(item for item in specification.actions if item.id == "differential-expression")
+
+    errors = DeclarativeActionValidator._validate_parameters(
+        action,
+        ActionIntent(
+            action_id="differential-expression",
+            parameters={
+                "method": "wilcoxon",
+                "group_key": "clusters",
+                "covariates": "batch",
+            },
+        ),
+    )
+
+    assert any("covariates" in error and "list[string]" in error for error in errors)
 

@@ -24,7 +24,7 @@ def pbmc_annotation_profile() -> BenchmarkMetricProfile:
                 weight=0.2,
                 metrics={
                     "batch_integration.iLISI": MetricProfileEntry(weight=0.6, required=False),
-                    "batch_integration.graph_connectivity": MetricProfileEntry(weight=0.4, required=False),
+                    "biological_conservation.graph_connectivity": MetricProfileEntry(weight=0.4, required=False),
                 },
             ),
             "robustness": MetricGroupProfile(

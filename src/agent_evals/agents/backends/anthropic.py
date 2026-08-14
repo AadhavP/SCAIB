@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import os
+from collections.abc import Mapping
 from typing import Any
 
+from agent_evals.agents.decisions import extract_action_response
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.protocol import (
     AgentAction,
@@ -14,6 +18,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentModelInfo,
     AgentObservation,
     AgentSession,
+    AgentUsage,
     FinalSubmission,
 )
 
@@ -70,23 +75,39 @@ class AnthropicRuntime(AgentRuntime):
         session.state.setdefault("messages", []).append(
             {"role": "user", "content": json.dumps(observation.model_dump(mode="json"))}
         )
-        response = self.client.messages.create(
+        response = await asyncio.to_thread(
+            self.client.messages.create,
             model=self.model,
             max_tokens=2048,
             messages=session.state["messages"],
             system=self.system_prompt,
             tools=self.tools,
         )
-        response = await response if hasattr(response, "__await__") else response
+        if inspect.isawaitable(response):
+            response = await response
+        usage = _provider_usage(response)
         block = _first_content_block(response)
         if block is not None and _read(block, "type") == "tool_use":
-            return AgentAction(
-                action_type=str(_read(block, "name")),
-                parameters=_read(block, "input") or {},
+            payload, evidence = extract_action_response(
+                {
+                    "action_type": str(_read(block, "name")),
+                    "parameters": _read(block, "input") or {},
+                },
             )
+            if usage is not None:
+                payload["usage"] = usage
+            payload["extraction_evidence"] = evidence.model_copy(
+                update={"source": "provider_tool_call"}
+            )
+            return AgentAction.model_validate(payload)
         text = _read(block, "text") if block is not None else _read(response, "content.0.text")
-        parsed = json.loads(text) if isinstance(text, str) else text
-        return AgentAction.model_validate(parsed)
+        payload, evidence = extract_action_response(text)
+        if usage is not None and "usage" not in payload:
+            payload["usage"] = usage
+        payload["extraction_evidence"] = evidence.model_copy(
+            update={"source": "provider_text"}
+        )
+        return AgentAction.model_validate(payload)
 
     async def terminate(
         self,
@@ -120,6 +141,23 @@ def _build_anthropic_client(*, api_key: str | None, base_url: str | None) -> Any
 def _first_content_block(response: Any) -> Any | None:
     content = _read(response, "content")
     return content[0] if isinstance(content, list) and content else None
+
+
+def _provider_usage(response: Any) -> AgentUsage | None:
+    """Translate Anthropic per-message usage into the public envelope."""
+    raw = _read(response, "usage")
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(mode="json")
+    if not isinstance(raw, Mapping):
+        return None
+    usage: dict[str, Any] = {
+        key: raw[key]
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance(raw.get(key), int) and raw[key] >= 0
+    }
+    if "total_tokens" not in usage and "input_tokens" in usage and "output_tokens" in usage:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    return AgentUsage.model_validate({**usage, "source": "provider"}) if usage else None
 
 
 def _read(value: Any, path: str) -> Any:

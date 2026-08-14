@@ -32,8 +32,8 @@ describe('API client', () => {
   it('posts a run request without mutating the supplied override', async () => {
     const fetcher = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ job_id: 'job-1', benchmark_id: 'pbmc', agent_id: 'mock', status: 'pending' }) })
     const override = { seed: 42 }
-    await createApiClient(fetcher).run({ benchmark_id: 'pbmc', agent_id: 'mock', test_mode: false, config_override: override })
-    expect(fetcher).toHaveBeenCalledWith('/v1/evaluations/run', expect.objectContaining({ method: 'POST', body: JSON.stringify({ benchmark_id: 'pbmc', agent_id: 'mock', config_override: { seed: 42 } }) }))
+    await createApiClient(fetcher).run({ benchmark_id: 'pbmc', agent_id: 'mock', test_mode: false, idempotency_key: 'retry-1', config_override: override })
+    expect(fetcher).toHaveBeenCalledWith('/v1/evaluations/run', expect.objectContaining({ method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'retry-1' }, body: JSON.stringify({ benchmark_id: 'pbmc', agent_id: 'mock', config_override: { seed: 42 } }) }))
     expect(override).toEqual({ seed: 42 })
   })
 })

@@ -14,6 +14,18 @@ SNIPPET="$SNIPPET_DIR/api-auth.conf"
 mkdir -p "$SNIPPET_DIR"
 
 if [ -n "${AGENT_EVALS_API__API_KEY:-}" ]; then
+    # Keep the generated nginx directive injection-safe. The API applies the
+    # same URL-safe character contract during production startup.
+    case "$AGENT_EVALS_API__API_KEY" in
+        *[!A-Za-z0-9._~-]* )
+            echo "api-auth: API key contains unsupported characters" >&2
+            exit 1
+            ;;
+    esac
+    if [ "${#AGENT_EVALS_API__API_KEY}" -lt 16 ] || [ "${#AGENT_EVALS_API__API_KEY}" -gt 256 ]; then
+        echo "api-auth: API key must contain 16-256 characters" >&2
+        exit 1
+    fi
     # Escape the two characters nginx treats specially inside a quoted string.
     escaped=$(printf '%s' "$AGENT_EVALS_API__API_KEY" | sed 's/\\/\\\\/g; s/"/\\"/g')
     printf 'proxy_set_header Authorization "Bearer %s";\n' "$escaped" > "$SNIPPET"

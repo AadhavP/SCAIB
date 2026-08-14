@@ -20,6 +20,7 @@ class RandomAgentBaseline(BaselineRunner):
         return BaselineResult(
             baseline_id=self.baseline_id,
             status="planned",
+            seed=seed,
             actions=chosen,
             metadata={"seed": seed},
         )

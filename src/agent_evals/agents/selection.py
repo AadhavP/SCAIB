@@ -37,6 +37,7 @@ def build_agent_adapter(
     agent_type: str,
     *,
     model: str | None = None,
+    agent_endpoint: str | None = None,
     event_callback: EventCallback | None = None,
     test_mode: bool = False,
 ) -> Any:
@@ -49,11 +50,21 @@ def build_agent_adapter(
     -- and it raises rather than silently degrading when no key is present.
     """
     if test_mode:
+        if agent_endpoint is not None:
+            raise ValueError(
+                "agent_endpoint cannot be combined with test_mode; test_mode selects "
+                "the configured hosted runtime"
+            )
         runtime = compatible_runtime_from_environment(model=model)
         return RuntimeAgentAdapter(runtime, event_callback=event_callback)
+    if agent_endpoint is not None and agent_type != "http-step":
+        raise ValueError(
+            f"agent_endpoint is only valid for the 'http-step' runtime, not '{agent_type}'"
+        )
     if is_universal_runtime(agent_type):
         return RuntimeAgentAdapter(
-            build_runtime(agent_type, model=model), event_callback=event_callback
+            build_runtime(agent_type, model=model, endpoint=agent_endpoint),
+            event_callback=event_callback,
         )
     return agent_adapter_registry.create(agent_type)
 

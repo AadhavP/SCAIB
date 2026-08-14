@@ -52,6 +52,16 @@ class IsolationControl(StrEnum):
     FILESYSTEM_SCOPE = "filesystem_scope"
     #: Whether the execution's environment was reduced to an allowlist.
     ENVIRONMENT = "environment"
+    #: Whether Linux capabilities were dropped from the execution process.
+    CAPABILITIES = "capabilities"
+    #: Whether privilege escalation was disabled by the runtime.
+    PRIVILEGE_ESCALATION = "privilege_escalation"
+    #: Whether the container root filesystem was mounted read-only.
+    ROOT_FILESYSTEM = "root_filesystem"
+    #: Whether temporary writes use a controlled temporary filesystem.
+    TEMPORARY_FILESYSTEM = "temporary_filesystem"
+    #: Whether the process runs as a non-root identity.
+    NON_ROOT = "non_root"
 
 
 class IsolationOutcome(StrEnum):

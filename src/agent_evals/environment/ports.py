@@ -6,12 +6,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from agent_evals.benchmarks.schema import (
+    ActionKind,
     ActionSpecification,
     BenchmarkSpecification,
     ConstraintSpecification,
     TaskSpecification,
     ValidationRule,
 )
+from agent_evals.core.intent_parameters import EXECUTION_PARAMETERS
 from agent_evals.environment.models import (
     ActionExecutionResult,
     ActionIntent,
@@ -246,11 +248,29 @@ class DeclarativeActionValidator:
         action: ActionSpecification,
         intent: ActionIntent,
     ) -> list[str]:
-        """Validate parameter names, required values, choices, and numeric bounds."""
+        """Validate names, declared types, choices, required values, and bounds.
+
+        The parameter schema is part of the benchmark contract, not display-only
+        documentation. In particular, accepting ``"15"`` for an integer or
+        ``1`` for a boolean lets provider adapters and executor defaults disagree
+        about what scientific operation actually ran. Free-execution mechanics are
+        accepted only when the action declares them, so a script cannot smuggle an
+        undeclared language or artifact contract through the universal boundary.
+        """
         errors: list[str] = []
         definitions = {parameter.name: parameter for parameter in action.parameters}
-        unknown = sorted(set(intent.parameters) - set(definitions))
-        errors.extend(f"action '{action.id}' has unknown parameter '{item}'" for item in unknown)
+        allowed_names = set(definitions)
+        if action.kind is ActionKind.FREE_EXECUTION:
+            # These are executor mechanics, not scientific parameters. They still
+            # have to be declared by the free action so the public task package,
+            # validator, and executor share one explicit contract.
+            allowed_names.update(
+                name for name in EXECUTION_PARAMETERS if name in definitions
+            )
+        unknown = sorted(set(intent.parameters) - allowed_names)
+        errors.extend(
+            f"action '{action.id}' has unknown parameter '{item}'" for item in unknown
+        )
         for name, parameter in definitions.items():
             if parameter.required and name not in intent.parameters and parameter.default is None:
                 errors.append(f"action '{action.id}' is missing required parameter '{name}'")
@@ -258,6 +278,15 @@ class DeclarativeActionValidator:
             if name not in intent.parameters:
                 continue
             value = intent.parameters[name]
+            type_error = _parameter_type_error(value, parameter.type)
+            if type_error is not None:
+                errors.append(
+                    f"parameter '{name}' has type {type(value).__name__}; "
+                    f"expected {parameter.type} ({type_error})"
+                )
+                # Do not apply choices or numeric comparisons to the wrong type;
+                # the type finding is the authoritative contract failure.
+                continue
             if parameter.choices and value not in parameter.choices:
                 errors.append(
                     f"parameter '{name}' must be one of {parameter.choices}, got {value!r}"
@@ -268,6 +297,46 @@ class DeclarativeActionValidator:
                 if parameter.maximum is not None and value > parameter.maximum:
                     errors.append(f"parameter '{name}' exceeds maximum {parameter.maximum}")
         return errors
+
+
+def _parameter_type_error(value: Any, declared_type: str) -> str | None:  # noqa: C901
+    """Return a concise mismatch reason, or ``None`` for a compatible value.
+
+    Benchmark authors may use domain-specific types such as ``anndata`` or
+    ``categorical_vector`` whose runtime object cannot be validated at this
+    generic boundary. Those types remain executor-specific. Common scalar and
+    collection types are checked here because they are unambiguous and provider
+    coercion must not silently alter a scientific parameter.
+    """
+    normalized = declared_type.strip().lower().replace(" ", "")
+    if normalized in {"enum", "any", "unknown"}:
+        return None
+    if normalized in {"string", "str", "text"}:
+        return None if isinstance(value, str) else "a string is required"
+    if normalized in {"boolean", "bool"}:
+        return None if isinstance(value, bool) else "a boolean is required"
+    if normalized in {"integer", "int"}:
+        return None if isinstance(value, int) and not isinstance(value, bool) else "an integer is required"
+    if normalized in {"number", "float", "double"}:
+        return (
+            None
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+            else "a finite numeric value is required"
+        )
+    if normalized in {"array", "list", "tuple"}:
+        return None if isinstance(value, (list, tuple)) else "an array is required"
+    if normalized in {"object", "dict", "mapping"}:
+        return None if isinstance(value, Mapping) else "an object is required"
+    if normalized.startswith("list[") and normalized.endswith("]"):
+        if not isinstance(value, (list, tuple)):
+            return "an array is required"
+        item_type = normalized[5:-1]
+        for item in value:
+            error = _parameter_type_error(item, item_type)
+            if error is not None:
+                return f"every item must satisfy {item_type}: {error}"
+        return None
+    return None
 
 class ConstraintMonitor:
     """Check measured executor usage against declarative resource limits."""

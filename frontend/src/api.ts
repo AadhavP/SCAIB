@@ -35,6 +35,12 @@ export type EvaluationJob = {
   agent_id: string
   /** Seed the backend resolved for this run; may differ from the submitted form value. */
   seed?: number
+  request_sha256?: string
+  resolved_execution?: JsonMap
+  run_id?: string | null
+  termination_status?: string | null
+  termination_reason?: string | null
+  qualification_status?: string | null
   status: string
   created_at?: string
   started_at?: string | null
@@ -48,15 +54,27 @@ export type EvaluationJob = {
 export type RunRequest = {
   benchmark_id: string
   agent_id: string
+  task_id?: string
+  dataset_id?: string
   model?: string
   provider?: string
+  /** Public black-box agent endpoint; credentials remain backend-side. */
+  agent_endpoint?: string
   test_mode?: boolean
   seed?: number
   max_cells?: number
   max_steps?: number
   config_override?: JsonMap
+  /** Sent as an HTTP Idempotency-Key header, never as agent input. */
+  idempotency_key?: string
 }
-export type RunResponse = RunRequest & { job_id: string; status: string }
+export type RunResponse = RunRequest & {
+  job_id: string
+  status: string
+  request_sha256?: string
+  seed?: number
+  resolved_execution?: JsonMap
+}
 export type ApiClient = {
   health: () => Promise<Health>
   benchmarks: () => Promise<string[]>
@@ -98,9 +116,10 @@ export function createApiClient(fetcher: Fetcher = fetch): ApiClient {
     eventStream: (id) => `/v1/evaluations/${encodeURIComponent(id)}/events`,
     run: async (payload) => {
       try {
-        const { test_mode: requestedTestMode, ...requestBody } = payload
+        const { test_mode: requestedTestMode, idempotency_key: idempotencyKey, ...requestBody } = payload
         return await request<RunResponse>(fetcher, '/v1/evaluations/run', {
           method: 'POST',
+          ...(idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : {}),
           body: JSON.stringify({
             ...requestBody,
             ...(requestedTestMode ? { test_mode: true } : {}),

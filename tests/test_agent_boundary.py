@@ -35,7 +35,9 @@ docstring.
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from pydantic import ValidationError
 
 pytest.importorskip("anndata")
 
@@ -43,12 +45,15 @@ import anndata
 import numpy as np
 import pandas as pd
 
+from agent_evals.agents.backends.aliases import build_runtime
 from agent_evals.agents.backends.http_step import (
     ENDPOINT_VARIABLE,
+    MAX_RESPONSE_BYTES,
     TOKEN_VARIABLE,
     HttpStepError,
     HttpStepRuntime,
     public_endpoint,
+    validate_endpoint_url,
 )
 from agent_evals.agents.runtime import agent_runtime_registry
 from agent_evals.agents.runtime.manager import RuntimeVerdict, cutoff_termination
@@ -57,6 +62,9 @@ from agent_evals.agents.runtime.protocol import (
     AgentObservation,
     AgentSession,
 )
+from agent_evals.agents.selection import build_agent_adapter
+from agent_evals.api.jobs import resolve_execution
+from agent_evals.api.routes import RunBenchmarkRequest
 from agent_evals.benchmarks.io import load_benchmark
 from agent_evals.benchmarks.schema import (
     ActionKind,
@@ -590,7 +598,11 @@ async def test_the_step_endpoint_sees_one_envelope_per_turn() -> None:
     client = RecordingClient(
         {
             "initialize": {"state": {"remote": 1}},
-            "observation": {"action_type": "analyze", "parameters": {"code": "pass"}},
+            "observation": {
+                "action_type": "analyze",
+                "parameters": {"code": "pass"},
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            },
             "terminate": {"summary": "done"},
         }
     )
@@ -606,8 +618,30 @@ async def test_the_step_endpoint_sees_one_envelope_per_turn() -> None:
         "terminate",
     ]
     assert action.action_type == "analyze"
+    assert action.usage is not None
+    assert action.usage.total_tokens == 15
     assert submission.summary == "done"
     assert session.state["remote"] == {"remote": 1}
+
+
+async def test_free_form_text_is_extracted_at_the_black_box_boundary() -> None:
+    """A URL agent may answer in prose, but only explicit action text is used."""
+    client = RecordingClient(
+        {
+            "observation": RecordingResponse(
+                ValueError("not json"),
+                text="action: run-analysis\nmethod: PCA\nconfidence: 0.8",
+            )
+        }
+    )
+    runtime = _runtime(client)
+
+    action = await runtime.act(AgentSession(context=_context()), _observation())
+
+    assert action.action_type == "run-analysis"
+    assert action.reasoning_metadata["decision"]["method"] == "PCA"
+    assert action.extraction_evidence is not None
+    assert action.extraction_evidence.mode.value == "free_text"
 
 
 async def test_a_declined_plan_is_not_invented() -> None:
@@ -630,6 +664,44 @@ async def test_a_failed_step_is_not_retried() -> None:
         await runtime.act(session, _observation())
 
     assert len(client.posts) == 1
+
+
+async def test_an_oversized_boundary_reply_is_rejected_before_extraction() -> None:
+    """A black-box agent cannot turn an unbounded response into retained state."""
+    response = RecordingResponse({"action_type": "analyze"})
+    response.content = b"x" * (MAX_RESPONSE_BYTES + 1)
+    runtime = _runtime(RecordingClient({"observation": response}))
+
+    with pytest.raises(HttpStepError, match="response limit"):
+        await runtime.act(AgentSession(context=_context()), _observation())
+
+
+async def test_the_real_http_client_streams_and_decodes_a_boundary_reply() -> None:
+    """The production httpx path enforces limits without buffering untrusted data."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/step"
+        return httpx.Response(200, json={"action_type": "analyze"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    runtime = _runtime(client)
+    try:
+        action = await runtime.act(AgentSession(context=_context()), _observation())
+    finally:
+        await client.aclose()
+
+    assert action.action_type == "analyze"
+
+
+async def test_a_black_box_reply_cannot_be_replayed_into_the_wrong_turn() -> None:
+    """An endpoint may omit correlation, but a supplied mismatched id is rejected."""
+    runtime = _runtime(
+        RecordingClient(
+            {"observation": {"request_id": "wrong-turn", "action_type": "analyze"}}
+        )
+    )
+
+    with pytest.raises(HttpStepError, match="mismatched request_id"):
+        await runtime.act(AgentSession(context=_context()), _observation())
 
 
 @pytest.mark.parametrize(
@@ -676,6 +748,15 @@ def test_credentials_are_stripped_before_an_endpoint_is_recorded(
     assert public_endpoint(url) == expected
 
 
+def test_http_endpoint_rejects_credentials_query_secrets_and_invalid_ports_at_the_boundary() -> None:
+    with pytest.raises(HttpStepError, match="valid host and port"):
+        validate_endpoint_url("https://agent.example:not-a-port/step")
+    with pytest.raises(HttpStepError, match="credentials"):
+        validate_endpoint_url("https://user:secret@agent.example/step")
+    with pytest.raises(HttpStepError, match="query string"):
+        validate_endpoint_url("https://agent.example/step?token=secret")
+
+
 def test_an_http_step_agent_without_an_endpoint_refuses_to_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -694,6 +775,68 @@ def test_an_http_step_agent_without_an_endpoint_refuses_to_start(
 def test_the_black_box_tier_is_reachable_by_name() -> None:
     """A tier nothing can select is a tier nobody can submit to."""
     assert "http-step" in agent_runtime_registry.list()
+
+
+def test_a_black_box_endpoint_can_be_selected_without_environment_state() -> None:
+    """The public URL is an adapter input, not a benchmark implementation detail."""
+    runtime = build_runtime("http-step", endpoint="https://agent.example/step")
+
+    assert isinstance(runtime, HttpStepRuntime)
+    assert runtime.endpoint == "https://agent.example/step"
+    assert runtime.manifest.metadata["endpoint"] == "https://agent.example/step"
+
+
+def test_endpoint_selection_builds_the_same_universal_adapter_as_other_runtimes() -> None:
+    """The scientific loop should not need a provider-specific execution branch."""
+    adapter = build_agent_adapter(
+        "http-step", agent_endpoint="https://agent.example/step"
+    )
+
+    assert adapter.runtime.endpoint == "https://agent.example/step"
+
+
+def test_api_run_request_carries_the_endpoint_without_carrying_agent_credentials() -> None:
+    """REST submission and the worker must preserve the URL as one execution setting."""
+    request = RunBenchmarkRequest(
+        benchmark_id="pbmc-cell-annotation",
+        agent_id="http-step",
+        agent_endpoint="https://agent.example/step",
+    )
+
+    execution = resolve_execution(request.model_dump(exclude_none=True))
+
+    assert execution["agent_endpoint"] == "https://agent.example/step"
+    assert "agent_token" not in execution
+
+
+def test_api_rejects_endpoint_mismatch_and_embedded_credentials() -> None:
+    with pytest.raises(ValidationError, match="only valid"):
+        RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="mock",
+            agent_endpoint="https://agent.example/step",
+        )
+    with pytest.raises(ValidationError, match="credentials"):
+        RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="http-step",
+            agent_endpoint="https://user:secret@agent.example/step",
+        )
+    with pytest.raises(ValidationError, match="query string"):
+        RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="http-step",
+            agent_endpoint="https://agent.example/step?token=secret",
+        )
+
+
+def test_api_black_box_endpoint_rejects_obvious_private_destinations() -> None:
+    with pytest.raises(ValidationError, match="private or non-global"):
+        RunBenchmarkRequest(
+            benchmark_id="pbmc-cell-annotation",
+            agent_id="http-step",
+            agent_endpoint="http://127.0.0.1:8000/step",
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -972,3 +1115,24 @@ def test_the_reserved_column_guard_would_notice_a_retargeted_rule() -> None:
         _rule_targets("obs.cell_type is non-null and belongs to label_vocabulary")
         & RESERVED_REFERENCE_COLUMNS
     )
+
+
+@pytest.mark.asyncio
+async def test_http_logical_request_ids_are_stable_for_transport_replay() -> None:
+    """A lost response can be replayed without creating a second logical turn."""
+    client = RecordingClient()
+    runtime = _runtime(client)
+    payload = {
+        "type": "observation",
+        "session_id": "session-1",
+        "step": 3,
+        "observation": {},
+    }
+
+    await runtime._post(payload)
+    await runtime._post(payload)
+    await runtime._post({**payload, "step": 4})
+
+    request_ids = [post["request_id"] for post in client.posts]
+    assert request_ids[0] == request_ids[1]
+    assert request_ids[0] != request_ids[2]

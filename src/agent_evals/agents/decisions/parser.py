@@ -33,11 +33,36 @@ paper.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+class ExtractionMode(StrEnum):
+    """How the benchmark converted one agent boundary response into a decision."""
+
+    STRUCTURED = "structured"
+    JSON_TEXT = "json_text"
+    FREE_TEXT = "free_text"
+
+
+class ResponseExtractionEvidence(BaseModel):
+    """Auditable, non-reasoning provenance for a normalized agent response."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    mode: ExtractionMode
+    source: str = "agent_boundary"
+    raw_sha256: str = Field(min_length=64, max_length=64)
+    raw_length: int = Field(ge=0)
+    raw_content_retained: bool = False
+    extracted_fields: list[str] = Field(default_factory=list)
+    findings: list[str] = Field(default_factory=list)
 
 #: Metadata key holding this layer's verdict on the agent's stated reasoning.
 DECISION_QUALITY_KEY = "decision_extraction_quality"
@@ -214,6 +239,14 @@ def _merge_decision_block(
             f"ignored 'decision' block of type {type(block).__name__}; "
             "expected a mapping of decision fields"
         )
+    # ``decision_text`` is emitted by this extractor when a nested decision was
+    # prose. A second normalization pass is used for legacy/direct intents, so
+    # recover that text here instead of downgrading a recorded malformed
+    # decision to ``ABSENT``. This makes extraction idempotent while still never
+    # trusting an agent-authored quality verdict.
+    stored_text = reasoning.get(DECISION_TEXT_KEY)
+    if prose is None and isinstance(stored_text, str) and stored_text.strip():
+        prose = stored_text.strip()
     overlap = sorted(set(merged) & set(reasoning) - {_DECISION_BLOCK})
     if overlap:
         findings.append(
@@ -340,6 +373,359 @@ def _as_map(key: str, value: Any) -> tuple[Any, str | None]:
     return {str(name): entry for name, entry in value.items()}, None
 
 
+_MAX_EXTRACTED_TEXT = 2_000
+_ACTION_NAME_PATTERN = re.compile(
+    r"(?:action(?:_type)?|operation|next[ _-]+action)\s*[:=]\s*[`\"']?"
+    r"([A-Za-z][A-Za-z0-9_.-]*)",
+    re.IGNORECASE,
+)
+_METHOD_PATTERN = re.compile(
+    r"(?:method|algorithm|implementation)\s*[:=]\s*[`\"']?([^\n,;`\"']+)",
+    re.IGNORECASE,
+)
+_CONFIDENCE_PATTERN = re.compile(
+    r"confidence\s*[:=]\s*(0(?:\.\d+)?|1(?:\.0+)?)",
+    re.IGNORECASE,
+)
+_EVIDENCE_PATTERN = re.compile(
+    r"(?:evidence(?:_used)?|based on)\s*[:=]\s*([^\n]+)",
+    re.IGNORECASE,
+)
+
+
+def extract_action_response(
+    response: Any,
+    *,
+    available_actions: Sequence[str] = (),
+) -> tuple[dict[str, Any], ResponseExtractionEvidence]:
+    """Convert structured or free-form boundary output into one action.
+
+    Level-0 agents are allowed to return text, but text is never treated as
+    authoritative state. This extractor only produces a candidate action; the
+    environment still validates and executes it, and the returned evidence says
+    whether the candidate was structured, JSON-in-text, or inferred from prose.
+    The raw response is hashed rather than persisted so the benchmark records
+    provenance without turning an arbitrary agent reply into retained private
+    chain-of-thought.
+    """
+    raw = _serialize_response(response)
+    raw_bytes = raw.encode("utf-8")
+    payload, mode, fields, findings = _extract_action_payload(
+        response,
+        available_actions=available_actions,
+    )
+    evidence = ResponseExtractionEvidence(
+        mode=mode,
+        raw_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        raw_length=len(raw_bytes),
+        extracted_fields=sorted(set(fields)),
+        findings=findings,
+    )
+    return payload, evidence
+
+
+def response_evidence(
+    response: Any,
+    *,
+    mode: ExtractionMode,
+    source: str = "agent_boundary",
+    extracted_fields: Sequence[str] = (),
+    findings: Sequence[str] = (),
+) -> ResponseExtractionEvidence:
+    """Hash an observable terminal response without trying to invent an action.
+
+    Terminal submissions have a different schema from actions, so routing them
+    through :func:`extract_action_response` would incorrectly reject a perfectly
+    valid summary. They still need the same provenance contract: the harness
+    records how the response was represented and hashes its bytes, while never
+    retaining arbitrary private model output.
+    """
+    raw = _serialize_response(response)
+    raw_bytes = raw.encode("utf-8")
+    return ResponseExtractionEvidence(
+        mode=mode,
+        source=source,
+        raw_sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        raw_length=len(raw_bytes),
+        raw_content_retained=False,
+        extracted_fields=sorted(set(extracted_fields)),
+        findings=list(findings),
+    )
+
+
+def _serialize_response(response: Any) -> str:
+    """Create stable bytes for response provenance without requiring JSON input."""
+    if isinstance(response, str):
+        return response
+    if hasattr(response, "model_dump"):
+        response = response.model_dump(mode="json")
+    try:
+        return json.dumps(response, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        return repr(response)
+
+
+def _extract_action_payload(
+    response: Any,
+    *,
+    available_actions: Sequence[str],
+) -> tuple[dict[str, Any], ExtractionMode, list[str], list[str]]:
+    """Extract an action and retain only public, bounded reasoning metadata."""
+    if isinstance(response, Mapping):
+        return _extract_mapping(response, available_actions=available_actions)
+    if isinstance(response, str):
+        text = response.strip()
+        if not text:
+            raise ValueError("agent response was empty; an action is required")
+        embedded = _embedded_json(text)
+        if embedded is not None:
+            payload, _, fields, findings = _extract_mapping(
+                embedded,
+                available_actions=available_actions,
+            )
+            findings.insert(0, "parsed a JSON object embedded in a text response")
+            return payload, ExtractionMode.JSON_TEXT, fields, findings
+        return _extract_free_text(text, available_actions=available_actions)
+    raise ValueError(
+        f"agent response must be a JSON object or text, got {type(response).__name__}"
+    )
+
+
+def _extract_mapping(
+    response: Mapping[str, Any],
+    *,
+    available_actions: Sequence[str],
+) -> tuple[dict[str, Any], ExtractionMode, list[str], list[str]]:
+    """Handle direct, nested, and decision-object response shapes."""
+    findings: list[str] = []
+    fields: list[str] = []
+    nested = response.get("action") or response.get("next_action")
+    if isinstance(nested, Mapping):
+        source = dict(nested)
+        for key in ("usage", "plan_update", "state_claim", "next_step"):
+            if key not in source and key in response:
+                source[key] = response[key]
+        if "reasoning_metadata" not in source and isinstance(
+            response.get("reasoning_metadata"), Mapping
+        ):
+            source["reasoning_metadata"] = response["reasoning_metadata"]
+        payload = _canonical_action(source, available_actions, fields, findings)
+        return payload, ExtractionMode.STRUCTURED, fields, findings
+
+    if isinstance(nested, str):
+        source = dict(response)
+        source["action_type"] = nested
+        payload = _canonical_action(source, available_actions, fields, findings)
+        findings.append("read the action name from the top-level action string")
+        return payload, ExtractionMode.STRUCTURED, fields, findings
+
+    decision = response.get("decision")
+    if isinstance(decision, Mapping):
+        source = dict(response)
+        source.update(
+            {
+                key: value
+                for key, value in decision.items()
+                if key not in source
+            }
+        )
+        source.setdefault("reasoning_metadata", {"decision": dict(decision)})
+        payload = _canonical_action(source, available_actions, fields, findings)
+        return payload, ExtractionMode.STRUCTURED, fields, findings
+
+    if _action_name(response, available_actions) is not None:
+        payload = _canonical_action(response, available_actions, fields, findings)
+        return payload, ExtractionMode.STRUCTURED, fields, findings
+
+    for key in ("text", "content", "message", "response"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            payload, mode, nested_fields, nested_findings = _extract_action_payload(
+                value,
+                available_actions=available_actions,
+            )
+            fields.extend(nested_fields)
+            findings.extend(nested_findings)
+            findings.insert(0, f"extracted the action from response field '{key}'")
+            return payload, mode, fields, findings
+
+    raise ValueError(
+        "agent JSON response did not contain action_type, action, decision, or text"
+    )
+
+
+def _canonical_action(  # noqa: C901
+    response: Mapping[str, Any],
+    available_actions: Sequence[str],
+    fields: list[str],
+    findings: list[str],
+) -> dict[str, Any]:
+    """Normalize one mapping without accepting an agent-authored verdict."""
+    action_name = _action_name(response, available_actions)
+    if action_name is None:
+        raise ValueError("agent response did not name an action")
+    fields.append("action_type")
+    raw_parameters = response.get("parameters", {})
+    if raw_parameters is None:
+        raw_parameters = {}
+    if not isinstance(raw_parameters, Mapping):
+        findings.append(
+            f"replaced non-object parameters of type {type(raw_parameters).__name__} with an empty object"
+        )
+        raw_parameters = {}
+    parameters = {str(key): value for key, value in raw_parameters.items()}
+    if "parameters" in response:
+        fields.append("parameters")
+    reasoning = response.get("reasoning_metadata")
+    reasoning_metadata = dict(reasoning) if isinstance(reasoning, Mapping) else {}
+    decision = response.get("decision")
+    if isinstance(decision, Mapping):
+        reasoning_metadata.setdefault("decision", dict(decision))
+        fields.append("reasoning_metadata")
+    for key in ("summary", "explanation", "rationale"):
+        if key in response and key not in reasoning_metadata:
+            reasoning_metadata[key] = response[key]
+            fields.append(key)
+    payload: dict[str, Any] = {
+        "action_type": action_name,
+        "parameters": parameters,
+        "reasoning_metadata": reasoning_metadata,
+    }
+    for key in ("usage", "plan_update"):
+        if response.get(key) is not None:
+            payload[key] = response[key]
+    for key in ("state_claim", "next_step"):
+        value = response.get(key)
+        if value is None:
+            continue
+        if isinstance(value, Mapping):
+            payload[key] = dict(value)
+            fields.append(key)
+        else:
+            findings.append(
+                f"ignored non-object '{key}' of type {type(value).__name__}"
+            )
+    return payload
+
+
+def _action_name(
+    response: Mapping[str, Any],
+    available_actions: Sequence[str],
+) -> str | None:
+    """Read an explicit action name, with a conservative terminal fallback."""
+    for key in ("action_type", "action_id", "operation", "action"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    decision = response.get("decision")
+    if isinstance(decision, Mapping):
+        for key in ("action_type", "action_id", "operation", "action"):
+            value = decision.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _embedded_json(text: str) -> dict[str, Any] | None:
+    """Parse a fenced or embedded JSON object, returning ``None`` for prose."""
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = re.sub(r"^```(?:json)?\s*", "", candidate, flags=re.IGNORECASE)
+        candidate = re.sub(r"\s*```$", "", candidate).strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError:
+            return None
+    return dict(parsed) if isinstance(parsed, Mapping) else None
+
+
+def _extract_free_text(  # noqa: C901
+    text: str,
+    *,
+    available_actions: Sequence[str],
+) -> tuple[dict[str, Any], ExtractionMode, list[str], list[str]]:
+    """Extract only explicitly named actions from a bounded public text reply."""
+    findings = [
+        "action was inferred from free-form text; fields not explicitly named were not invented"
+    ]
+    bounded = text[:_MAX_EXTRACTED_TEXT]
+    action_match = _ACTION_NAME_PATTERN.search(bounded)
+    action_name = action_match.group(1) if action_match else None
+    if action_name is None:
+        normalized = bounded.casefold()
+        candidates = sorted(
+            (str(action) for action in available_actions if str(action).strip()),
+            key=len,
+            reverse=True,
+        )
+        action_name = next(
+            (
+                candidate
+                for candidate in candidates
+                if re.search(rf"(?<![\w-]){re.escape(candidate.casefold())}(?![\w-])", normalized)
+            ),
+            None,
+        )
+        if action_name is not None:
+            findings.append("matched the longest available action name in the text")
+    if action_name is None and re.search(r"\b(done|complete|finished|terminate)\b", bounded, re.I):
+        action_name = "terminate"
+        findings.append("mapped an explicit completion phrase to the terminal action")
+    if action_name is None:
+        raise ValueError(
+            "free-form agent response did not explicitly name a legal action"
+        )
+
+    fields = ["action_type", "reasoning_metadata"]
+    decision: dict[str, Any] = {"rationale": bounded}
+    method_match = _METHOD_PATTERN.search(bounded)
+    if method_match:
+        decision["method"] = method_match.group(1).strip()
+        fields.append("method")
+    confidence_match = _CONFIDENCE_PATTERN.search(bounded)
+    if confidence_match:
+        decision["confidence"] = float(confidence_match.group(1))
+        fields.append("confidence")
+    evidence_match = _EVIDENCE_PATTERN.search(bounded)
+    if evidence_match:
+        decision["evidence_used"] = [
+            item.strip()
+            for item in re.split(r"[,;]", evidence_match.group(1))
+            if item.strip()
+        ]
+        fields.append("evidence_used")
+    parameters: dict[str, Any] = {}
+    parameter_match = re.search(
+        r"parameters?\s*[:=]\s*(\{.*?\})", bounded, re.IGNORECASE | re.DOTALL
+    )
+    if parameter_match:
+        try:
+            parsed = json.loads(parameter_match.group(1))
+            if isinstance(parsed, Mapping):
+                parameters = {str(key): value for key, value in parsed.items()}
+                fields.append("parameters")
+            else:
+                findings.append("ignored a non-object free-text parameters block")
+        except json.JSONDecodeError:
+            findings.append("could not parse the free-text parameters block as JSON")
+    return (
+        {
+            "action_type": action_name,
+            "parameters": parameters,
+            "reasoning_metadata": {"decision": decision, "summary": bounded},
+        },
+        ExtractionMode.FREE_TEXT,
+        fields,
+        findings,
+    )
+
+
 __all__ = [
     "CANONICAL_DECISION_KEYS",
     "DECISION_FINDINGS_KEY",
@@ -347,5 +733,9 @@ __all__ = [
     "DECISION_TEXT_KEY",
     "DecisionQuality",
     "ExtractedDecision",
+    "ExtractionMode",
+    "ResponseExtractionEvidence",
+    "extract_action_response",
     "extract_decision",
+    "response_evidence",
 ]

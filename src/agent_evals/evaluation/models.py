@@ -8,10 +8,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from agent_evals.evaluation.global_score import GlobalAgentScore
 from agent_evals.evaluation.metrics.robustness import RobustnessReport
+from agent_evals.evaluation.qualification import RunQualification
 from agent_evals.evaluation.scoring.aggregation import DomainScore
 from agent_evals.metrics.aggregation import AggregationResult
 from agent_evals.metrics.applicability import ApplicabilityResult
 from agent_evals.metrics.results import MetricResult
+from agent_evals.research.certification import ResearchCertification
 
 
 class DecisionEvaluation(BaseModel):
@@ -188,6 +190,14 @@ class ScientificEvaluation(BaseModel):
     #: recomputed and audited rather than merely read, which is what makes a
     #: scoring-version bump safe to publish.
     score_detail: GlobalAgentScore | None = None
+    #: Research-grade interpretation of the result, kept separate from the
+    #: numeric score so exploratory measurements cannot masquerade as comparable
+    #: benchmark results.
+    qualification: RunQualification | None = None
+    #: Optional research-readiness certificate attached after empirical evidence
+    #: collection. Keeping it separate from run qualification prevents a locally
+    #: valid episode from masquerading as a benchmark-wide scientific claim.
+    research_certification: ResearchCertification | None = None
 
 
 __all__ = [

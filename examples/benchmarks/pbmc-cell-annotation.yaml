@@ -39,6 +39,10 @@ datasets:
     organism: Homo sapiens
     modality: scRNA-seq
     format: h5ad
+    checksum:
+      algorithm: sha256
+      # Exact checksum of the bundled scanpy.datasets.pbmc68k_reduced fixture.
+      value: 0a82868d6763a3812107841c41fc3bc4b0c5cbcc022e8b45651d6a1363ea948d
     citation: [pbmc68k-paper]
     license: public research use
     expected_observations:

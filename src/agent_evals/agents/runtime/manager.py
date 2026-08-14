@@ -23,6 +23,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentObservation,
     AgentPlan,
     AgentSession,
+    AgentUsage,
     FinalSubmission,
 )
 from agent_evals.agents.tools import ToolExecutor
@@ -31,7 +32,12 @@ from agent_evals.agents.tools import ToolExecutor
 # avoid the cycle through ``agents.harness``. These two are enums with no onward
 # dependencies, and the status tables below have to be module-level constants to
 # read as the mapping they are.
-from agent_evals.agents.trajectory import FailureKind, RunTerminationStatus
+from agent_evals.agents.trajectory import (
+    EstimatedCost,
+    FailureKind,
+    RunTerminationStatus,
+    TokenUsage,
+)
 from agent_evals.benchmarks.agent_package import build_agent_task_package
 from agent_evals.benchmarks.schema import BenchmarkSpecification, TaskSpecification
 from agent_evals.core.progress_keys import PROGRESS_DELTA_KEY
@@ -102,11 +108,18 @@ class RuntimeRun(BaseModel):
     trajectory: AgentTrajectory
     final_submission: FinalSubmission | None = None
     final_snapshot: EpisodeSnapshot
+    token_usage: TokenUsage | None = None
+    estimated_cost: EstimatedCost | None = None
     #: Optional so persisted runs from before controller-owned termination still
     #: load. ``None`` means the run predates the cutoff layer, which is a
     #: different fact from a run whose budgets were all undeclared -- that one
     #: still gets a report, with every reason marked ``UNDECLARED``.
     cutoff: CutoffReport | None = None
+    #: Secret-free HTTP/endpoint exchange provenance when the runtime exposes it.
+    #: Native runtimes leave this empty; the boundary adapter records hashes and
+    #: structural metadata rather than persisting prompts, credentials, or raw
+    #: responses a second time.
+    boundary_exchanges: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AgentRuntimeManager:
@@ -148,12 +161,14 @@ class AgentRuntimeManager:
     ) -> RuntimeRun:
         """Run a universal runtime while preserving partial trajectories."""
         started_at = datetime.now(UTC)
+        run_id = str(uuid4())
         # Make the public scientific brief available from initialization onward,
         # not only after the first environment observation. This gives every
         # runtime the same contract and lets a custom agent inspect it before it
         # implements its first call.
         context = context.model_copy(
             update={
+                "run_id": run_id,
                 "task_package": build_agent_task_package(
                     environment.specification,
                     environment.task,
@@ -173,6 +188,46 @@ class AgentRuntimeManager:
         # A monotonic origin, not ``started_at``: a wall-clock budget must not be
         # voided or doubled because the host adjusted its clock mid-run.
         run_origin = monotonic()
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        total_tokens: int | None = None
+        cost_usd: float | None = None
+
+        def consume_usage(usage: AgentUsage | None) -> None:
+            """Accumulate per-request usage and expose only totals to cutoffs."""
+            nonlocal input_tokens, output_tokens, total_tokens, cost_usd
+            if usage is None:
+                return
+            if usage.input_tokens is not None:
+                input_tokens = (input_tokens or 0) + usage.input_tokens
+            if usage.output_tokens is not None:
+                output_tokens = (output_tokens or 0) + usage.output_tokens
+            reported_total = usage.total_tokens
+            if reported_total is None and (
+                usage.input_tokens is not None or usage.output_tokens is not None
+            ):
+                reported_total = (usage.input_tokens or 0) + (usage.output_tokens or 0)
+            if reported_total is not None:
+                total_tokens = (total_tokens or 0) + reported_total
+            if usage.cost_usd is not None:
+                cost_usd = (cost_usd or 0.0) + usage.cost_usd
+            controller.observe_usage(total_tokens=total_tokens, cost_usd=cost_usd)
+
+        def token_usage_model() -> TokenUsage | None:
+            if all(value is None for value in (input_tokens, output_tokens, total_tokens)):
+                return None
+            return TokenUsage(
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+            )
+
+        def cost_model() -> EstimatedCost | None:
+            return (
+                None
+                if cost_usd is None
+                else EstimatedCost(amount=cost_usd, source="agent-reported")
+            )
 
         def visible_budget() -> dict[str, float | int | None]:
             """This instant's headroom. Hard budgets only, by construction --
@@ -202,9 +257,11 @@ class AgentRuntimeManager:
             )
         except _RuntimeWallTimeout as error:
             trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
+            await _close_runtime(runtime)
             environment.terminate(status=EpisodeStatus.FAILED, reason=str(error))
             final_snapshot = await environment.observe()
             return RuntimeRun(
+                run_id=run_id,
                 agent_id=runtime.agent_id,
                 benchmark_id=final_snapshot.state.benchmark_id,
                 task_id=final_snapshot.state.task_id,
@@ -216,8 +273,42 @@ class AgentRuntimeManager:
                 trajectory=trajectory,
                 final_submission=None,
                 final_snapshot=final_snapshot,
+                token_usage=token_usage_model(),
+                estimated_cost=cost_model(),
                 cutoff=controller.report(),
+                boundary_exchanges=_runtime_exchange_log(runtime),
             )
+        except Exception as error:
+            # Initialization is part of the episode boundary. A transport or
+            # provider failure here must still produce a persisted partial run;
+            # allowing it to escape would erase the run id, opening observation,
+            # and the fact that the endpoint was unavailable.
+            message = f"agent initialization failed: {type(error).__name__}: {error}"
+            trajectory.record(AgentEventType.FAILURE, {"error": message})
+            await _close_runtime(runtime)
+            environment.terminate(status=EpisodeStatus.FAILED, reason=message)
+            final_snapshot = await environment.observe()
+            return RuntimeRun(
+                run_id=run_id,
+                agent_id=runtime.agent_id,
+                benchmark_id=final_snapshot.state.benchmark_id,
+                task_id=final_snapshot.state.task_id,
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                termination_status=RuntimeVerdict.FAILED,
+                termination_reason=message,
+                step_count=0,
+                trajectory=trajectory,
+                final_submission=None,
+                final_snapshot=final_snapshot,
+                token_usage=token_usage_model(),
+                estimated_cost=cost_model(),
+                cutoff=controller.report(),
+                boundary_exchanges=_runtime_exchange_log(runtime),
+            )
+        initial_usage = session.state.pop("_boundary_usage", None)
+        if isinstance(initial_usage, AgentUsage):
+            consume_usage(initial_usage)
         await self._emit(
             {
                 "type": "agent_planning",
@@ -259,6 +350,7 @@ class AgentRuntimeManager:
                 ],
                 adaptation_policy="After every result, keep, revise, or end the plan based on the new evidence.",
             )
+        consume_usage(plan.usage)
         session.state["plan"] = plan.model_dump(mode="json")
         observation = observation.model_copy(
             update={
@@ -286,6 +378,7 @@ class AgentRuntimeManager:
         status = RuntimeVerdict.TIMEOUT if plan_timeout is not None else RuntimeVerdict.COMPLETED
         reason = str(plan_timeout) if plan_timeout is not None else "agent runtime completed"
         submission: FinalSubmission | None = None
+        termination_attempted = False
         steps = 0
         try:
             while True:
@@ -342,6 +435,7 @@ class AgentRuntimeManager:
                     )
                     break
                 action = AgentAction.model_validate(raw_action)
+                consume_usage(action.usage)
                 await self._emit(
                     {
                         "type": "agent_response",
@@ -413,6 +507,7 @@ class AgentRuntimeManager:
                             isinstance(tool_result, dict) and "action_type" in tool_result
                         ):
                             action = AgentAction.model_validate(tool_result)
+                            consume_usage(action.usage)
                         else:
                             steps += 1
                             # A tool call that returned data rather than an action
@@ -420,7 +515,12 @@ class AgentRuntimeManager:
                             # or its step count drifts below the loop's. No
                             # signature: a tool call is not a scientific decision.
                             controller.observe(
-                                StepObservation(step=steps, succeeded=True)
+                                StepObservation(
+                                    step=steps,
+                                    succeeded=True,
+                                    total_tokens=total_tokens,
+                                    cost_usd=cost_usd,
+                                )
                             )
                             continue
                     except _RuntimeWallTimeout as error:
@@ -443,7 +543,12 @@ class AgentRuntimeManager:
                         )
                         steps += 1
                         controller.observe(
-                            StepObservation(step=steps, succeeded=False)
+                            StepObservation(
+                                step=steps,
+                                succeeded=False,
+                                total_tokens=total_tokens,
+                                cost_usd=cost_usd,
+                            )
                         )
                         continue
                 if action.action_type in self.terminal_actions:
@@ -451,7 +556,13 @@ class AgentRuntimeManager:
                     # Accepting it unverified lets an agent score "completed" by
                     # finishing immediately without producing any artifact.
                     missing = _missing_required_artifacts(environment)
+                    # Termination is a lifecycle side effect, not a safe retryable
+                    # read. Mark the attempt before calling the provider so an
+                    # error in the closing exchange cannot cause the outer failure
+                    # handler to POST ``terminate`` a second time.
+                    termination_attempted = True
                     submission = await _terminate_with_grace(runtime, session, observation)
+                    consume_usage(submission.usage)
                     trajectory.final_submission = submission
                     trajectory.record(
                         AgentEventType.FINAL_SUBMISSION,
@@ -475,7 +586,50 @@ class AgentRuntimeManager:
                         )
                     break
                 intent = _action_to_intent(action, environment.specification)
-                result = await environment.step(intent)
+                try:
+                    result = await _await_with_wall_budget(
+                        environment.step(intent),
+                        controller,
+                        run_origin,
+                        "environment step",
+                    )
+                except _RuntimeWallTimeout as error:
+                    # A scientific executor is part of the episode's wall-clock
+                    # budget too. Force the controller to observe the boundary
+                    # before the timeout branch archives the run, otherwise the
+                    # run would say it timed out while its cutoff report claimed
+                    # no cutoff fired.
+                    wall_limit = controller.budget.max_wall_time_seconds
+                    elapsed = monotonic() - run_origin
+                    cutoff = controller.decide(
+                        elapsed_seconds=max(elapsed, wall_limit or elapsed)
+                    )
+                    if not cutoff.stop:
+                        cutoff = CutoffDecision(
+                            stop=True,
+                            reason=CutoffReason.WALL_TIME,
+                            detail=str(error),
+                        )
+                    termination = cutoff_termination(cutoff, environment)
+                    status, reason = termination.verdict, termination.reason
+                    trajectory.record(
+                        AgentEventType.FAILURE,
+                        {
+                            "action_type": action.action_type,
+                            "error": reason,
+                            "cutoff": cutoff.model_dump(mode="json"),
+                        },
+                        parent_event_id=action_event.event_id,
+                    )
+                    await self._emit(
+                        {
+                            "type": "run_cutoff",
+                            "step": steps,
+                            "message": reason,
+                            "cutoff": cutoff.model_dump(mode="json"),
+                        }
+                    )
+                    break
                 trajectory.record(
                     AgentEventType.ENVIRONMENT_RESPONSE,
                     result.model_dump(mode="json"),
@@ -502,6 +656,8 @@ class AgentRuntimeManager:
                         succeeded=step_succeeded,
                         signature=decision_signature(action.action_type, action.parameters),
                         progress_delta=progress_delta(result),
+                        total_tokens=total_tokens,
+                        cost_usd=cost_usd,
                     )
                 )
                 next_observation = _observation_from_snapshot(
@@ -524,7 +680,9 @@ class AgentRuntimeManager:
                     parent_event_id=action_event.event_id,
                 )
             if submission is None:
+                termination_attempted = True
                 submission = await _terminate_with_grace(runtime, session, observation)
+                consume_usage(submission.usage)
                 trajectory.final_submission = submission
                 trajectory.record(
                     AgentEventType.FINAL_SUBMISSION,
@@ -534,11 +692,19 @@ class AgentRuntimeManager:
             status = RuntimeVerdict.FAILED
             reason = str(error)
             trajectory.record(AgentEventType.FAILURE, {"error": str(error)})
-            try:
-                submission = await _terminate_with_grace(runtime, session, observation)
-                trajectory.final_submission = submission
-            except Exception as termination_error:
-                trajectory.record(AgentEventType.FAILURE, {"error": str(termination_error)})
+            if not termination_attempted:
+                termination_attempted = True
+                try:
+                    submission = await _terminate_with_grace(runtime, session, observation)
+                    consume_usage(submission.usage)
+                    trajectory.final_submission = submission
+                except Exception as termination_error:
+                    trajectory.record(AgentEventType.FAILURE, {"error": str(termination_error)})
+            else:
+                trajectory.record(
+                    AgentEventType.FAILURE,
+                    {"error": "termination was already attempted; no retry was issued"},
+                )
         if environment.episode is not None and environment.episode.status not in {
             EpisodeStatus.COMPLETED,
             EpisodeStatus.FAILED,
@@ -550,9 +716,11 @@ class AgentRuntimeManager:
                 else EpisodeStatus.FAILED,
                 reason=reason,
             )
+        await _close_runtime(runtime)
         final_snapshot = await environment.observe()
         finished_at = datetime.now(UTC)
         return RuntimeRun(
+            run_id=run_id,
             agent_id=runtime.agent_id,
             benchmark_id=final_snapshot.state.benchmark_id,
             task_id=final_snapshot.state.task_id,
@@ -564,7 +732,10 @@ class AgentRuntimeManager:
             trajectory=trajectory,
             final_submission=submission,
             final_snapshot=final_snapshot,
+            token_usage=token_usage_model(),
+            estimated_cost=cost_model(),
             cutoff=controller.report(),
+            boundary_exchanges=_runtime_exchange_log(runtime),
         )
 
 
@@ -746,7 +917,9 @@ class RuntimeAgentAdapter:
         )
 
         root = str(configuration.workspace.get("root", "."))
-        constraints = _model_dump(environment.task.constraints)
+        constraints = _model_dump(
+            environment.task.constraints or environment.specification.constraints
+        )
         tools = configuration.tools.get("definitions", []) if isinstance(configuration.tools, dict) else []
         context = AgentContext(
             benchmark_id=environment.specification.metadata.id,
@@ -803,6 +976,8 @@ class RuntimeAgentAdapter:
             termination_status=status,
             termination_reason=universal.termination_reason,
             failures=failures,
+            token_usage=universal.token_usage,
+            estimated_cost=universal.estimated_cost,
             manifest=LegacyAgentManifest(
                 name=self.runtime.manifest.name,
                 type=self.runtime.manifest.type,
@@ -826,6 +1001,7 @@ class RuntimeAgentAdapter:
                 "cutoff": universal.cutoff.model_dump(mode="json")
                 if universal.cutoff is not None
                 else None,
+                "boundary_exchanges": universal.boundary_exchanges,
             },
         )
 
@@ -866,10 +1042,28 @@ def _observation_from_snapshot(
         else []
     ) or list(task.allowed_actions)
     package = build_agent_task_package(specification, task) if specification is not None else {}
+    previous_decision: dict[str, Any] | None = None
+    state_delta: dict[str, Any] | None = None
+    if snapshot.state.actions:
+        last_record = snapshot.state.actions[-1]
+        previous_decision = {
+            "step": last_record.step,
+            "action_type": last_record.intent.action_id,
+            "parameters": {
+                key: value
+                for key, value in last_record.intent.parameters.items()
+                if key not in {"code", "produces"}
+            },
+            "rationale": last_record.intent.rationale,
+        }
+        if last_record.result.observed_state_delta is not None:
+            state_delta = last_record.result.observed_state_delta.model_dump(mode="json")
     return AgentObservation(
         state=agent_visible_state(snapshot.state).model_dump(mode="json"),
         available_actions=available_actions,
         artifacts=[artifact.model_dump(mode="json") for artifact in snapshot.state.artifacts.values()],
+        previous_decision=previous_decision,
+        state_delta=state_delta,
         metadata={
             "episode_id": snapshot.state.episode_id,
             "step": snapshot.state.current_step,
@@ -1026,7 +1220,15 @@ def _action_to_intent(
             ),
             None,
         )
-    reasoning = action.reasoning_metadata
+    reasoning = dict(action.reasoning_metadata)
+    if action.state_claim:
+        # Keep the agent's claim separate from the executor's observed delta. The
+        # decision cascade verifies the two later; merging it into the public
+        # reasoning mapping makes the claim survive the endpoint boundary without
+        # making it authoritative.
+        reasoning["state_claim"] = dict(action.state_claim)
+    if action.next_step:
+        reasoning["next_step"] = dict(action.next_step)
     rationale = (
         reasoning.get("explanation") or reasoning.get("summary") or reasoning.get("rationale")
     )
@@ -1039,6 +1241,14 @@ def _action_to_intent(
         "runtime_action_type": action.action_type,
         **extracted.metadata,
     }
+    if action.extraction_evidence is not None:
+        # Boundary provenance is generated by SCAIB, not claimed by the agent.
+        # Carry it into the canonical intent so the evidence survives the
+        # universal-runtime to AgentRun conversion and can be audited beside the
+        # decision it produced.
+        metadata["response_extraction"] = action.extraction_evidence.model_dump(
+            mode="json"
+        )
     selected_method = extracted.metadata.get("method") or parameter_method
     if selected_method is not None:
         # A method declared as an action parameter is still a scientific method
@@ -1119,6 +1329,25 @@ async def _await_with_wall_budget(
             f"{label} exceeded the remaining {remaining:.2f}s of the "
             f"{limit:g}s wall-clock budget"
         ) from error
+
+
+def _runtime_exchange_log(runtime: AgentRuntime) -> list[dict[str, Any]]:
+    """Copy bounded transport provenance exposed by a runtime, if any."""
+    value = getattr(runtime, "exchange_log", None)
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, Mapping)]
+
+
+async def _close_runtime(runtime: AgentRuntime) -> None:
+    """Close a runtime transport without turning cleanup into a run failure."""
+    try:
+        await runtime.close()
+    except Exception:
+        # The scientific result and its failure reason are more valuable than a
+        # provider-specific cleanup traceback. The endpoint runtime's own
+        # termination path already records request failures; this is final cleanup.
+        return
 
 
 async def _terminate_with_grace(

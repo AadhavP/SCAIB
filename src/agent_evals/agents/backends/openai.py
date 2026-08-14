@@ -9,6 +9,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from agent_evals.agents.decisions import extract_action_response
 from agent_evals.agents.runtime.base import AgentRuntime
 from agent_evals.agents.runtime.protocol import (
     AgentAction,
@@ -18,6 +19,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentObservation,
     AgentPlan,
     AgentSession,
+    AgentUsage,
     FinalSubmission,
 )
 
@@ -121,7 +123,11 @@ class OpenAIRuntime(AgentRuntime):
             or _read(response, "choices.0.message.content")
             or response
         )
-        return AgentPlan.model_validate(_json_object(content))
+        payload = _json_object(content)
+        usage = _provider_usage(response)
+        if usage is not None and "usage" not in payload:
+            payload["usage"] = usage.model_dump(mode="json")
+        return AgentPlan.model_validate(payload)
 
     async def act(self, session: AgentSession, observation: AgentObservation) -> AgentAction:
         """Request one structured action from Responses or Chat Completions."""
@@ -224,18 +230,33 @@ def _build_openai_client(
 
 def _parse_provider_action(response: Any) -> AgentAction:
     """Parse structured JSON or a function/tool call from a provider response."""
+    usage = _provider_usage(response)
     tool_call = _first_tool_call(response)
     if tool_call is not None:
         name = _read(tool_call, "name") or _read(tool_call, "function.name")
         arguments = _read(tool_call, "arguments") or _read(tool_call, "function.arguments") or {}
-        return AgentAction(action_type=str(name), parameters=_json_object(arguments))
+        payload, evidence = extract_action_response(
+            {"action_type": str(name), "parameters": _json_object(arguments)},
+        )
+        if usage is not None:
+            payload["usage"] = usage
+        payload["extraction_evidence"] = evidence.model_copy(
+            update={"source": "provider_tool_call"}
+        )
+        return AgentAction.model_validate(payload)
     text = (
         _read(response, "output_text")
         or _read(response, "output.0.content.0.text")
         or _read(response, "choices.0.message.content")
         or response
     )
-    return AgentAction.model_validate(_json_object(text))
+    payload, evidence = extract_action_response(text)
+    if usage is not None and "usage" not in payload:
+        payload["usage"] = usage
+    payload["extraction_evidence"] = evidence.model_copy(
+        update={"source": "provider_text"}
+    )
+    return AgentAction.model_validate(payload)
 
 
 def _first_tool_call(response: Any) -> Any | None:
@@ -246,6 +267,27 @@ def _first_tool_call(response: Any) -> Any | None:
     if _read(content_item, "type") in {"function_call", "tool_call"}:
         return content_item
     return _read(response, "choices.0.message.tool_calls.0")
+
+
+def _provider_usage(response: Any) -> AgentUsage | None:
+    """Translate provider usage fields into the boundary's public envelope."""
+    raw = _read(response, "usage")
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump(mode="json")
+    if not isinstance(raw, Mapping):
+        return None
+    usage: dict[str, Any] = {
+        key: raw[key]
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if isinstance(raw.get(key), int) and raw[key] >= 0
+    }
+    if "input_tokens" not in usage and isinstance(raw.get("prompt_tokens"), int):
+        usage["input_tokens"] = raw["prompt_tokens"]
+    if "output_tokens" not in usage and isinstance(raw.get("completion_tokens"), int):
+        usage["output_tokens"] = raw["completion_tokens"]
+    if "total_tokens" not in usage and "input_tokens" in usage and "output_tokens" in usage:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    return AgentUsage.model_validate({**usage, "source": "provider"}) if usage else None
 
 
 def _read(value: Any, path: str) -> Any:

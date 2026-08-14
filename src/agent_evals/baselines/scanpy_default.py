@@ -14,6 +14,7 @@ class ScanpyDefaultBaseline(BaselineRunner):
         return BaselineResult(
             baseline_id=self.baseline_id,
             status="planned",
+            seed=seed,
             actions=["qc", "normalize", "select_hvg", "pca", "cluster", "annotate"],
             metadata={"seed": seed, "backend": "scanpy"},
         )

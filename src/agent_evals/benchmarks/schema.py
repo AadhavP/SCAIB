@@ -235,6 +235,21 @@ class ActionKind(StrEnum):
     FREE_EXECUTION = "free_execution"
 
 
+class ExecutionMode(StrEnum):
+    """Who owns execution for the actions a task exposes.
+
+    ``AUTO`` preserves compatibility with older benchmark declarations while the
+    effective mode is still published to every agent. New benchmark protocols can
+    pin one of the other values, and validation rejects a declaration that does
+    not match its action kinds.
+    """
+
+    AUTO = "auto"
+    TYPED = "typed"
+    AGENT_WORKSPACE = "agent_workspace"
+    MIXED = "mixed"
+
+
 class ActionSpecification(SpecificationModel):
     """Interface contract for an operation an agent may request.
 
@@ -414,7 +429,17 @@ class ConstraintSpecification(SpecificationModel):
     gpu_required: bool = False
     internet_access: bool = True
     max_runtime_seconds: int | None = Field(default=None, gt=0)
+    #: Optional CPU-seconds ceiling, distinct from the wall-clock runtime budget.
+    #: Keeping both explicit prevents a threaded workload from being killed by a
+    #: CPU limit that the benchmark only intended as a wall-time limit.
+    max_cpu_seconds: int | None = Field(default=None, gt=0)
     max_memory_mb: int | None = Field(default=None, gt=0)
+    #: Maximum number of processes/threads an agent-authored execution may create.
+    #: This is translated to RLIMIT_NPROC locally and --pids-limit in a container.
+    max_processes: int | None = Field(default=None, gt=0)
+    #: Maximum size of one file an execution may write, in megabytes.
+    #: This is translated to RLIMIT_FSIZE or Docker's fsize ulimit.
+    max_file_size_mb: int | None = Field(default=None, gt=0)
     allowed_python_packages: list[str] = Field(default_factory=list)
     deterministic: bool = False
     random_seed: int | None = None
@@ -458,6 +483,9 @@ class EnvironmentSpecification(SpecificationModel):
     description: str = Field(min_length=1)
     backend: EnvironmentBackend = EnvironmentBackend.LOCAL
     image: str | None = None
+    #: Numeric UID:GID (or an image-defined user) used for container execution.
+    #: A research run must not silently execute arbitrary agent code as root.
+    user: str | None = None
     languages: list[str] = Field(default_factory=lambda: ["python"])
 
     _identifier = field_validator("id")(_validate_identifier)
@@ -551,6 +579,9 @@ class TaskSpecification(SpecificationModel):
     termination: list[TerminationCondition] = Field(default_factory=list)
     constraints: ConstraintSpecification | None = None
     environment: str | None = None
+    #: Explicit execution ownership. ``auto`` infers the mode from the allowed
+    #: action kinds and is retained for backwards-compatible benchmark files.
+    execution_mode: ExecutionMode = ExecutionMode.AUTO
 
     _identifier = field_validator("id")(_validate_identifier)
 
@@ -840,6 +871,11 @@ class BenchmarkSpecification(SpecificationModel):
                 raise ValueError(
                     f"task '{task.id}' references unknown environment '{task.environment}'"
                 )
+            # Freeze execution ownership at benchmark validation time. The
+            # agent package later publishes the same effective value, so a task
+            # cannot be interpreted as typed by one adapter and workspace-owned
+            # by another.
+            self.effective_execution_mode(task)
             free_actions = sorted(free_execution_actions.intersection(task.allowed_actions))
             if free_actions and task.environment is None:
                 # Without this the benchmark would look complete and then fail at
@@ -862,6 +898,27 @@ class BenchmarkSpecification(SpecificationModel):
 
         self._validate_task_dependencies()
         return self
+
+    def effective_execution_mode(self, task: TaskSpecification) -> ExecutionMode:
+        """Return and validate the execution mode implied by task actions."""
+        allowed = set(task.allowed_actions)
+        declared = [action for action in self.actions if action.id in allowed]
+        if not declared or all(action.kind is ActionKind.TYPED for action in declared):
+            inferred = ExecutionMode.TYPED
+        elif all(action.kind is ActionKind.FREE_EXECUTION for action in declared):
+            inferred = ExecutionMode.AGENT_WORKSPACE
+        else:
+            inferred = ExecutionMode.MIXED
+        if (
+            task.execution_mode is not ExecutionMode.AUTO
+            and task.execution_mode is not inferred
+        ):
+            raise ValueError(
+                f"task '{task.id}' declares execution_mode "
+                f"'{task.execution_mode.value}', but its allowed action kinds "
+                f"require '{inferred.value}'"
+            )
+        return inferred
 
     def required_task_artifacts(self, task: TaskSpecification) -> set[str]:
         """Return the artifacts this task must produce for its goal to be met.
@@ -986,6 +1043,7 @@ __all__ = [
     "EstimatedCost",
     "EvaluationConfig",
     "EvaluationConfiguration",
+    "ExecutionMode",
     "ExpectedRange",
     "MetricGroupMember",
     "MetricGroupSpecification",

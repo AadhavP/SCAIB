@@ -1,10 +1,13 @@
 """Typer CLI entrypoint application."""
 
 import asyncio
+import json
 from pathlib import Path
+from typing import Any
 
 import typer
 import uvicorn
+import yaml
 from rich.console import Console
 from rich.table import Table
 
@@ -30,6 +33,21 @@ from agent_evals.core.logging import configure_logging, get_logger
 from agent_evals.environment.execution import free_execution_action_ids
 from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.evaluators import EvaluationEngine, EvaluationReport
+from agent_evals.research import (
+    ResearchCertification,
+    StudyArm,
+    StudyPlan,
+    build_starter_manifest,
+    build_study_report,
+    default_protocol_fixtures,
+    dump_readiness_manifest,
+    evaluate_research_readiness,
+    load_readiness_manifest,
+    run_interoperability_suite,
+    run_synthetic_conformance_sync,
+    verify_research_certification,
+    verify_run_bundle,
+)
 
 app = typer.Typer(
     name="agent-evals",
@@ -49,8 +67,243 @@ agent_app = typer.Typer(
 )
 app.add_typer(agent_app, name="agent")
 app.add_typer(env_app, name="env")
+research_app = typer.Typer(
+    name="research",
+    help="Validate research-readiness evidence and reproducible study artifacts.",
+    add_completion=False,
+)
+app.add_typer(research_app, name="research")
 console = Console()
 logger = get_logger("agent_evals.cli")
+
+
+@research_app.command("init")
+def research_init_command(
+    benchmark_id: str = typer.Option(..., "--benchmark-id", help="Frozen benchmark identifier."),
+    benchmark_version: str = typer.Option(..., "--benchmark-version", help="Frozen benchmark version."),
+    output: Path = typer.Option(
+        Path("research-readiness.yaml"),
+        "--output",
+        "-o",
+        help="JSON or YAML checklist path to create.",
+    ),
+) -> None:
+    """Create the explicit all-missing research certification checklist."""
+    manifest = build_starter_manifest(
+        benchmark_id=benchmark_id,
+        benchmark_version=benchmark_version,
+    )
+    dump_readiness_manifest(manifest, output)
+    console.print(
+        f"[bold yellow]Research checklist created[/bold yellow] {output} "
+        f"digest={manifest.canonical_digest()}"
+    )
+
+
+@research_app.command("certify")
+def research_certify_command(
+    manifest: Path = typer.Option(
+        ...,
+        "--manifest",
+        "-m",
+        exists=True,
+        readable=True,
+        help="Research-readiness evidence manifest (JSON or YAML).",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Optional JSON certification output path.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit with status 1 unless every required gate is certified.",
+    ),
+) -> None:
+    """Evaluate evidence gates without turning missing evidence into a pass."""
+    readiness = load_readiness_manifest(manifest)
+    certification = evaluate_research_readiness(readiness, evidence_root=manifest.parent)
+    if output is not None:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(certification.to_json() + "\n", encoding="utf-8")
+    table = Table(title="Research Readiness")
+    table.add_column("Gate", style="cyan")
+    table.add_column("Status", style="magenta")
+    table.add_column("Evidence", style="green")
+    for gate in certification.gates:
+        table.add_row(
+            gate.gate.value,
+            gate.status.value,
+            ", ".join(gate.evidence_ids) or "-",
+        )
+    console.print(table)
+    console.print(
+        f"status={certification.status.value} "
+        f"readiness={certification.readiness_fraction:.1%} "
+        f"manifest={certification.manifest_sha256} "
+        f"certificate={certification.certificate_sha256 or 'unavailable'}"
+    )
+    if certification.blocking_reasons:
+        for reason in certification.blocking_reasons:
+            console.print(f"  [yellow]{reason}[/yellow]")
+    if strict and not certification.research_grade:
+        raise typer.Exit(code=1)
+
+
+@research_app.command("verify")
+def research_verify_command(
+    manifest: Path = typer.Option(
+        ...,
+        "--manifest",
+        "-m",
+        exists=True,
+        readable=True,
+        help="Research-readiness evidence manifest (JSON or YAML).",
+    ),
+    certificate: Path = typer.Option(
+        ...,
+        "--certificate",
+        "-c",
+        exists=True,
+        readable=True,
+        help="Previously emitted JSON certification.",
+    ),
+    evidence_root: Path | None = typer.Option(
+        None,
+        "--evidence-root",
+        help="Root for local evidence paths; defaults to the manifest directory.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit with status 1 if certificate or manifest integrity fails.",
+    ),
+) -> None:
+    """Recompute a certificate and its evidence hashes without network access."""
+    readiness = load_readiness_manifest(manifest)
+    try:
+        parsed_certificate = ResearchCertification.model_validate_json(
+            certificate.read_text(encoding="utf-8")
+        )
+    except Exception as error:
+        console.print(f"[red]INVALID certificate[/red] {certificate}: {error}")
+        raise typer.Exit(code=1) from error
+    integrity = verify_research_certification(
+        parsed_certificate,
+        manifest=readiness,
+        evidence_root=evidence_root or manifest.parent,
+    )
+    console.print(
+        f"certificate={'VALID' if integrity.valid else 'INVALID'} "
+        f"status={parsed_certificate.status.value} "
+        f"research_grade={parsed_certificate.research_grade} "
+        f"digest={'ok' if integrity.certificate_digest_matches else 'mismatch'}"
+    )
+    for item in integrity.evidence:
+        console.print(f"  evidence {item.evidence_id}: {item.status}")
+    for limitation in integrity.limitations:
+        console.print(f"  [yellow]{limitation}[/yellow]")
+    if strict and not integrity.valid:
+        raise typer.Exit(code=1)
+
+
+@research_app.command("protocol-check")
+def research_protocol_check_command(
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit with status 1 if the offline interoperability suite fails.",
+    ),
+) -> None:
+    """Run provider-neutral structured/text/opaque-agent protocol fixtures."""
+    report = run_interoperability_suite(
+        default_protocol_fixtures(),
+        opaque_multi_agent_fixture_ids={"black-box-text-action"},
+    )
+    for fixture in report.fixtures:
+        status = "PASS" if fixture.passed else "FAIL"
+        console.print(f"{status} {fixture.fixture_id}")
+        for finding in fixture.findings:
+            console.print(f"  {finding}")
+    console.print(f"protocol_suite={'PASS' if report.passed else 'INCOMPLETE'}")
+    if strict and not report.passed:
+        raise typer.Exit(code=1)
+
+
+@research_app.command("conformance")
+def research_conformance_command(
+    output: Path = typer.Option(
+        Path("research") / "synthetic-conformance",
+        "--output",
+        "-o",
+        help="Directory for the synthetic run bundle.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit with status 1 when any conformance check fails.",
+    ),
+) -> None:
+    """Run the dataset-independent endpoint-to-bundle conformance fixture."""
+    report = run_synthetic_conformance_sync(output)
+    status = "PASS" if report.passed else "FAIL"
+    console.print(
+        f"{status} synthetic-conformance run={report.run_id} "
+        f"bundle={report.bundle_path}"
+    )
+    for check, passed in report.checks.items():
+        console.print(f"  {'PASS' if passed else 'FAIL'} {check}")
+    for limitation in report.limitations:
+        console.print(f"  [yellow]limitation: {limitation}[/yellow]")
+    if strict and not report.passed:
+        raise typer.Exit(code=1)
+
+
+@research_app.command("stats")
+def research_stats_command(
+    plan: Path = typer.Option(
+        ...,
+        "--plan",
+        exists=True,
+        readable=True,
+        help="StudyPlan JSON or YAML.",
+    ),
+    arms: Path = typer.Option(
+        ...,
+        "--arms",
+        exists=True,
+        readable=True,
+        help="JSON/YAML list of StudyArm records.",
+    ),
+    output: Path | None = typer.Option(None, "--output", "-o", help="Study report JSON path."),
+) -> None:
+    """Generate deterministic arm summaries, paired CIs, and ablation results."""
+    plan_payload = _load_structured_file(plan)
+    arms_payload = _load_structured_file(arms)
+    plan_model = StudyPlan.model_validate(plan_payload)
+    raw_arms = arms_payload.get("arms") if isinstance(arms_payload, dict) else arms_payload
+    if not isinstance(raw_arms, list):
+        raise typer.BadParameter("--arms must contain a list or an 'arms' list")
+    arm_models = [StudyArm.model_validate(item) for item in raw_arms]
+    report = build_study_report(plan_model, arm_models)
+    target = output or Path("research") / f"{plan_model.study_id}.statistics.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(report.model_dump_json(indent=2) + "\n", encoding="utf-8")
+    console.print(
+        f"[bold green]Study report written[/bold green] {target} "
+        f"ready={report.research_ready} comparisons={len(report.statistics.comparisons)}"
+    )
+
+
+def _load_structured_file(path: Path) -> Any:
+    """Load JSON or YAML for research protocol artifacts."""
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle) if path.suffix.lower() == ".json" else yaml.safe_load(handle)
+    if payload is None:
+        raise typer.BadParameter(f"structured file '{path}' is empty")
+    return payload
 
 
 @benchmark_app.command("run")
@@ -172,6 +425,11 @@ def run_command(
     provider: str | None = typer.Option(
         None, "--provider", help="Optional model provider prefix when --model has no provider."
     ),
+    agent_endpoint: str | None = typer.Option(
+        None,
+        "--agent-endpoint",
+        help="URL of a black-box agent endpoint when --agent http-step is selected.",
+    ),
     workspace: Path | None = typer.Option(
         None, "--workspace", help="Controlled workspace root for the agent run."
     ),
@@ -214,6 +472,11 @@ def run_command(
             "the task's own choice. See 'agent-evals env inspect'."
         ),
     ),
+    research_manifest: Path | None = typer.Option(
+        None,
+        "--research-manifest",
+        help="Attach and validate a benchmark-wide research-readiness manifest.",
+    ),
 ) -> None:
     """Execute one benchmark task through a framework-neutral harness."""
     benchmark_reference = benchmark or "examples/benchmarks/pbmc-cell-annotation.yaml"
@@ -243,10 +506,14 @@ def run_command(
                 output_dir=output_dir,
                 seed=seed,
                 max_cells=max_cells,
+                task_id=task,
+                dataset_id=dataset,
                 max_steps=runtime_max_steps,
                 model=model,
                 provider=provider,
+                agent_endpoint=agent_endpoint,
                 environment=environment,
+                research_manifest=research_manifest,
             )
         )
         console.print(
@@ -368,6 +635,73 @@ def evaluate_command(
     console.print(f"[bold green]Evaluation report:[/bold green] {target}")
 
 
+@app.command("verify-run")
+def verify_run_command(
+    run: Path = typer.Argument(..., exists=True, file_okay=False, help="Materialized run archive directory."),
+) -> None:
+    """Re-hash a persisted run archive and fail if its public bytes drifted."""
+    from agent_evals.environment.scientific_loop import verify_archive_manifest
+
+    verification = verify_archive_manifest(run)
+    if verification.valid:
+        console.print(
+            f"[bold green]VALID[/bold green] {run} "
+            f"({verification.checked_files} public files checked)"
+        )
+        return
+    console.print(f"[bold red]INVALID[/bold red] {run}")
+    if verification.missing_files:
+        console.print(f"  missing: {', '.join(verification.missing_files)}")
+    if verification.changed_files:
+        console.print(f"  changed: {', '.join(verification.changed_files)}")
+    if verification.unexpected_files:
+        console.print(f"  unexpected: {', '.join(verification.unexpected_files)}")
+    for limitation in verification.limitations:
+        console.print(f"  limitation: {limitation}")
+    raise typer.Exit(code=1)
+
+
+@app.command("verify-bundle")
+def verify_bundle_command(
+    bundle: Path = typer.Argument(
+        ...,
+        exists=True,
+        file_okay=False,
+        help="Materialized public run bundle directory.",
+    ),
+    strict_replay: bool = typer.Option(
+        False,
+        "--strict-replay",
+        help="Also require a valid replay descriptor and referenced public files.",
+    ),
+) -> None:
+    """Verify the replay-oriented event ledger and content-addressed bundle."""
+    verification = verify_run_bundle(bundle)
+    if verification.valid:
+        console.print(
+            f"[bold green]VALID[/bold green] {bundle} "
+            f"({verification.checked_files} files, event ledger valid, "
+            f"replay_ready={verification.replay_ready})"
+        )
+        for limitation in verification.replay_limitations:
+            console.print(f"  replay limitation: {limitation}")
+        if strict_replay and not verification.replay_ready:
+            raise typer.Exit(code=1)
+        return
+    console.print(f"[bold red]INVALID[/bold red] {bundle}")
+    if verification.missing_files:
+        console.print(f"  missing: {', '.join(verification.missing_files)}")
+    if verification.changed_files:
+        console.print(f"  changed: {', '.join(verification.changed_files)}")
+    if verification.unexpected_files:
+        console.print(f"  unexpected: {', '.join(verification.unexpected_files)}")
+    for limitation in verification.limitations:
+        console.print(f"  limitation: {limitation}")
+    for limitation in verification.replay_limitations:
+        console.print(f"  replay limitation: {limitation}")
+    raise typer.Exit(code=1)
+
+
 @app.command("validate-benchmark")
 def validate_benchmark_command(
     benchmark: str = typer.Option(
@@ -485,6 +819,50 @@ def _report_markdown(report: EvaluationReport) -> str:
     return "\n".join(lines) + "\n"
 
 
+@app.command("worker-health")
+def worker_health_command() -> None:
+    """Exit successfully only while the durable worker lease is alive."""
+    from agent_evals.api.job_store import JobStoreError, SQLiteJobStore
+
+    store: SQLiteJobStore | None = None
+    try:
+        store = SQLiteJobStore(get_settings().storage.job_db_path)
+        store.ping()
+        if not store.worker_lease_active():
+            raise JobStoreError("no active scientific worker lease")
+    except JobStoreError as error:
+        console.print(f"[red]Worker unhealthy:[/red] {error}")
+        raise typer.Exit(code=1) from error
+    finally:
+        if store is not None:
+            store.close()
+    console.print("[green]Worker healthy[/green]")
+
+
+@app.command("worker")
+def worker_command() -> None:
+    """Run the durable evaluation worker without serving HTTP traffic."""
+    from agent_evals.api.routes import job_manager
+
+    async def run_worker() -> None:
+        manager = job_manager
+        await manager.start(execute_jobs=True)
+        console.print(
+            "[bold green]Evaluation worker is running[/bold green] "
+            f"store={get_settings().storage.job_db_path}"
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await manager.shutdown()
+            manager.close()
+
+    try:
+        asyncio.run(run_worker())
+    except KeyboardInterrupt:
+        console.print("[yellow]Evaluation worker stopped[/yellow]")
+
+
 @app.command("serve")
 def serve_command(
     host: str | None = typer.Option(
@@ -496,11 +874,25 @@ def serve_command(
     reload: bool = typer.Option(
         False, "--reload", help="Enable auto-reload for development."
     ),
+    workers: int | None = typer.Option(
+        None,
+        "--workers",
+        min=1,
+        max=32,
+        help="Number of Uvicorn worker processes (ignored when --reload is enabled).",
+    ),
 ) -> None:
     """Launch the FastAPI backend server."""
     settings = get_settings()
     server_host = host or settings.api.host
     server_port = port or settings.api.port
+    server_workers = 1 if reload else (workers or settings.api.workers)
+    if server_workers > 1 and settings.api.execute_jobs_in_process:
+        raise typer.BadParameter(
+            "multiple API workers require "
+            "AGENT_EVALS_API__EXECUTE_JOBS_IN_PROCESS=false and a dedicated "
+            "'agent-evals worker' process"
+        )
 
     console.print(
         f"[bold green]Launching API server on[/bold green] http://{server_host}:{server_port}"
@@ -510,6 +902,7 @@ def serve_command(
         host=server_host,
         port=server_port,
         reload=reload,
+        workers=server_workers,
     )
 
 

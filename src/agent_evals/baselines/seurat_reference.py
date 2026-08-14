@@ -14,7 +14,8 @@ class SeuratReferenceBaseline(BaselineRunner):
         return BaselineResult(
             baseline_id=self.baseline_id,
             status="unavailable",
-            metadata={"reason": "Seurat/R adapter is optional", "seed": seed},
+            seed=seed,
+            metadata={"reason": "Seurat/R adapter is optional"},
         )
 
 

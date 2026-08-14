@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from agent_evals.metrics.models import MetricRole
-from agent_evals.metrics.results import MetricResult, MetricStatus
+from agent_evals.metrics.results import MetricResult
 
 
 class MetricWeight(BaseModel):
@@ -54,6 +54,9 @@ class AggregationResult(BaseModel):
     value: float | None
     included_metric_ids: list[str] = Field(default_factory=list)
     excluded_metric_ids: list[str] = Field(default_factory=list)
+    # Number of additional score-bearing metrics needed to satisfy
+    # ``minimum_required``. This is evidence of missing measurement, not the
+    # number of metrics that happened to be included in the aggregate.
     missing_required_count: int = 0
     formula: str
 
@@ -68,15 +71,15 @@ def aggregate_group(
     excluded: list[str] = []
     for metric in group.metrics:
         result = by_id.get(metric.metric_id)
-        if result is None or result.status == MetricStatus.INELIGIBLE:
+        if result is None or result.status.excluded_from_scoring:
             excluded.append(metric.metric_id)
             continue
         score = result.normalized_value
         if score is None:
             score = 0.0
         included.append((score, metric.weight))
-    missing_required = len(group.metrics) - len(excluded)
-    if missing_required < group.minimum_required:
+    available_count = len(included)
+    if available_count < group.minimum_required:
         value = None
     elif group.aggregation == "weighted_mean":
         denominator = sum(weight for _, weight in included)
@@ -98,7 +101,7 @@ def aggregate_group(
         value=value,
         included_metric_ids=[metric.metric_id for metric in group.metrics if metric.metric_id not in excluded],
         excluded_metric_ids=excluded,
-        missing_required_count=missing_required,
+        missing_required_count=max(group.minimum_required - available_count, 0),
         formula=formula,
     )
 

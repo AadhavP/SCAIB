@@ -79,22 +79,37 @@ DEFAULT_RUNTIMES: tuple[RuntimeRegistration, ...] = (
 )
 
 
-def build_runtime(name: str, *, model: str | None = None) -> AgentRuntime:
-    """Instantiate a registered runtime, applying a model override if given.
+def build_runtime(
+    name: str,
+    *,
+    model: str | None = None,
+    endpoint: str | None = None,
+    timeout_seconds: float | None = None,
+) -> AgentRuntime:
+    """Instantiate a runtime with provider-neutral overrides.
 
-    A runtime that genuinely takes no model raises rather than having the
-    override quietly dropped: ``--model`` that does nothing is a run scored on a
-    model the operator did not choose, and the whole reason this function exists
-    is that the previous workaround was to skip passing it.
+    ``endpoint`` is intentionally an adapter-level option rather than a
+    benchmark concern. It makes the black-box ``http-step`` tier selectable from
+    a URL while keeping provider-specific construction inside the runtime
+    registry. Other runtimes reject it instead of silently ignoring the URL.
     """
-    if model is None:
-        return agent_runtime_registry.create(name)
+    config: dict[str, Any] = {}
+    if model is not None:
+        config["model"] = model
+    if endpoint is not None:
+        if name != "http-step":
+            raise ValueError(
+                f"agent endpoint configuration is only supported by 'http-step', not '{name}'"
+            )
+        config["endpoint"] = endpoint
+    if timeout_seconds is not None:
+        config["timeout_seconds"] = timeout_seconds
     try:
-        return agent_runtime_registry.create(name, model=model)
+        return agent_runtime_registry.create(name, **config)
     except TypeError as error:
+        option = "endpoint" if endpoint is not None else "model"
         raise ValueError(
-            f"agent runtime '{name}' does not accept a model override ({error}); "
-            "drop --model or choose a runtime that does"
+            f"agent runtime '{name}' does not accept the {option} override ({error})"
         ) from error
 
 

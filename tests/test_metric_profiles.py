@@ -26,6 +26,7 @@ from agent_evals.evaluation.profiles import (
     pbmc_annotation_profile,
     pbmc_de_profile,
     pbmc_integration_profile,
+    profile_digest,
     profile_external_scores,
     profile_metric_ids,
     profiled_benchmark_ids,
@@ -123,6 +124,26 @@ def test_non_annotation_benchmarks_are_not_scored_with_annotation_metrics(
     assert metric_ids
     assert not [name for name in metric_ids if name.startswith("cell_annotation.")]
     assert metric_ids != profile_metric_ids(pbmc_annotation_profile())
+
+
+def test_a_profile_digest_is_stable_and_changes_with_measurement_configuration() -> None:
+    """A published score must identify the exact instrument that produced it."""
+    profile = pbmc_annotation_profile()
+    same = BenchmarkMetricProfile.model_validate(profile.model_dump(mode="json"))
+    changed = profile.model_copy(
+        update={
+            "metric_groups": {
+                **profile.metric_groups,
+                "biology": profile.metric_groups["biology"].model_copy(
+                    update={"weight": 0.5}
+                ),
+            }
+        }
+    )
+
+    assert profile_digest(profile) == profile_digest(same)
+    assert profile_digest(profile) != profile_digest(changed)
+    assert len(profile_digest(profile)) == 64
 
 
 def test_the_two_annotation_tiers_share_one_profile() -> None:
@@ -300,8 +321,10 @@ def test_progress_metrics_come_from_the_benchmarks_own_profile() -> None:
     )
 
     assert de_ids and all(name.startswith("differential_expression.") for name in de_ids)
-    assert integration_ids and all(
-        name.startswith("batch_integration.") for name in integration_ids
+    assert integration_ids
+    assert any(name.startswith("batch_integration.") for name in integration_ids)
+    assert any(
+        name.startswith("biological_conservation.") for name in integration_ids
     )
     assert de_ids != annotation_ids
     # An external score has no registry computer, so asking for it every step

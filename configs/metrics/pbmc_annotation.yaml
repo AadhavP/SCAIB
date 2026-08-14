@@ -10,7 +10,7 @@ metric_groups:
     weight: 0.2
     metrics:
       batch_integration.iLISI: {weight: 0.6, required: false}
-      batch_integration.graph_connectivity: {weight: 0.4, required: false}
+      biological_conservation.graph_connectivity: {weight: 0.4, required: false}
   robustness:
     weight: 0.2
     external_score: robustness.seed_stability

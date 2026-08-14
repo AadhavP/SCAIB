@@ -27,6 +27,8 @@ caller:
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Iterable
 
 from agent_evals.core.exceptions import ConfigurationError, RegistryError
@@ -67,6 +69,22 @@ def profile_metric_ids(profile: BenchmarkMetricProfile) -> list[str]:
     for group in profile.metric_groups.values():
         ids.extend(name for name in group.metrics if name not in ids)
     return ids
+
+
+def profile_digest(profile: BenchmarkMetricProfile) -> str:
+    """Return the stable SHA-256 identity of a resolved scoring profile.
+
+    The profile is part of the measurement instrument, not merely configuration.
+    Hashing its canonical JSON representation lets a report prove which metric
+    weights, optionality, and external scores produced its outcome even when the
+    built-in profile is later revised.
+    """
+    payload = json.dumps(
+        profile.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def profile_external_scores(profile: BenchmarkMetricProfile) -> set[str]:
@@ -144,6 +162,7 @@ def profiled_benchmark_ids() -> Iterable[str]:
 
 __all__ = [
     "BUILTIN_PROFILES",
+    "profile_digest",
     "profile_external_scores",
     "profile_metric_ids",
     "profiled_benchmark_ids",

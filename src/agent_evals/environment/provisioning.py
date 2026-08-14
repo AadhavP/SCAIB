@@ -59,9 +59,11 @@ from agent_evals.environment.execution import (
 )
 from agent_evals.environment.execution.observer import H5adDatasetObserver
 
-#: Layout under the run directory. The workspace is what the agent's code sees;
-#: the evaluator directory is its sibling rather than its child, so the reference
-#: store is not reachable by a relative path from inside the workspace.
+#: The workspace is what the agent's code sees. The evaluator directory is a
+#: sibling of the public run directory (not a child), so a completed run archive
+#: cannot accidentally ship the withheld reference store. The local backend can
+#: still reach that sibling because it is intentionally not a security boundary;
+#: its isolation report discloses that limitation.
 WORKSPACE_DIRNAME = "workspace"
 EVALUATOR_DIRNAME = "evaluator"
 REFERENCE_STORE_DIRNAME = "reference"
@@ -107,13 +109,21 @@ class ProvisionedEnvironment:
         return {
             "environment_id": self.environment.id,
             "backend": self.environment.backend.value,
+            "image": self.environment.image,
+            "image_digest": getattr(self.backend, "image_digest", None),
+            "user": getattr(self.backend, "user", None),
             "workspace_root": self._relative(self.workspace_root),
             "agent_dataset": self._relative(self.dataset_path),
             "withheld_obs_columns": list(self.manifest.columns),
             "withheld_uns_keys": list(self.manifest.removed_uns_keys),
             "withheld_obsm_keys": list(self.manifest.removed_obsm_keys),
             "retained_analysis_keys": list(self.retained_analysis_keys),
-            "reference_store": self._relative(self.reference_store),
+            # Do not publish the evaluator path. It is intentionally outside
+            # the public run root and may contain withheld labels; the fact that a
+            # store exists is useful provenance, but its host location is not an
+            # agent-facing observation and should not become an archive locator.
+            "reference_store": "evaluator-only (outside public run archive)",
+            "reference_store_scope": "outside_run_root",
             "isolation": self.isolation.model_dump(mode="json"),
             "limitations": self.limitations(),
         }
@@ -143,6 +153,14 @@ class ProvisionedEnvironment:
                 "reference join, but the process is not filesystem- or network-"
                 "confined; use the container backend for benchmark-grade results"
             )
+        if (
+            self.environment.backend is EnvironmentBackend.CONTAINER
+            and getattr(self.backend, "image_digest", None) is None
+        ):
+            gaps.append(
+                "the container image was supplied by tag rather than an immutable "
+                "sha256 digest; pin the image for cross-run reproducibility"
+            )
         if self.retained_analysis_keys:
             # A shortcut, not a leak: nothing listed here was computed from a
             # withheld column, so no leakage finding would fire on it and none
@@ -159,9 +177,9 @@ class ProvisionedEnvironment:
                 "performed"
             )
         gaps.append(
-            f"the reference store at '{REFERENCE_STORE_DIRNAME}/"
-            f"{REFERENCE_MANIFEST_FILENAME}' is evaluator-only; confirmed copied "
-            "candidate labels are rejected during the evaluation join"
+            f"the evaluator-only reference manifest '{REFERENCE_MANIFEST_FILENAME}' "
+            "is kept outside the public run archive; confirmed copied candidate "
+            "labels are rejected during the evaluation join"
         )
         return gaps
 
@@ -203,9 +221,14 @@ async def provision_environment(
     workspace_root = run_root / WORKSPACE_DIRNAME
     dataset_path = workspace_root / WORKSPACE_INPUT_DIRNAME / SANITIZED_DATASET_FILENAME
     partition = _materialize_dataset(adata, dataset_path)
+    # Keep withheld values outside the directory that is renamed, served, or
+    # handed to a result consumer after the run. A local subprocess can still
+    # traverse to this sibling, so local isolation remains explicitly disclosed;
+    # the container backend mounts only ``workspace_root`` and cannot see it.
+    evaluator_root = run_root.parent / f".{run_root.name}-{EVALUATOR_DIRNAME}"
     reference_store = write_reference_store(
         partition,
-        run_root / EVALUATOR_DIRNAME / REFERENCE_STORE_DIRNAME,
+        evaluator_root / REFERENCE_STORE_DIRNAME,
     )
     constraints = (
         task.constraints if task is not None else None
@@ -221,6 +244,7 @@ async def provision_environment(
             image=environment.image,
             isolation=isolation_request,
             input_dir=dataset_path.parent,
+            user=environment.user,
         )
     else:
         backend = LocalProcessBackend(workspace_root, isolation=isolation_request)

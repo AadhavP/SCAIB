@@ -124,6 +124,38 @@ def test_aggregation_does_not_renormalize_candidate_failures() -> None:
 
     assert result.value == pytest.approx(0.4)
     assert result.excluded_metric_ids == ["structural"]
+    assert result.missing_required_count == 0
+
+
+def test_aggregation_excludes_unimplemented_metrics_and_reports_missing_evidence() -> None:
+    group = MetricGroup(
+        group_id="quality",
+        metrics=[
+            MetricWeight(metric_id="available", weight=1),
+            MetricWeight(metric_id="unimplemented", weight=1),
+        ],
+        minimum_required=2,
+    )
+
+    result = aggregate_group(
+        group,
+        [
+            MetricResult(
+                metric_id="available", version="1.0", metric_name="available", role=MetricRole.PRIMARY,
+                direction=MetricDirection.HIGHER_IS_BETTER, normalized_value=0.8,
+                eligible=True, status=MetricStatus.SCORED, eligibility_reason="eligible",
+            ),
+            MetricResult(
+                metric_id="unimplemented", version="1.0", metric_name="unimplemented", role=MetricRole.PRIMARY,
+                direction=MetricDirection.HIGHER_IS_BETTER, eligible=False,
+                status=MetricStatus.UNIMPLEMENTED, eligibility_reason="backend unavailable",
+            ),
+        ],
+    )
+
+    assert result.value is None
+    assert result.excluded_metric_ids == ["unimplemented"]
+    assert result.missing_required_count == 1
 
 
 @pytest.mark.asyncio

@@ -41,7 +41,7 @@ COMPONENT_METRIC_SOURCES: Mapping[str, tuple[str, ...]] = {
     ),
     "batch_removal": (
         "batch_integration.iLISI",
-        "batch_integration.graph_connectivity",
+        "biological_conservation.graph_connectivity",
         "batch_integration.batch_asw",
     ),
     "biology_preservation": (

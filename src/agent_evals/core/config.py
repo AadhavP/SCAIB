@@ -54,7 +54,16 @@ class APISettings(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = 8000
+    workers: int = Field(default=1, ge=1, le=32)
+    # Development can execute jobs in API BackgroundTasks. Production should
+    # set this false and run the dedicated ``agent-evals worker`` service so API
+    # restarts do not interrupt scientific work and web workers stay responsive.
+    execute_jobs_in_process: bool = True
     api_key: str | None = Field(default=None, repr=False)
+    # Remote agent URLs are server-side network destinations. Private address
+    # space is disabled by default to prevent an API caller from turning SCAIB
+    # into an SSRF proxy; local integration tests can opt in explicitly.
+    allow_private_agent_endpoints: bool = False
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://127.0.0.1:8000"]
     )
@@ -66,6 +75,10 @@ class StorageSettings(BaseModel):
     data_dir: Path = Path("./data")
     reports_dir: Path = Path("./reports_output")
     cache_dir: Path = Path("./.cache")
+    # SQLite is the default durable control-plane store. Production deployments
+    # should place this file on persistent storage; ``:memory:`` remains useful
+    # for isolated unit tests through the explicit manager constructor.
+    job_db_path: Path = Path("./data/evaluation_jobs.sqlite3")
 
 
 class SandboxSettings(BaseModel):

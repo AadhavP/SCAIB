@@ -28,6 +28,7 @@ from agent_evals.agents.runtime.protocol import (
     AgentObservation,
     AgentPlan,
     AgentSession,
+    AgentUsage,
     FinalSubmission,
 )
 from agent_evals.agents.runtime.registry import (
@@ -69,6 +70,7 @@ __all__ = [
     "AgentRuntimeRegistry",
     "AgentSession",
     "AgentTrajectory",
+    "AgentUsage",
     "AnthropicRuntime",
     "CustomPythonRuntime",
     "ExternalProcessRuntime",

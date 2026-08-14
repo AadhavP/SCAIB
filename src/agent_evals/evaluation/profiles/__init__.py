@@ -11,6 +11,7 @@ from agent_evals.evaluation.profiles.pbmc_de import pbmc_de_profile
 from agent_evals.evaluation.profiles.pbmc_integration import pbmc_integration_profile
 from agent_evals.evaluation.profiles.resolution import (
     BUILTIN_PROFILES,
+    profile_digest,
     profile_external_scores,
     profile_metric_ids,
     profiled_benchmark_ids,
@@ -27,6 +28,7 @@ __all__ = [
     "pbmc_annotation_profile",
     "pbmc_de_profile",
     "pbmc_integration_profile",
+    "profile_digest",
     "profile_external_scores",
     "profile_metric_ids",
     "profiled_benchmark_ids",

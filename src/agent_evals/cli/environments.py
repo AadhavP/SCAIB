@@ -111,6 +111,7 @@ _SUMMARY_PROBE = ConstraintSpecification(
     internet_access=False,
     max_memory_mb=1024,
     max_runtime_seconds=60,
+    max_cpu_seconds=60,
 )
 
 

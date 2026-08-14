@@ -45,6 +45,7 @@ science = [
     "harmonypy>=0.0.10,<1.0.0",
     "scanpy>=1.10.4,<2.0.0",
     "scikit-learn>=1.4.0,<2.0.0",
+    "scib-metrics>=0.5.8,<0.6.0",
 ]
 dev = [
     "pytest>=8.1.0",

@@ -1,5 +1,6 @@
 """Tests for agent observation, translation, rewards, and scientific episodes."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ from agent_evals.environment.runtime import ScientificEnvironment
 from agent_evals.environment.scientific_loop import (
     ScientificActionExecutor,
     ScientificLoop,
+    verify_archive_manifest,
 )
 from agent_evals.evaluators.rewards import RewardEvaluator
 from agent_evals.scientific.action_mapper import (
@@ -224,7 +226,41 @@ async def test_rule_based_scientific_loop_persists_rewards_and_report(tmp_path: 
     assert run.global_reward.value is not None
     assert root.joinpath("trajectory.json").exists()
     assert root.joinpath("report.md").exists()
+    assert root.joinpath("archive_manifest.json").exists()
     assert all(Path(artifact.uri).exists() for artifact in run.artifacts if artifact.uri)
+    assert run.provenance is not None
+    assert run.provenance.loaded_cells == 120
+    assert run.provenance.source_dataset_checksum_verified is True
+    assert run.provenance.dataset_shape_verified is False
+    scientific_observation = run.agent_run.final_environment_state.state.observations[
+        "scientific-observation"
+    ]
+    assert (
+        run.provenance.loaded_genes
+        == scientific_observation.value["dataset_summary"]["genes"]
+    )
+    assert run.provenance.archive_manifest_sha256
+    assert run.archive_verification is not None
+    assert run.archive_verification.valid
+    assert run.qualification is not None
+    # This is an intentionally reduced smoke run and the PBMC annotation
+    # fixture has no batch metadata for the integration subgroup, so it must
+    # remain diagnostic rather than comparable.
+    assert run.qualification.status.value == "unmeasured"
+    assert run.qualification.score_comparable is False
+    archive = json.loads(root.joinpath("archive_manifest.json").read_text(encoding="utf-8"))
+    assert archive["scope"] == "public_run_archive"
+    assert not any(path.startswith("evaluator/") for path in archive["files"])
+
+    # Metadata is outside the byte manifest, so the semantic result digest must
+    # catch a score/qualification rewrite that leaves scientific artifacts intact.
+    report_path = root / "report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report["qualification"]["status"] = "certified"
+    report_path.write_text(json.dumps(report), encoding="utf-8")
+    tampered = verify_archive_manifest(root)
+    assert not tampered.valid
+    assert "report.json:score-bearing-result" in tampered.changed_files
 
 
 @pytest.mark.asyncio

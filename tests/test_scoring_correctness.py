@@ -52,6 +52,7 @@ from agent_evals.evaluation.scoring.domains import (
     describe_unmeasured_domains,
 )
 from agent_evals.evaluation.trajectory import _QUALITY_WEIGHTS, _weighted_quality
+from agent_evals.metrics.backends import scib_metrics
 from agent_evals.metrics.builtin._helpers import failed, unavailable
 from agent_evals.metrics.context import ScientificMetricContext
 from agent_evals.metrics.results import MetricResult, MetricStatus
@@ -635,17 +636,17 @@ def test_nothing_blocks_a_domain_whose_only_exclusions_were_optional() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_the_two_stub_metrics_report_a_harness_gap_not_an_agent_zero() -> None:
-    """``kBET`` and ``BRAS`` have never had an implementation. Both returned the
-    same value as a genuine computation failure, which carries their failure score
-    of 0.0 -- so flawless batch integration was charged for SCAIB's unfinished
-    work.
+def test_the_two_scib_metrics_report_a_harness_gap_not_an_agent_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unavailable scIB backend is not charged to the agent.
 
-    Asserted through the real engine, because the status is only reachable once
-    applicability has passed: a context without an ``embedding`` artifact or a
-    ``batch`` key is rejected earlier and would make this pass for the wrong
-    reason.
+    The production adapter now calls the pinned scib-metrics implementation. This
+    test forces the deployment-level absence so the contract remains portable to
+    a core install without the optional science extra; a real computation failure
+    must still remain a scored failure.
     """
+    monkeypatch.setattr(scib_metrics, "available", lambda: False)
     context = ScientificMetricContext(
         candidate_artifacts={"embedding": [[0.0, 1.0], [1.0, 0.0]]},
         metadata={"batch": "batch"},

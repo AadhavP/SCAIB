@@ -306,13 +306,19 @@ class ScientificEnvironment:
             # declared is partial, not an error; an execution that already
             # failed keeps whatever reason it reported.
             execution_status=self._contract_status(result, ExecutionStatus.PARTIAL),
-            error=message,
+            outputs=result.outputs,
+            observations=result.observations,
+            artifacts=result.artifacts,
             resource_usage=result.resource_usage,
-            # Carried across the rebuild deliberately. The contract check is a
-            # judgement about the result; the delta is a measurement of what the
-            # code did, and discarding it here would lose exactly the evidence
-            # that explains a step which ran but declared the wrong outputs.
+            # Carried across deliberately. The contract check is a judgement
+            # about the result; the delta and partial artifacts are measurements
+            # of what the code actually did. Dropping them here would erase the
+            # very evidence that explains a step which ran but declared the wrong
+            # outputs.
             observed_state_delta=result.observed_state_delta,
+            error=message,
+            started_at=result.started_at,
+            completed_at=result.completed_at,
         )
 
     @staticmethod
@@ -347,12 +353,17 @@ class ScientificEnvironment:
             status=ActionStatus.FAILED,
             # The work itself may have finished; the episode ran out of budget.
             execution_status=self._contract_status(result, ExecutionStatus.TERMINATED),
+            outputs=result.outputs,
+            observations=result.observations,
+            artifacts=result.artifacts,
             error="; ".join(violations),
             resource_usage=result.resource_usage,
             # A step that overran its budget is the case where knowing what it
-            # already changed matters most: the outputs are not committed, so
-            # the delta is the only record of what the data now looks like.
+            # already changed matters most: outputs and artifacts remain as
+            # evidence even though the failed step is not committed as success.
             observed_state_delta=result.observed_state_delta,
+            started_at=result.started_at,
+            completed_at=result.completed_at,
         )
 
 

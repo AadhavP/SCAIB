@@ -63,7 +63,44 @@ The report keeps levels separate:
 - Execution: success, failure, resource usage, and runtime.
 - Artifact: presence, validity, schema indicators, and scientific result metrics.
 
-The current engine does not collapse these into a global reward.
+The canonical scientific loop reports three separate dimensions rather than
+letting a terminal artifact hide the path that produced it:
+
+- **Outcome (`O`)**: benchmark-owned scientific artifact quality, computed from
+  the predeclared metric profile and hidden references.
+- **Decision (`D`)**: observable decision, method, parameter, execution, and
+  state-claim verification quality.
+- **Trajectory (`T`)**: productive progress, adaptation, recovery, dependency
+  consistency, redundancy, regression, and termination quality.
+
+The combined score is the benchmark's frozen weighted geometric aggregation
+`O^wO * D^wD * T^wT` when all dimensions are measurable. Ineligible or
+unmeasured dimensions are excluded according to the profile and reported in the
+formula/confidence metadata; they are never silently substituted with a perfect
+score. `global_reward` in a persisted `AgentScientificRun` is the scientific
+outcome `O`, while `evaluation.global_agent_score` is the combined benchmark
+score.
+
+## Run qualification
+
+A numeric result is not automatically a comparable benchmark measurement. Every
+new scientific run also receives a `RunQualification` with one of four statuses:
+
+- `certified`: the execution boundary, dataset identity/shape, primary metrics,
+  resource telemetry, artifact evidence, and archive integrity were all
+  established;
+- `exploratory`: a score exists, but the execution tier or reproducibility
+  evidence is explicitly weaker (for example, an unconfined local workspace);
+- `unmeasured`: a required scientific dimension or dataset identity could not be
+  established;
+- `invalid`: the controller or evaluator found a failed integrity, leakage, or
+  execution claim.
+
+The UI suppresses the headline combined score unless `score_comparable` is true,
+while retaining diagnostic `O`, `D`, `T`, metric, and limitation evidence. The
+qualification is persisted in `report.json`, `provenance.json`, and the score
+object, so downstream analyses cannot silently treat an exploratory smoke run as
+an apples-to-apples result.
 
 ## Metric registry and dependencies
 
@@ -103,8 +140,12 @@ scientific scores:
 - `runtime`: recorded wall-clock duration.
 
 Scientific executors can add richer metadata or optional Scanpy/scIB-backed
-implementations later without changing the report schema. The base framework
-does not require the single-cell ecosystem to be installed.
+implementations without changing the report schema. The base framework does
+not require the single-cell ecosystem to be installed. The `scib-metrics`
+bridge is optional and records an unavailable metric rather than charging the
+agent when the upstream implementation is not installed; publication-grade
+comparisons still require a pinned environment and validation against the
+authoritative upstream implementation.
 
 ## Reports and CLI
 

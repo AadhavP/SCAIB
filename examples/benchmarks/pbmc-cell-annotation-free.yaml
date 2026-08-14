@@ -52,6 +52,10 @@ datasets:
     organism: Homo sapiens
     modality: scRNA-seq
     format: h5ad
+    checksum:
+      algorithm: sha256
+      # Exact checksum of the bundled scanpy.datasets.pbmc68k_reduced fixture.
+      value: 0a82868d6763a3812107841c41fc3bc4b0c5cbcc022e8b45651d6a1363ea948d
     citation: [pbmc68k-paper]
     license: public research use
     expected_observations: {cells: 68579, genes: 32738}
@@ -302,6 +306,7 @@ constraints:
   cpu_only: true
   internet_access: false
   max_runtime_seconds: 1800
+  max_cpu_seconds: 1800
   max_memory_mb: 16384
   allowed_python_packages: [anndata, numpy, pandas, scanpy, scipy, scikit-learn]
   deterministic: true

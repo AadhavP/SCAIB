@@ -36,6 +36,72 @@ jobs:
       - name: Pytest
         run: uv run pytest
 
+  container-boundary:
+    name: Linux container boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install test dependencies
+        run: uv sync --extra dev --extra science
+
+      - name: Pull the smoke-test image
+        run: docker pull python:3.12-slim
+
+      - name: Exercise real network-denied container execution
+        run: uv run pytest tests/test_workspace_execution.py -k real_container --no-cov -q
+
+  production-config:
+    name: Production configuration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate production Compose graph
+        env:
+          AGENT_EVALS_API_IMAGE: registry.example/scaib-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+          SCAIB_CONSOLE_IMAGE: registry.example/scaib-console@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+          AGENT_EVALS_API__API_KEY: ci-only-not-a-secret
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+  research-contract:
+    name: Research readiness contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra science
+
+      - name: Run machine-checkable research contracts
+        run: |
+          uv run pytest tests/test_research_readiness.py tests/test_research_calibration.py tests/test_research_bundle.py tests/test_research_conformance.py tests/test_research_metric_invariants.py tests/test_endpoint_contract.py tests/test_qualification.py --no-cov -q
+          mkdir -p .ci-research
+          uv run agent-evals research protocol-check --strict
+          uv run agent-evals research conformance --output .ci-research/synthetic-conformance --strict
+          bundle_manifest=$(find .ci-research/synthetic-conformance -name bundle_manifest.json -print -quit)
+          test -n "$bundle_manifest"
+          uv run agent-evals verify-bundle --strict-replay "$(dirname "$bundle_manifest")"
+          uv run agent-evals research init --benchmark-id ci-contract --benchmark-version 1.0.0 --output .ci-research/manifest.yaml
+          uv run agent-evals research certify --manifest .ci-research/manifest.yaml --output .ci-research/certificate.json
+          uv run agent-evals research verify --manifest .ci-research/manifest.yaml --certificate .ci-research/certificate.json
+
   frontend:
     name: Frontend (tests, build)
     runs-on: ubuntu-latest

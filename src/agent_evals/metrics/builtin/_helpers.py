@@ -27,6 +27,36 @@ from agent_evals.metrics.registry import MetricComputation
 _CANDIDATE_COLUMNS = (*AGENT_PREDICTION_COLUMNS, "leiden", "louvain", "cluster")
 
 
+def reference_labels(context: ScientificMetricContext) -> Any | None:
+    """Return evaluator-held biological labels for conservation metrics.
+
+    Integration metrics compare an embedding against the biological structure
+    supplied by the benchmark; they do not require the agent to submit a second
+    prediction just to score whether the representation preserved that structure.
+    This helper intentionally never reads an agent-produced label as the
+    reference side.
+    """
+    table = context.reference_artifacts.get("labels")
+    if table is not None:
+        if hasattr(table, "columns") and "reference_label" in table.columns:
+            return table["reference_label"].astype(str).to_numpy()
+        if hasattr(table, "to_numpy"):
+            values = table.to_numpy()
+            return values[:, 0] if getattr(values, "ndim", 1) > 1 else values
+    adata = context.adata
+    if adata is None:
+        return None
+    reference_key = next(
+        (key for key in REFERENCE_LABEL_COLUMNS if key in adata.obs),
+        None,
+    )
+    return (
+        adata.obs[reference_key].astype(str).to_numpy()
+        if reference_key is not None
+        else None
+    )
+
+
 def labels(context: ScientificMetricContext) -> tuple[Any, Any] | None:
     """Return reference and candidate labels from standardized evidence."""
     table = context.candidate_artifacts.get("prediction")
@@ -65,12 +95,15 @@ def labels(context: ScientificMetricContext) -> tuple[Any, Any] | None:
 
 
 def embedding(context: ScientificMetricContext, name: str | None = None) -> Any | None:
-    """Extract a candidate/reference representation."""
+    """Extract a candidate/reference representation from either execution tier."""
     if name is not None:
         if name in context.candidate_artifacts:
             return context.candidate_artifacts[name]
         if context.adata is not None and name in context.adata.obsm:
             return context.adata.obsm[name]
+    for key in ("embedding", "integrated_embedding", "X_integrated", "X_pca", "X_umap"):
+        if key in context.candidate_artifacts:
+            return context.candidate_artifacts[key]
     if context.adata is not None:
         for key in ("X_integrated", "X_pca", "X_umap"):
             if key in context.adata.obsm:
@@ -186,5 +219,6 @@ __all__ = [
     "embedding",
     "failed",
     "labels",
+    "reference_labels",
     "unavailable",
 ]

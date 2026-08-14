@@ -1,19 +1,106 @@
 # Production overrides: static frontend build served by nginx.
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Usage (images must be built/pushed first):
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
-# Remember to set AGENT_EVALS_ENVIRONMENT=production and
-# AGENT_EVALS_API__API_KEY in .env before deploying.
+# Remember to set AGENT_EVALS_API_IMAGE and SCAIB_CONSOLE_IMAGE to immutable
+# image references (prefer @sha256 digests), plus production auth settings.
 
 services:
+  api:
+    build: !reset null
+    image: "${AGENT_EVALS_API_IMAGE:?set AGENT_EVALS_API_IMAGE to an immutable image reference}"
+    user: "10001:10001"
+    # The browser reaches the API through nginx; do not publish the control
+    # plane directly on the host in the production profile.
+    ports: !override []
+    expose:
+      - "8000"
+    environment:
+      AGENT_EVALS_ENVIRONMENT: "production"
+      AGENT_EVALS_DEBUG: "false"
+      AGENT_EVALS_LOG_JSON: "true"
+      AGENT_EVALS_API__HOST: "0.0.0.0"
+      AGENT_EVALS_API__PORT: "8000"
+      AGENT_EVALS_API__WORKERS: "2"
+      AGENT_EVALS_API__EXECUTE_JOBS_IN_PROCESS: "false"
+      AGENT_EVALS_API__API_KEY: "${AGENT_EVALS_API__API_KEY:?set AGENT_EVALS_API__API_KEY}"
+      # The console is same-origin behind nginx; do not inherit localhost CORS
+      # defaults into the production control plane.
+      AGENT_EVALS_API__CORS_ORIGINS: "[]"
+      AGENT_EVALS_STORAGE__JOB_DB_PATH: "/app/data/evaluation_jobs.sqlite3"
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,size=512m
+    volumes: !override
+      - agent_data:/app/data
+      - agent_runs:/app/runs
+      - agent_results:/app/results
+      - agent_reports:/app/reports_output
+
+  worker:
+    build: !reset null
+    image: "${AGENT_EVALS_API_IMAGE:?set AGENT_EVALS_API_IMAGE to an immutable image reference}"
+    user: "10001:10001"
+    command: ["agent-evals", "worker"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      AGENT_EVALS_ENVIRONMENT: "production"
+      AGENT_EVALS_DEBUG: "false"
+      AGENT_EVALS_LOG_JSON: "true"
+      AGENT_EVALS_API__HOST: "0.0.0.0"
+      AGENT_EVALS_API__EXECUTE_JOBS_IN_PROCESS: "true"
+      AGENT_EVALS_STORAGE__JOB_DB_PATH: "/app/data/evaluation_jobs.sqlite3"
+    volumes: !override
+      - agent_data:/app/data
+      - agent_runs:/app/runs
+      - agent_results:/app/results
+      - agent_reports:/app/reports_output
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    tmpfs: !override
+      - /tmp:rw,noexec,nosuid,size=512m
+    depends_on:
+      api:
+        condition: service_healthy
+    # The API image's HTTP health check does not apply to this process: the
+    # worker owns no HTTP listener. Check the same durable lease it renews.
+    healthcheck:
+      test: ["CMD", "agent-evals", "worker-health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped
+
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile.prod
-    image: scaib-console:prod
+    build: !reset null
+    image: "${SCAIB_CONSOLE_IMAGE:?set SCAIB_CONSOLE_IMAGE to an immutable image reference}"
     environment:
       # nginx attaches this as `Authorization: Bearer ...` on proxied /v1
       # requests. It is read at container start and never reaches the browser.
       AGENT_EVALS_API__API_KEY: "${AGENT_EVALS_API__API_KEY:-}"
-    ports:
+    ports: !override
       - "${FRONTEND_PORT:-8080}:80"
-    volumes: []
+    security_opt: !override
+      - no-new-privileges:true
+    cap_drop: !override
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    tmpfs: !override
+      - /var/cache/nginx:rw,noexec,nosuid,size=32m
+      - /var/run:rw,noexec,nosuid,size=8m
+    volumes: !override []
+
+volumes:
+  agent_data:
+  agent_runs:
+  agent_results:
+  agent_reports:

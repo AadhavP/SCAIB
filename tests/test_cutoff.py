@@ -459,6 +459,30 @@ def test_reported_usage_stops_the_run_at_its_budget(
     assert decision.reason is expected
 
 
+def test_planning_usage_is_counted_without_inventing_a_scientific_step() -> None:
+    """A plan can consume the token budget before the first action is executed."""
+    controller = CutoffController(CutoffBudget(max_total_tokens=100))
+
+    controller.observe_usage(total_tokens=100)
+
+    decision = controller.decide(elapsed_seconds=0.0)
+
+    assert decision.stop
+    assert decision.reason is CutoffReason.TOKENS
+    assert controller.report().steps_used == 0
+
+
+def test_cumulative_usage_reports_do_not_resurrect_a_consumed_budget() -> None:
+    """Late provider reports are monotonic even when a backend reports out of order."""
+    controller = CutoffController(CutoffBudget(max_total_tokens=100))
+
+    controller.observe_usage(total_tokens=120)
+    controller.observe_usage(total_tokens=20)
+
+    assert controller.decide(elapsed_seconds=0.0).reason is CutoffReason.TOKENS
+    assert controller.report().total_tokens == 120
+
+
 def test_a_budget_nothing_reports_on_is_unobservable_rather_than_satisfied() -> None:
     """A cost budget on a backend that reports no cost was never in force."""
     controller = CutoffController(

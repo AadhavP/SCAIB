@@ -89,10 +89,11 @@ def qc_filter(context: ScientificContext, parameters: dict[str, Any]) -> Operati
             }
         )
     elif method == "mitochondrial_filter":
-        max_pct_mt = _as_percent(
+        max_pct_mt_value = _as_percent(
             parameters.get("max_pct_mt", parameters.get("max_mito_fraction", 20.0))
         )
-        cell_keep = cell_mito <= float(max_pct_mt)
+        max_pct_mt = 20.0 if max_pct_mt_value is None else max_pct_mt_value
+        cell_keep = cell_mito <= max_pct_mt
         if "min_genes" in parameters:
             cell_keep &= cell_genes >= int(parameters["min_genes"])
         thresholds.update(

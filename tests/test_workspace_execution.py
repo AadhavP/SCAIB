@@ -16,6 +16,7 @@ the implementation could look finished while being wrong:
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,7 @@ from agent_evals.environment.execution.container import (
     CONTAINER_WORKSPACE,
     OOM_EXIT_CODE,
     ContainerBackend,
+    _read_capped_stream,
     build_exec_argv,
     build_run_argv,
     docker_available,
@@ -939,6 +941,8 @@ def test_benchmark_constraints_become_a_backend_neutral_isolation_request() -> N
         internet_access=False,
         max_memory_mb=8192,
         max_runtime_seconds=600,
+        max_processes=32,
+        max_file_size_mb=128,
     )
 
     # Act
@@ -947,7 +951,14 @@ def test_benchmark_constraints_become_a_backend_neutral_isolation_request() -> N
     # Assert
     assert not request.network_access
     assert request.max_memory_mb == 8192
-    assert request.max_cpu_seconds == 600
+    assert request.max_cpu_seconds is None
+    assert request.max_processes == 32
+    assert request.max_file_size_mb == 128
+
+    explicit_cpu = isolation_from_constraints(
+        ConstraintSpecification(max_cpu_seconds=120)
+    )
+    assert explicit_cpu.max_cpu_seconds == 120
 
 
 def test_a_single_command_cannot_consume_the_whole_episode_budget() -> None:
@@ -983,6 +994,19 @@ def test_both_produces_spellings_are_accepted() -> None:
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_container_output_reader_drains_beyond_the_retained_prefix() -> None:
+    """A hostile command cannot make the container backend buffer unbounded output."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"x" * 128)
+    reader.feed_eof()
+
+    retained, truncated = await _read_capped_stream(reader, 16)
+
+    assert retained == b"x" * 16
+    assert truncated is True
+
+
 def test_the_container_run_argv_pins_swap_to_the_memory_ceiling() -> None:
     # Without --memory-swap, Docker grants swap equal to the memory limit, so a
     # run nominally capped at 8 GB may use 16 GB.
@@ -992,7 +1016,9 @@ def test_the_container_run_argv_pins_swap_to_the_memory_ceiling() -> None:
         isolation=IsolationRequest(
             network_access=False,
             max_memory_mb=8192,
+            max_cpu_seconds=60,
             max_processes=64,
+            max_file_size_mb=128,
         ),
         cpu_limit=2.0,
     )
@@ -1000,7 +1026,15 @@ def test_the_container_run_argv_pins_swap_to_the_memory_ceiling() -> None:
     assert "--memory=8192m" in argv
     assert "--memory-swap=8192m" in argv
     assert "--network=none" in argv
+    assert "--cap-drop=ALL" in argv
+    assert "--security-opt=no-new-privileges" in argv
+    assert "--read-only" in argv
+    assert "/tmp:rw,noexec,nosuid,nodev" in argv
+    assert "--user=65532:65532" in argv
     assert "--pids-limit=64" in argv
+    assert "--ulimit" in argv
+    assert "cpu=60" in argv
+    assert "fsize=134217728" in argv
     assert "--cpus=2" in argv
     assert argv[-1] == "infinity"
     assert "--rm" in argv
@@ -1041,6 +1075,43 @@ def test_the_container_exec_argv_carries_env_and_reads_stdin() -> None:
     assert shell[-2:] == ("bash", "-s")
 
 
+def test_container_rejects_empty_or_root_execution_identity(tmp_path: Path) -> None:
+    with pytest.raises(SandboxExecutionError, match="non-empty image"):
+        ContainerBackend(tmp_path, image="")
+    with pytest.raises(SandboxExecutionError, match="non-root"):
+        ContainerBackend(tmp_path, image="img", user="0:0")
+    with pytest.raises(SandboxExecutionError, match="non-root"):
+        ContainerBackend(tmp_path, image="img", user="root")
+
+
+@pytest.mark.asyncio
+async def test_container_start_cannot_overwrite_an_existing_container(tmp_path: Path) -> None:
+    backend = ContainerBackend(
+        tmp_path,
+        image="img",
+        executable="scaib-nonexistent-docker",
+    )
+    backend._container_id = "already-running"
+
+    with pytest.raises(SandboxExecutionError, match="already started"):
+        await backend.start()
+
+
+
+def test_container_image_digest_requires_a_complete_immutable_reference(tmp_path: Path) -> None:
+    pinned = ContainerBackend(
+        tmp_path,
+        image="registry.example/scaib@sha256:" + "A" * 64,
+    )
+    mutable_claim = ContainerBackend(
+        tmp_path,
+        image="registry.example/scaib@sha256:not-a-digest",
+    )
+
+    assert pinned.image_digest == "sha256:" + "a" * 64
+    assert mutable_claim.image_digest is None
+
+
 def test_the_container_backend_claims_real_isolation(tmp_path: Path) -> None:
     # Arrange
     backend = ContainerBackend(
@@ -1049,7 +1120,9 @@ def test_the_container_backend_claims_real_isolation(tmp_path: Path) -> None:
         isolation=IsolationRequest(
             network_access=False,
             max_memory_mb=4096,
+            max_cpu_seconds=60,
             max_processes=32,
+            max_file_size_mb=128,
         ),
     )
 
@@ -1066,9 +1139,18 @@ def test_the_container_backend_claims_real_isolation(tmp_path: Path) -> None:
         report.outcome_for(IsolationControl.RESIDENT_MEMORY) is IsolationOutcome.ENFORCED
     )
     assert (
-        report.outcome_for(IsolationControl.PROCESS_COUNT) is IsolationOutcome.ENFORCED
+        report.outcome_for(IsolationControl.PROCESS_COUNT)
+        is IsolationOutcome.ENFORCED
     )
+    assert report.outcome_for(IsolationControl.CPU_TIME) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.FILE_SIZE) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.CAPABILITIES) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.PRIVILEGE_ESCALATION) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.ROOT_FILESYSTEM) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.TEMPORARY_FILESYSTEM) is IsolationOutcome.ENFORCED
+    assert report.outcome_for(IsolationControl.NON_ROOT) is IsolationOutcome.ENFORCED
     assert report.is_complete
+
 
 
 def test_an_unlimited_container_does_not_claim_a_memory_ceiling(tmp_path: Path) -> None:

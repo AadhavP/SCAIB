@@ -8,6 +8,11 @@ from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from agent_evals.agents.decisions.parser import (
+    CANONICAL_DECISION_KEYS,
+    ResponseExtractionEvidence,
+    extract_decision,
+)
 from agent_evals.agents.decisions.verification import (
     DecisionVerification,
     verify_state_claim,
@@ -268,6 +273,11 @@ class ScientificDecision(AgentRuntimeModel):
     #: on purpose: topology is metadata the benchmark records, never something it
     #: scores, so this is a label rather than a structure.
     agent_origin: str | None = None
+    #: Harness-generated evidence describing how the raw boundary response became
+    #: this decision. It is explicit here rather than buried only in ``metadata``
+    #: so downstream reports can audit extraction without knowing the intent
+    #: vocabulary used by a particular adapter.
+    response_extraction: ResponseExtractionEvidence | None = None
     method_choice: MethodChoice | None = None
     parameter_choice: ParameterChoice | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -416,7 +426,21 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
     """Extract explicit decisions from observable episode action records."""
     decisions: list[ScientificDecision] = []
     for _order, record in enumerate(snapshot.state.actions):
-        metadata = record.intent.metadata
+        raw_metadata = record.intent.metadata
+        # Direct/legacy adapters can construct an intent without passing through
+        # the universal runtime extractor. Normalize their metadata here too, and
+        # remove malformed canonical fields before using them below. Otherwise a
+        # string supplied for ``expected_effect`` or ``state_claim`` reaches
+        # ``.items()``/``dict(...)`` and turns a bad agent response into a broken
+        # archive instead of an auditable malformed decision.
+        extracted = extract_decision(raw_metadata)
+        metadata = {
+            key: value
+            for key, value in raw_metadata.items()
+            if key not in CANONICAL_DECISION_KEYS
+        }
+        metadata.update(extracted.metadata)
+        response_extraction = _response_extraction(metadata)
         step_id = f"step-{record.step}"
         decision_id = f"decision-{record.step}"
         output_artifacts = [artifact.artifact_id for artifact in record.result.artifacts]
@@ -504,6 +528,7 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 verification=verification,
                 resource_usage=record.result.resource_usage,
                 agent_origin=_optional_str(metadata.get("agent_origin")),
+                response_extraction=response_extraction,
                 method_choice=method_choice,
                 metadata=metadata,
             )
@@ -568,6 +593,17 @@ def decision_cascade_from_episode(snapshot: EpisodeSnapshot) -> DecisionCascade:
                 )
             )
     return DecisionCascade(decisions=decisions)
+
+
+def _response_extraction(metadata: dict[str, Any]) -> ResponseExtractionEvidence | None:
+    """Validate persisted extraction evidence without trusting malformed claims."""
+    value = metadata.get("response_extraction")
+    if not isinstance(value, dict):
+        return None
+    try:
+        return ResponseExtractionEvidence.model_validate(value)
+    except ValueError:
+        return None
 
 
 def _decision_category(value: Any, action_id: str) -> DecisionCategory:

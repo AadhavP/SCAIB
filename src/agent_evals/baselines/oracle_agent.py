@@ -20,6 +20,7 @@ class OracleAgentBaseline(BaselineRunner):
         return BaselineResult(
             baseline_id=self.baseline_id,
             status="evaluated" if score is not None else "unavailable",
+            seed=seed,
             score=score,
             metadata={"seed": seed, "evaluator_only": True},
         )

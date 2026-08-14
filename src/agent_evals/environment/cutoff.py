@@ -314,10 +314,10 @@ class CutoffController:
                 self._signatures[observation.signature] += 1
         else:
             self._consecutive_failures += 1
-        if observation.total_tokens is not None:
-            self._total_tokens = observation.total_tokens
-        if observation.cost_usd is not None:
-            self._cost_usd = observation.cost_usd
+        self.observe_usage(
+            total_tokens=observation.total_tokens,
+            cost_usd=observation.cost_usd,
+        )
         if self._detector is None:
             return
         trace = self._detector.evaluate(self._deltas)
@@ -345,6 +345,24 @@ class CutoffController:
         self._trace = trace.model_copy(
             update={"stagnant_streak": self._stagnant_streak}
         )
+
+    def observe_usage(
+        self,
+        *,
+        total_tokens: int | None = None,
+        cost_usd: float | None = None,
+    ) -> None:
+        """Record cumulative provider usage without inventing a scientific step.
+
+        Planning and termination calls consume provider resources too, but they
+        are not environment actions and must not advance the step/stagnation
+        state. Values are monotonic because a late or cumulative report must not
+        resurrect a budget that already fired.
+        """
+        if total_tokens is not None:
+            self._total_tokens = max(self._total_tokens or 0, total_tokens)
+        if cost_usd is not None:
+            self._cost_usd = max(self._cost_usd or 0.0, cost_usd)
 
     def decide(self, *, elapsed_seconds: float) -> CutoffDecision:
         """Say whether another step may be taken.
