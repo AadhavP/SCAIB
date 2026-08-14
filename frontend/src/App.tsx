@@ -303,7 +303,58 @@ function StepBar({ screen }: { screen: Screen }) {
 }
 
 function Catalog({ benchmarks, details, selected, onChoose, loading, recent }: { benchmarks: string[]; details: Record<string, BenchmarkDetail>; selected: string; onChoose: (id: string) => void; loading: boolean; recent: EvaluationJob[] }) {
-  return <section className="page catalog-page"><h1 className="sr-only">Evaluation console</h1><div className="page-heading"><div><div className="eyebrow"><span className="pulse" /> STEP 01 / BENCHMARK CATALOG</div><h1>What should we <em>measure?</em></h1><p>Choose a scientific benchmark. Each one is a complete, reproducible workflow with a dataset, observable decisions, and interpretable scores.</p></div><div className="heading-note"><Database size={16} /><span>{benchmarks.length} registered benchmarks<br /><small>Descriptions loaded from the API</small></span></div></div><div className="catalog-grid">{benchmarks.map((id, index) => { const item = details[id] ?? fallbackDetails[id]; return <article className={`benchmark-card ${id === selected ? 'selected' : ''}`} key={id}><div className="card-top"><span className="card-number">0{index + 1}</span><span className="version">v{text(item?.version, '1.0.0')}</span></div><div className="benchmark-icon"><Beaker size={20} /></div><span className="benchmark-id">{id}</span><h2>{text(item?.title, titleize(id))}</h2><p>{text(item?.description, 'A registered scientific evaluation benchmark.')}</p><div className="tag-row">{(item?.tags ?? ['scientific', 'reproducible']).slice(0, 4).map(tag => <span key={tag}>{tag}</span>)}</div><div className="card-meta"><span><Layers3 size={14} /> {item?.tasks.length ?? '—'} task{item?.tasks.length === 1 ? '' : 's'}</span><span><Gauge size={14} /> {item?.metrics.length ?? '—'} metrics</span></div><button className="card-action" aria-label="Configure benchmark" onClick={() => onChoose(id)}>Configure benchmark <ArrowRight size={15} /></button></article>})}</div><div className="catalog-bottom"><div className="info-strip"><Info size={16} /><span><strong>How scoring works</strong> Agents are scored on scientific outcomes, decision quality, trajectory quality, and reproducibility — not just the final answer.</span></div>{recent.length > 0 && <div className="recent-strip"><Clock3 size={15} /> {recent.length} recent run{recent.length === 1 ? '' : 's'} available in this session</div>}</div>{loading && <span className="loading-note">Syncing benchmark metadata…</span>}</section>
+  const catalogItems = benchmarks.map(id => details[id] ?? fallbackDetails[id])
+  const taskCount = catalogItems.reduce((total, item) => total + (item?.tasks.length ?? 0), 0)
+  const metricCount = catalogItems.reduce((total, item) => total + (item?.metrics.length ?? 0), 0)
+
+  return <section className="page catalog-page">
+    <h1 className="sr-only">Evaluation console</h1>
+    <header className="catalog-hero">
+      <div className="catalog-hero-copy">
+        <div className="eyebrow"><span className="pulse" /> RESEARCH OPERATIONS / 01</div>
+        <h1>Benchmark the <em>scientific loop.</em></h1>
+        <p>Choose an evaluation surface, define a reproducible run, and inspect the evidence behind every result.</p>
+        <div className="hero-rail" aria-label="Benchmark evaluation dimensions">
+          <span><i>O</i> Scientific outcome</span>
+          <span><i>D</i> Decision quality</span>
+          <span><i>T</i> Trajectory quality</span>
+        </div>
+      </div>
+      <aside className="catalog-signal" aria-label="Registry overview">
+        <div className="signal-heading"><span><Activity size={15} /> LIVE REGISTRY</span><small><span className="online-dot" /> {loading ? 'syncing' : 'ready'}</small></div>
+        <div className="signal-stats">
+          <div><span>BENCHMARKS</span><strong>{String(benchmarks.length).padStart(2, '0')}</strong><small>registered</small></div>
+          <div><span>TASKS</span><strong>{String(taskCount).padStart(2, '0')}</strong><small>declared</small></div>
+          <div><span>METRICS</span><strong>{String(metricCount).padStart(2, '0')}</strong><small>available</small></div>
+        </div>
+        <div className="signal-footer"><Database size={14} /><span>Source-backed benchmark specifications</span></div>
+      </aside>
+    </header>
+    <div className="catalog-toolbar">
+      <div><span className="micro-label">REGISTERED EVALUATIONS</span><strong>Choose a benchmark to configure</strong></div>
+      <span className="catalog-status"><span /> All systems operational</span>
+    </div>
+    <div className="catalog-grid">{benchmarks.map((id, index) => {
+      const item = details[id] ?? fallbackDetails[id]
+      const tasks = item?.tasks.length ?? 0
+      const metrics = item?.metrics.length ?? 0
+      return <article className={`benchmark-card ${id === selected ? 'selected' : ''}`} key={id}>
+        <div className="card-top"><span className="card-number">{String(index + 1).padStart(2, '0')}</span><span className="version">v{text(item?.version, '1.0.0')}</span></div>
+        <div className="benchmark-icon"><Beaker size={20} /></div>
+        <span className="benchmark-id">{id}</span>
+        <h2>{text(item?.title, titleize(id))}</h2>
+        <p>{text(item?.description, 'A registered scientific evaluation benchmark.')}</p>
+        <div className="tag-row">{(item?.tags ?? ['scientific', 'reproducible']).slice(0, 4).map(tag => <span key={tag}>{tag}</span>)}</div>
+        <div className="card-metrics">
+          <span><small>WORKFLOW</small><strong>{tasks} stage{tasks === 1 ? '' : 's'}</strong></span>
+          <span><small>SCORING</small><strong>{metrics} signals</strong></span>
+        </div>
+        <button className="card-action" aria-label="Configure benchmark" onClick={() => onChoose(id)}>Configure benchmark <ArrowRight size={15} /></button>
+      </article>
+    })}</div>
+    <div className="catalog-bottom"><div className="info-strip"><Info size={16} /><span><strong>Evidence before answers.</strong> Each run records methods, artifacts, reproducibility controls, and the scorecard that follows from them.</span></div>{recent.length > 0 && <div className="recent-strip"><Clock3 size={15} /> {recent.length} recent run{recent.length === 1 ? '' : 's'} available in this session</div>}</div>
+    {loading && <span className="loading-note">Syncing benchmark metadata...</span>}
+  </section>
 }
 
 function TaskBrief({ task, compact = false }: { task: JsonMap; compact?: boolean }) {
